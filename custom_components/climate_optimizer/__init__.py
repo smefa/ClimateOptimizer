@@ -15,7 +15,15 @@ type ClimateOptimizerConfigEntry = ConfigEntry[ClimateOptimizerCoordinator]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ClimateOptimizerConfigEntry) -> bool:
     coordinator = ClimateOptimizerCoordinator(hass, entry)
-    await coordinator.async_config_entry_first_refresh()
+    # Deliberately async_refresh(), not async_config_entry_first_refresh():
+    # the latter turns a failed first cycle (e.g. the outdoor sensor still
+    # being unavailable while HA is starting up) into ConfigEntryNotReady,
+    # which aborts setup before any entities are even created — the
+    # integration then looks like it failed to load at all. async_refresh()
+    # never raises; entities still get created below and report themselves
+    # unavailable via CoordinatorEntity.available until a cycle succeeds,
+    # which the coordinator keeps retrying on its normal schedule.
+    await coordinator.async_refresh()
 
     entry.runtime_data = coordinator
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))

@@ -48,6 +48,16 @@ class ActiveSwitch(ClimateOptimizerEntity, SwitchEntity, RestoreEntity):
     def is_on(self) -> bool:
         return self.coordinator.is_active
 
+    @property
+    def available(self) -> bool:
+        """Always controllable: this is a local flag, not fetched data.
+
+        Overrides CoordinatorEntity's default (tied to last_update_success)
+        so you can still flip learn mode on/off even while a required source
+        is unavailable and the sensors are showing as unavailable.
+        """
+        return True
+
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         last_state = await self.async_get_last_state()
