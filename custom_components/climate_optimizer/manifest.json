@@ -6,7 +6,6 @@
   "documentation": "https://github.com/smefa/ClimateOptimizer",
   "issue_tracker": "https://github.com/smefa/ClimateOptimizer/issues",
   "iot_class": "local_polling",
-  "homeassistant": "2024.12.0",
   "integration_type": "service",
   "requirements": [],
   "version": "0.1.0"
