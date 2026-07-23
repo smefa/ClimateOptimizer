@@ -8,6 +8,7 @@ units, and hands everything to the pure `heuristic.compute()` function.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
@@ -46,6 +47,12 @@ from .const import (
     DOMAIN,
 )
 from .heuristic import HeuristicInputs, HeuristicParams, HeuristicResult, compute
+from .rc_model import (
+    RCModelInputs,
+    RCModelResult,
+    initial_state as rc_initial_state,
+    step as rc_step,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -83,6 +90,14 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             name=DOMAIN,
             update_interval=timedelta(minutes=interval_minutes),
         )
+        # --- Phase 2 shadow-mode RC estimator (purely additive) --------------
+        # Persistent estimator state and the latest result live as instance
+        # attributes; the RC model NEVER influences `data` (the HeuristicResult
+        # that drives compensated_outdoor_temp_c). Diagnostic sensors read
+        # `rc_result`.
+        self._rc_state = rc_initial_state()
+        self.rc_result: RCModelResult | None = None
+        self._rc_last_monotonic: float | None = None
 
     def _params(self) -> HeuristicParams:
         entry = self.entry
@@ -252,4 +267,43 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             current_price=current_price,
             price_data_available=price_ok,
         )
-        return compute(inputs, self._params())
+        result = compute(inputs, self._params())
+
+        # Shadow mode: feed the RC estimator but never let it affect `result`.
+        self._update_rc_shadow_model(result)
+
+        return result
+
+    def _update_rc_shadow_model(self, result: HeuristicResult) -> None:
+        """Advance the shadow RC estimator with this cycle's data.
+
+        Strictly additive: any failure here is swallowed (logged at debug) so a
+        bug in the experimental estimator can never break the real output. The
+        proxy control signal is the compensation delta the heuristic actually
+        applied (compensated - raw); the actual outdoor temperature is the
+        envelope driver.
+        """
+        try:
+            now = time.monotonic()
+            if self._rc_last_monotonic is None:
+                # No previous cycle to measure against; the estimator treats
+                # this as a cold-start anchor regardless of the dt passed.
+                dt_seconds = self.update_interval.total_seconds()
+            else:
+                dt_seconds = now - self._rc_last_monotonic
+            self._rc_last_monotonic = now
+
+            rc_inputs = RCModelInputs(
+                indoor_temp_c=result.indoor_temp_c,
+                indoor_data_available=result.indoor_data_available,
+                outdoor_temp_c=result.raw_outdoor_temp_c,
+                compensation_delta_c=(
+                    result.compensated_outdoor_temp_c - result.raw_outdoor_temp_c
+                ),
+                solar_effect=result.solar_effect,
+                dt_seconds=dt_seconds,
+            )
+            self._rc_state, self.rc_result = rc_step(self._rc_state, rc_inputs)
+            _LOGGER.debug("RC shadow model: %s", self.rc_result.reason)
+        except Exception as err:  # noqa: BLE001 - shadow mode must never break output
+            _LOGGER.warning("RC shadow model update failed (ignored): %s", err)

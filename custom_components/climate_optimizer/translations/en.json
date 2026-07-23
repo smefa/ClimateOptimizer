@@ -63,6 +63,21 @@
       },
       "price_shift_applied": {
         "name": "Price shift applied"
+      },
+      "rc_thermal_time_constant": {
+        "name": "RC model thermal time constant"
+      },
+      "rc_heat_pump_gain": {
+        "name": "RC model heat pump gain"
+      },
+      "rc_solar_gain": {
+        "name": "RC model solar gain"
+      },
+      "rc_model_confidence": {
+        "name": "RC model confidence"
+      },
+      "rc_prediction_error": {
+        "name": "RC model prediction error"
       }
     }
   }

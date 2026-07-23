@@ -9,7 +9,12 @@ from homeassistant.components.sensor import (
     SensorEntity,
     SensorStateClass,
 )
-from homeassistant.const import EntityCategory, UnitOfTemperature
+from homeassistant.const import (
+    PERCENTAGE,
+    EntityCategory,
+    UnitOfTemperature,
+    UnitOfTime,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -19,6 +24,7 @@ from . import ClimateOptimizerConfigEntry
 from .const import DOMAIN
 from .coordinator import ClimateOptimizerCoordinator
 from .heuristic import HeuristicResult
+from .rc_model import RCModelResult
 
 
 async def async_setup_entry(
@@ -32,6 +38,12 @@ async def async_setup_entry(
             CompensatedOutdoorTempSensor(coordinator, entry),
             IndoorTemperatureErrorSensor(coordinator, entry),
             PriceShiftAppliedSensor(coordinator, entry),
+            # Phase 2 shadow-mode RC model diagnostics (informational only).
+            RCThermalTimeConstantSensor(coordinator, entry),
+            RCHeatPumpGainSensor(coordinator, entry),
+            RCSolarGainSensor(coordinator, entry),
+            RCModelConfidenceSensor(coordinator, entry),
+            RCPredictionErrorSensor(coordinator, entry),
         ]
     )
 
@@ -126,3 +138,131 @@ class PriceShiftAppliedSensor(ClimateOptimizerEntity, SensorEntity):
     def native_value(self) -> float | None:
         result: HeuristicResult | None = self.coordinator.data
         return result.price_shift_applied_c if result else None
+
+
+class RCThermalTimeConstantSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic (shadow model): estimated thermal time constant tau = R*C.
+
+    Also carries the full RC-estimator result as attributes (reason string,
+    parameter estimates, accepted/rejected counts, covariance trace, etc.),
+    mirroring how the main sensor exposes the heuristic explanation. Note: R
+    and C are not separately identifiable from indoor-temperature dynamics
+    alone, so the identifiable time constant is reported instead.
+    """
+
+    _attr_translation_key = "rc_thermal_time_constant"
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.HOURS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_rc_thermal_time_constant"
+
+    @property
+    def native_value(self) -> float | None:
+        result: RCModelResult | None = self.coordinator.rc_result
+        if result is None or not (result.time_constant_h == result.time_constant_h):
+            return None
+        return round(result.time_constant_h, 2)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        result: RCModelResult | None = self.coordinator.rc_result
+        if result is None:
+            return {}
+        attrs = asdict(result)
+        attrs.pop("time_constant_h", None)
+        return attrs
+
+
+class RCHeatPumpGainSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic (shadow model): estimated effective heat-pump gain.
+
+    The C-normalised effect on indoor temperature per degC of compensation
+    delta the heuristic applies. Dimensionless proxy, not a physical power.
+    """
+
+    _attr_translation_key = "rc_heat_pump_gain"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_rc_heat_pump_gain"
+
+    @property
+    def native_value(self) -> float | None:
+        result: RCModelResult | None = self.coordinator.rc_result
+        return round(result.theta_gain, 4) if result else None
+
+
+class RCSolarGainSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic (shadow model): estimated solar gain coefficient."""
+
+    _attr_translation_key = "rc_solar_gain"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_rc_solar_gain"
+
+    @property
+    def native_value(self) -> float | None:
+        result: RCModelResult | None = self.coordinator.rc_result
+        return round(result.theta_solar, 4) if result else None
+
+
+class RCModelConfidenceSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic (shadow model): estimator maturity / confidence, 0-100%."""
+
+    _attr_translation_key = "rc_model_confidence"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_rc_model_confidence"
+
+    @property
+    def native_value(self) -> float | None:
+        result: RCModelResult | None = self.coordinator.rc_result
+        return round(result.confidence * 100.0, 1) if result else None
+
+
+class RCPredictionErrorSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic (shadow model): last-cycle indoor prediction error.
+
+    Actual indoor temperature this cycle minus what the model predicted for it
+    last cycle. The headline accuracy metric for the shadow estimator.
+    """
+
+    _attr_translation_key = "rc_prediction_error"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_rc_prediction_error"
+
+    @property
+    def native_value(self) -> float | None:
+        result: RCModelResult | None = self.coordinator.rc_result
+        if result is None or result.prediction_error_c is None:
+            return None
+        return round(result.prediction_error_c, 3)
