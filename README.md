@@ -18,6 +18,18 @@ integration/automation supports that).
 
 Everything is configured from the Home Assistant UI — no YAML.
 
+### Activation switch (learn mode by default)
+
+Each zone also gets a `switch.<name>_active` entity. **It defaults to off** —
+in this "learn mode" state, the sensor publishes the raw outdoor temperature
+unmodified (no compensation applied at all), while the heuristic (and the RC
+shadow model, below) keep computing normally in the background. The
+heuristic's actual recommendation is always visible as the
+`recommended_compensated_outdoor_temp_c` attribute, alongside an `active: true/false`
+flag, so you can watch what it *would* do before switching it on. Flip the
+switch on when you're ready to let it actually influence your heat pump. The
+switch's state is restored across Home Assistant restarts.
+
 ## Installation
 
 1. Add this repository to HACS as a custom repository (category: Integration),
@@ -47,10 +59,21 @@ in the options flow. The sensor's attributes include a per-term breakdown and a
 plain-language `reason` string so the output is always explainable.
 
 This is intentionally a simple, transparent heuristic, not a black-box model.
-A future phase will add an optional physics-based (RC network) thermal model
-with online parameter fitting and a proper multi-hour cost-optimizing
-controller — the current heuristic is structured so that can slot in later
-without breaking existing sensors/automations.
+
+## RC thermal model (Phase 2: shadow mode only)
+
+A grey-box RC thermal model, fit online from live data via recursive least
+squares, runs alongside the heuristic and exposes 5 diagnostic sensors
+(thermal time constant, heat-pump gain, solar gain, confidence, prediction
+error) — purely for observation. It never influences
+`compensated_outdoor_temp_c`; the heuristic above is still what actually runs.
+Because the activation switch gates what's *actually applied*, the model only
+learns heat-pump gain while the switch is on (it needs real excitation on
+that signal) — it can still learn the envelope time constant and solar gain
+from passive data while off. A future phase will use this model for a proper
+multi-hour cost-optimizing controller once it's proven accurate against real
+house data — the heuristic is structured so that can slot in later without
+breaking existing sensors/automations.
 
 ## License
 

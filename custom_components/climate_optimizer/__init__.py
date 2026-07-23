@@ -8,7 +8,7 @@ from homeassistant.core import HomeAssistant
 
 from .coordinator import ClimateOptimizerCoordinator
 
-PLATFORMS = [Platform.SENSOR]
+PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
 
 type ClimateOptimizerConfigEntry = ConfigEntry[ClimateOptimizerCoordinator]
 

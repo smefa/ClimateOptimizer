@@ -68,7 +68,15 @@ class ClimateOptimizerEntity(CoordinatorEntity[ClimateOptimizerCoordinator]):
 
 
 class CompensatedOutdoorTempSensor(ClimateOptimizerEntity, SensorEntity):
-    """The main output: the compensated outdoor temperature, fully explained."""
+    """The main output: the compensated outdoor temperature, fully explained.
+
+    While the activation switch (switch.py) is off ("learn mode"), this
+    publishes the raw outdoor temperature unmodified rather than the
+    heuristic's recommendation — the heuristic still runs every cycle
+    regardless, and its recommendation is always available via the
+    `recommended_compensated_outdoor_temp_c` attribute plus the `active` flag,
+    so you can preview what it would do before switching it on.
+    """
 
     _attr_translation_key = "compensated_outdoor_temperature"
     _attr_device_class = SensorDeviceClass.TEMPERATURE
@@ -84,7 +92,11 @@ class CompensatedOutdoorTempSensor(ClimateOptimizerEntity, SensorEntity):
     @property
     def native_value(self) -> float | None:
         result: HeuristicResult | None = self.coordinator.data
-        return result.compensated_outdoor_temp_c if result else None
+        if result is None:
+            return None
+        if not self.coordinator.is_active:
+            return result.raw_outdoor_temp_c
+        return result.compensated_outdoor_temp_c
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -92,7 +104,9 @@ class CompensatedOutdoorTempSensor(ClimateOptimizerEntity, SensorEntity):
         if result is None:
             return {}
         attrs = asdict(result)
-        attrs.pop("compensated_outdoor_temp_c", None)
+        recommended = attrs.pop("compensated_outdoor_temp_c")
+        attrs["recommended_compensated_outdoor_temp_c"] = recommended
+        attrs["active"] = self.coordinator.is_active
         return attrs
 
 

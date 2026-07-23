@@ -99,6 +99,17 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         self.rc_result: RCModelResult | None = None
         self._rc_last_monotonic: float | None = None
 
+        # --- Activation switch (learn mode vs live) ---------------------------
+        # Default OFF ("learn mode"): the compensated-temperature sensor
+        # publishes the raw outdoor temperature until the user explicitly
+        # switches this on, per switch.py (which restores the last state
+        # across restarts; this is only the pre-restore default). The
+        # heuristic itself always runs and is always exposed as the
+        # `recommended_compensated_outdoor_temp_c` attribute regardless of
+        # this flag — only the published *state* and what the RC model treats
+        # as "actually applied" are gated by it.
+        self.is_active: bool = False
+
     def _params(self) -> HeuristicParams:
         entry = self.entry
         return HeuristicParams(
@@ -277,11 +288,18 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
     def _update_rc_shadow_model(self, result: HeuristicResult) -> None:
         """Advance the shadow RC estimator with this cycle's data.
 
-        Strictly additive: any failure here is swallowed (logged at debug) so a
-        bug in the experimental estimator can never break the real output. The
-        proxy control signal is the compensation delta the heuristic actually
-        applied (compensated - raw); the actual outdoor temperature is the
-        envelope driver.
+        Strictly additive: any failure here is swallowed (logged at warning)
+        so a bug in the experimental estimator can never break the real
+        output. The proxy control signal is the compensation delta that was
+        *actually applied* this cycle — zero while `is_active` is False
+        (learn mode publishes the raw outdoor temperature, so nothing was
+        really applied), not the heuristic's hypothetical recommendation.
+        Feeding the model an intervention that never happened would corrupt
+        the heat-pump-gain estimate; the model can still learn the envelope
+        time constant and solar gain from passive data while inactive, it
+        just can't learn anything about heat-pump gain without real
+        excitation on that channel. The actual outdoor temperature is always
+        the envelope driver, active or not.
         """
         try:
             now = time.monotonic()
@@ -293,13 +311,16 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 dt_seconds = now - self._rc_last_monotonic
             self._rc_last_monotonic = now
 
+            applied_delta_c = (
+                (result.compensated_outdoor_temp_c - result.raw_outdoor_temp_c)
+                if self.is_active
+                else 0.0
+            )
             rc_inputs = RCModelInputs(
                 indoor_temp_c=result.indoor_temp_c,
                 indoor_data_available=result.indoor_data_available,
                 outdoor_temp_c=result.raw_outdoor_temp_c,
-                compensation_delta_c=(
-                    result.compensated_outdoor_temp_c - result.raw_outdoor_temp_c
-                ),
+                compensation_delta_c=applied_delta_c,
                 solar_effect=result.solar_effect,
                 dt_seconds=dt_seconds,
             )

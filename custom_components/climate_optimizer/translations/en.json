@@ -79,6 +79,11 @@
       "rc_prediction_error": {
         "name": "RC model prediction error"
       }
+    },
+    "switch": {
+      "active": {
+        "name": "Compensation active"
+      }
     }
   }
 }
