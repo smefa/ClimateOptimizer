@@ -39,6 +39,10 @@ def make_params(**overrides) -> HeuristicParams:
         price_threshold_start=1.5,
         price_threshold_max=3.0,
         price_max_drop_c=1.0,
+        # High enough that no existing test's raw_outdoor_temp_c (default
+        # 3.0) accidentally trips the heating cutoff; cutoff-specific tests
+        # override this explicitly.
+        heating_cutoff_c=100.0,
     )
     defaults.update(overrides)
     return HeuristicParams(**defaults)
@@ -260,3 +264,56 @@ def test_degenerate_price_thresholds_do_not_crash():
         ),
     )
     assert result.price_shift_applied_c == 1.0
+
+
+def test_heating_cutoff_engages_at_or_above_threshold():
+    result = compute(
+        make_inputs(raw_outdoor_temp_c=18.0, indoor_temp_c=19.0, wind_speed_ms=10.0),
+        make_params(heating_cutoff_c=18.0),
+    )
+    assert result.heating_cutoff_engaged is True
+    assert result.compensated_outdoor_temp_c == 18.0
+    assert result.indoor_adjustment_c == 0.0
+    assert result.wind_adjustment_c == 0.0
+    assert result.sun_adjustment_c == 0.0
+    assert result.price_adjustment_c == 0.0
+    assert "heating cutoff" in result.reason
+
+
+def test_heating_cutoff_not_engaged_below_threshold():
+    result = compute(
+        make_inputs(raw_outdoor_temp_c=17.9), make_params(heating_cutoff_c=18.0)
+    )
+    assert result.heating_cutoff_engaged is False
+
+
+def test_heating_cutoff_ignores_price_even_if_enabled():
+    result = compute(
+        make_inputs(
+            raw_outdoor_temp_c=20.0, current_price=100.0, price_data_available=True
+        ),
+        make_params(heating_cutoff_c=18.0, enable_price_compensation=True),
+    )
+    assert result.heating_cutoff_engaged is True
+    assert result.current_price is None
+    assert result.price_shift_applied_c == 0.0
+    assert result.effective_indoor_target_c == result.indoor_target_c
+
+
+def test_heating_cutoff_still_reports_real_solar_effect():
+    # solar_effect is a physical fact the RC shadow model relies on even when
+    # the heuristic isn't acting on it — must not be zeroed by the cutoff.
+    result = compute(
+        make_inputs(
+            raw_outdoor_temp_c=25.0,
+            sun_elevation_deg=90.0,
+            cloud_coverage_pct=0.0,
+            cloud_data_available=True,
+        ),
+        make_params(heating_cutoff_c=18.0),
+    )
+    assert result.heating_cutoff_engaged is True
+    assert result.solar_effect == 1.0
+    assert result.sun_adjustment_c == 0.0  # not acted on, but not hidden either
+    assert result.wind_data_available is True
+    assert result.cloud_data_available is True

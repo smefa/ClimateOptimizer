@@ -45,6 +45,7 @@
           "k_sun": "Sun coefficient (k_sun)",
           "comfort_min_c": "Comfort minimum temperature",
           "comfort_max_c": "Comfort maximum temperature",
+          "heating_cutoff_c": "Heating cutoff temperature (compensation suppressed at/above this)",
           "price_threshold_start": "Price where reduction starts",
           "price_threshold_max": "Price where reduction is at its maximum",
           "price_max_drop_c": "Maximum target drop from price",

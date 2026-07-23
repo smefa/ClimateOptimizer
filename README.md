@@ -84,6 +84,20 @@ plain-language `reason` string so the output is always explainable.
 
 This is intentionally a simple, transparent heuristic, not a black-box model.
 
+### Heating cutoff (summer guardrail)
+
+At or above a configurable outdoor temperature (`heating_cutoff_c`, default
+18°C, options flow), compensation is suppressed entirely and the sensor
+publishes the raw outdoor temperature unmodified — no indoor/wind/sun/price
+adjustment at all, not even partial credit. Without this, a cold indoor
+reading or a windy day could still push the compensated value *below* the raw
+temperature even when it's already warm outside, which could trick the heat
+pump's own curve into calling for heat on a warm day. `heating_cutoff_engaged`
+is exposed as an attribute, and the `reason` string says so explicitly when it
+kicks in. Active cooling (a mirrored curve for reversible heat pumps) is
+intentionally out of scope — this only ever stops heating, it never starts
+cooling.
+
 ## RC thermal model (Phase 2: shadow mode only)
 
 A grey-box RC thermal model, fit online from live data via recursive least

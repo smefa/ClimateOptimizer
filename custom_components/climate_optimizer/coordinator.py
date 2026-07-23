@@ -21,6 +21,7 @@ from .const import (
     CONF_COMFORT_MAX_C,
     CONF_COMFORT_MIN_C,
     CONF_ENABLE_PRICE_COMPENSATION,
+    CONF_HEATING_CUTOFF_C,
     CONF_INDOOR_TARGET_TEMPERATURE,
     CONF_INDOOR_TEMP_SENSOR,
     CONF_K_INDOOR,
@@ -36,6 +37,7 @@ from .const import (
     DEFAULT_COMFORT_MAX_C,
     DEFAULT_COMFORT_MIN_C,
     DEFAULT_ENABLE_PRICE_COMPENSATION,
+    DEFAULT_HEATING_CUTOFF_C,
     DEFAULT_INDOOR_TARGET_TEMPERATURE,
     DEFAULT_K_INDOOR,
     DEFAULT_K_SUN,
@@ -170,6 +172,9 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             ),
             price_max_drop_c=_entry_value(
                 entry, CONF_PRICE_MAX_DROP_C, DEFAULT_PRICE_MAX_DROP_C
+            ),
+            heating_cutoff_c=_entry_value(
+                entry, CONF_HEATING_CUTOFF_C, DEFAULT_HEATING_CUTOFF_C
             ),
         )
 

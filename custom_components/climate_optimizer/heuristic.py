@@ -56,6 +56,7 @@ class HeuristicParams:
     price_threshold_start: float
     price_threshold_max: float
     price_max_drop_c: float
+    heating_cutoff_c: float
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,7 @@ class HeuristicResult:
     current_price: float | None
     price_shift_applied_c: float
     price_data_available: bool
+    heating_cutoff_engaged: bool
     reason: str
     model_version: str = MODEL_VERSION
     # Reserved for a future RC-model/MPC controller. Always None for the
@@ -98,6 +100,50 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
     are still available), which is a safe default: it's the same "no
     compensation" behavior the heat pump's own curve would apply on its own.
     """
+    # solar_effect is a physical fact (how much passive solar gain is
+    # happening right now), not a heuristic decision — compute it
+    # unconditionally, before the heating-cutoff branch below, so the RC
+    # shadow model (which reads it off the result regardless of cutoff
+    # state) always sees reality rather than a zeroed value on warm days.
+    cloud_fraction = (inputs.cloud_coverage_pct or 0.0) / 100.0
+    solar_effect = max(0.0, sin(radians(inputs.sun_elevation_deg))) * (
+        1.0 - cloud_fraction
+    )
+
+    if inputs.raw_outdoor_temp_c >= params.heating_cutoff_c:
+        # Summer guardrail: above the cutoff, suppress compensation
+        # entirely rather than letting indoor/wind/price terms push the
+        # published value below the raw reading — which could otherwise
+        # trick the heat pump's own curve into thinking it's colder than
+        # it is and calling for heat on a warm day. Full passthrough, no
+        # partial credit for any term.
+        return HeuristicResult(
+            compensated_outdoor_temp_c=inputs.raw_outdoor_temp_c,
+            raw_outdoor_temp_c=inputs.raw_outdoor_temp_c,
+            indoor_temp_c=inputs.indoor_temp_c,
+            indoor_data_available=inputs.indoor_data_available,
+            indoor_target_c=params.indoor_target_c,
+            effective_indoor_target_c=params.indoor_target_c,
+            indoor_adjustment_c=0.0,
+            wind_adjustment_c=0.0,
+            sun_adjustment_c=0.0,
+            price_adjustment_c=0.0,
+            wind_speed_ms=inputs.wind_speed_ms,
+            wind_data_available=inputs.wind_data_available,
+            cloud_coverage_pct=inputs.cloud_coverage_pct,
+            cloud_data_available=inputs.cloud_data_available,
+            solar_effect=solar_effect,
+            current_price=None,
+            price_shift_applied_c=0.0,
+            price_data_available=inputs.price_data_available,
+            heating_cutoff_engaged=True,
+            reason=(
+                f"Raw outdoor {inputs.raw_outdoor_temp_c:.1f}°C ≥ heating cutoff "
+                f"{params.heating_cutoff_c:.1f}°C; compensation suppressed, "
+                f"publishing raw temperature unmodified"
+            ),
+        )
+
     if inputs.indoor_data_available and inputs.indoor_temp_c is not None:
         indoor_adjustment_c = -params.k_indoor * (
             params.indoor_target_c - inputs.indoor_temp_c
@@ -105,11 +151,6 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
     else:
         indoor_adjustment_c = 0.0
     wind_adjustment_c = -params.k_wind * inputs.wind_speed_ms
-
-    cloud_fraction = (inputs.cloud_coverage_pct or 0.0) / 100.0
-    solar_effect = max(0.0, sin(radians(inputs.sun_elevation_deg))) * (
-        1.0 - cloud_fraction
-    )
     sun_adjustment_c = params.k_sun * solar_effect
 
     current_price = (
@@ -191,5 +232,6 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         current_price=current_price,
         price_shift_applied_c=price_shift_c,
         price_data_available=inputs.price_data_available,
+        heating_cutoff_engaged=False,
         reason=reason,
     )

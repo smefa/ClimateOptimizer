@@ -19,6 +19,7 @@ from .const import (
     CONF_COMFORT_MAX_C,
     CONF_COMFORT_MIN_C,
     CONF_ENABLE_PRICE_COMPENSATION,
+    CONF_HEATING_CUTOFF_C,
     CONF_INDOOR_TARGET_TEMPERATURE,
     CONF_INDOOR_TEMP_SENSOR,
     CONF_K_INDOOR,
@@ -34,6 +35,7 @@ from .const import (
     DEFAULT_COMFORT_MAX_C,
     DEFAULT_COMFORT_MIN_C,
     DEFAULT_ENABLE_PRICE_COMPENSATION,
+    DEFAULT_HEATING_CUTOFF_C,
     DEFAULT_INDOOR_TARGET_TEMPERATURE,
     DEFAULT_K_INDOOR,
     DEFAULT_K_SUN,
@@ -181,6 +183,14 @@ class ClimateOptimizerOptionsFlow(config_entries.OptionsFlow):
                 ): selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=5, max=30, step=0.5, unit_of_measurement="°C", mode="box"
+                    )
+                ),
+                vol.Required(
+                    CONF_HEATING_CUTOFF_C,
+                    default=current.get(CONF_HEATING_CUTOFF_C, DEFAULT_HEATING_CUTOFF_C),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=5, max=25, step=0.5, unit_of_measurement="°C", mode="box"
                     )
                 ),
                 vol.Required(
