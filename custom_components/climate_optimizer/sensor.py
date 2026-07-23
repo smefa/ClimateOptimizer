@@ -36,6 +36,8 @@ async def async_setup_entry(
     async_add_entities(
         [
             CompensatedOutdoorTempSensor(coordinator, entry),
+            IndoorTemperatureSensor(coordinator, entry),
+            OutdoorTemperatureSensor(coordinator, entry),
             IndoorTemperatureErrorSensor(coordinator, entry),
             PriceShiftAppliedSensor(coordinator, entry),
             StatusSensor(coordinator, entry),
@@ -109,6 +111,50 @@ class CompensatedOutdoorTempSensor(ClimateOptimizerEntity, SensorEntity):
         attrs["recommended_compensated_outdoor_temp_c"] = recommended
         attrs["active"] = self.coordinator.is_active
         return attrs
+
+
+class IndoorTemperatureSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic: the real indoor temperature reading, for easy graphing
+    alongside the compensated value without digging into attributes."""
+
+    _attr_translation_key = "indoor_temperature"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_indoor_temperature"
+
+    @property
+    def native_value(self) -> float | None:
+        result: HeuristicResult | None = self.coordinator.data
+        return result.indoor_temp_c if result else None
+
+
+class OutdoorTemperatureSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic: the real (raw, uncompensated) outdoor temperature
+    reading, for easy graphing alongside the compensated value."""
+
+    _attr_translation_key = "outdoor_temperature"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_outdoor_temperature"
+
+    @property
+    def native_value(self) -> float | None:
+        result: HeuristicResult | None = self.coordinator.data
+        return result.raw_outdoor_temp_c if result else None
 
 
 class IndoorTemperatureErrorSensor(ClimateOptimizerEntity, SensorEntity):

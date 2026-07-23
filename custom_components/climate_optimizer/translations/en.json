@@ -59,6 +59,12 @@
       "compensated_outdoor_temperature": {
         "name": "Compensated outdoor temperature"
       },
+      "indoor_temperature": {
+        "name": "Indoor temperature"
+      },
+      "outdoor_temperature": {
+        "name": "Outdoor temperature"
+      },
       "indoor_temperature_error": {
         "name": "Indoor temperature error"
       },
