@@ -1,0 +1,69 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up ClimateOptimizer",
+        "description": "Pick the sensors this zone should use. All coefficients and comfort bounds can be tuned later via Configure.",
+        "data": {
+          "name": "Name",
+          "indoor_temp_sensor": "Indoor temperature sensor",
+          "outdoor_temp_sensor": "Outdoor temperature sensor",
+          "weather_entity": "Weather entity (forecast: wind and sun)",
+          "nordpool_price_entity": "Nordpool price sensor (optional)",
+          "indoor_target_temperature": "Indoor target temperature"
+        }
+      },
+      "reconfigure": {
+        "title": "Reconfigure ClimateOptimizer",
+        "description": "Change the sensors this zone uses.",
+        "data": {
+          "name": "Name",
+          "indoor_temp_sensor": "Indoor temperature sensor",
+          "outdoor_temp_sensor": "Outdoor temperature sensor",
+          "weather_entity": "Weather entity (forecast: wind and sun)",
+          "nordpool_price_entity": "Nordpool price sensor (optional)",
+          "indoor_target_temperature": "Indoor target temperature"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "A ClimateOptimizer zone for this indoor sensor already exists.",
+      "reconfigure_successful": "Reconfiguration was successful."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "ClimateOptimizer options",
+        "description": "Tune how the compensated outdoor temperature is computed. Changes apply immediately.",
+        "data": {
+          "indoor_target_temperature": "Indoor target temperature",
+          "nordpool_price_entity": "Nordpool price sensor (optional)",
+          "enable_price_compensation": "Lower target during expensive price periods",
+          "k_indoor": "Indoor error coefficient (k_indoor)",
+          "k_wind": "Wind coefficient (k_wind)",
+          "k_sun": "Sun coefficient (k_sun)",
+          "comfort_min_c": "Comfort minimum temperature",
+          "comfort_max_c": "Comfort maximum temperature",
+          "price_threshold_start": "Price where reduction starts",
+          "price_threshold_max": "Price where reduction is at its maximum",
+          "price_max_drop_c": "Maximum target drop from price",
+          "update_interval_minutes": "Update interval (minutes)"
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "compensated_outdoor_temperature": {
+        "name": "Compensated outdoor temperature"
+      },
+      "indoor_temperature_error": {
+        "name": "Indoor temperature error"
+      },
+      "price_shift_applied": {
+        "name": "Price shift applied"
+      }
+    }
+  }
+}
