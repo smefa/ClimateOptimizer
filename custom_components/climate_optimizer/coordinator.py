@@ -110,6 +110,15 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # as "actually applied" are gated by it.
         self.is_active: bool = False
 
+    @property
+    def price_configured(self) -> bool:
+        """Whether a Nordpool price entity was ever set, regardless of
+        whether the price *feature* is currently enabled. Used by the status
+        sensor to avoid flagging price as "degraded" when it was simply never
+        configured in the first place.
+        """
+        return bool(_entry_value(self.entry, CONF_NORDPOOL_PRICE_ENTITY, None))
+
     def _params(self) -> HeuristicParams:
         entry = self.entry
         return HeuristicParams(

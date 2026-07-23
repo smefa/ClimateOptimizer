@@ -30,6 +30,18 @@ flag, so you can watch what it *would* do before switching it on. Flip the
 switch on when you're ready to let it actually influence your heat pump. The
 switch's state is restored across Home Assistant restarts.
 
+### Status sensor
+
+`sensor.<name>_status` reports `ok`, `degraded`, or `error`, with attributes
+breaking down each source (`outdoor_sensor_ok`, `indoor_sensor_ok`,
+`weather_forecast_ok`, `price_ok` if configured, `last_error`). `error` means
+the outdoor sensor (the one required source) is currently unavailable and the
+main sensor's value has gone stale; `degraded` means the update is succeeding
+but a soft-degraded source (indoor sensor, weather forecast, or price) is
+currently down. Unlike every other entity here, this one is always available
+— its whole job is to report problems, including when everything else would
+otherwise show unavailable.
+
 ## Installation
 
 1. Add this repository to HACS as a custom repository (category: Integration),

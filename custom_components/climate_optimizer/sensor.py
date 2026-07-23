@@ -38,6 +38,7 @@ async def async_setup_entry(
             CompensatedOutdoorTempSensor(coordinator, entry),
             IndoorTemperatureErrorSensor(coordinator, entry),
             PriceShiftAppliedSensor(coordinator, entry),
+            StatusSensor(coordinator, entry),
             # Phase 2 shadow-mode RC model diagnostics (informational only).
             RCThermalTimeConstantSensor(coordinator, entry),
             RCHeatPumpGainSensor(coordinator, entry),
@@ -152,6 +153,66 @@ class PriceShiftAppliedSensor(ClimateOptimizerEntity, SensorEntity):
     def native_value(self) -> float | None:
         result: HeuristicResult | None = self.coordinator.data
         return result.price_shift_applied_c if result else None
+
+
+class StatusSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic: overall health, with a per-source breakdown.
+
+    "error" means the outdoor sensor (the one hard-required source) is
+    currently unavailable or the update cycle is otherwise failing entirely —
+    the main sensor's value has gone stale. "degraded" means the update cycle
+    is succeeding but a soft-degraded source (indoor sensor, weather
+    forecast, or price) is currently down, so that term is contributing
+    nothing this cycle. Always available, unlike every other entity here,
+    because its entire purpose is to report problems — including the case
+    where the coordinator itself is failing and everything else would
+    otherwise show unavailable.
+    """
+
+    _attr_translation_key = "status"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = ["ok", "degraded", "error"]
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_status"
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def native_value(self) -> str:
+        if not self.coordinator.last_update_success:
+            return "error"
+        result: HeuristicResult | None = self.coordinator.data
+        if result is None:
+            return "error"
+        if (
+            not result.indoor_data_available
+            or not result.forecast_data_available
+            or (self.coordinator.price_configured and not result.price_data_available)
+        ):
+            return "degraded"
+        return "ok"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        result: HeuristicResult | None = self.coordinator.data
+        last_error = self.coordinator.last_exception
+        attrs: dict = {
+            "outdoor_sensor_ok": self.coordinator.last_update_success,
+            "last_error": str(last_error) if last_error else None,
+        }
+        if result is not None:
+            attrs["indoor_sensor_ok"] = result.indoor_data_available
+            attrs["weather_forecast_ok"] = result.forecast_data_available
+            if self.coordinator.price_configured:
+                attrs["price_ok"] = result.price_data_available
+        return attrs
 
 
 class RCThermalTimeConstantSensor(ClimateOptimizerEntity, SensorEntity):

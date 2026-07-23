@@ -64,6 +64,14 @@
       "price_shift_applied": {
         "name": "Price shift applied"
       },
+      "status": {
+        "name": "Status",
+        "state": {
+          "ok": "OK",
+          "degraded": "Degraded",
+          "error": "Error"
+        }
+      },
       "rc_thermal_time_constant": {
         "name": "RC model thermal time constant"
       },
