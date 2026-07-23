@@ -144,6 +144,10 @@ class ClimateOptimizerOptionsFlow(config_entries.OptionsFlow):
                         min=10, max=30, step=0.5, unit_of_measurement="°C", mode="box"
                     )
                 ),
+                vol.Required(
+                    CONF_WEATHER_ENTITY,
+                    default=current.get(CONF_WEATHER_ENTITY),
+                ): selector.EntitySelector(selector.EntitySelectorConfig(domain="weather")),
                 vol.Optional(
                     CONF_NORDPOOL_PRICE_ENTITY,
                     default=current.get(CONF_NORDPOOL_PRICE_ENTITY),
