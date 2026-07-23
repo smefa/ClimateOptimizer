@@ -161,12 +161,13 @@ class StatusSensor(ClimateOptimizerEntity, SensorEntity):
     "error" means the outdoor sensor (the one hard-required source) is
     currently unavailable or the update cycle is otherwise failing entirely —
     the main sensor's value has gone stale. "degraded" means the update cycle
-    is succeeding but a soft-degraded source (indoor sensor, weather
-    forecast, or price) is currently down, so that term is contributing
-    nothing this cycle. Always available, unlike every other entity here,
-    because its entire purpose is to report problems — including the case
-    where the coordinator itself is failing and everything else would
-    otherwise show unavailable.
+    is succeeding but a soft-degraded source (indoor sensor, wind forecast,
+    cloud/sun forecast, or price) is currently down, so that term is
+    contributing nothing this cycle. Wind and cloud/sun are tracked
+    separately since not every weather integration provides both. Always
+    available, unlike every other entity here, because its entire purpose is
+    to report problems — including the case where the coordinator itself is
+    failing and everything else would otherwise show unavailable.
     """
 
     _attr_translation_key = "status"
@@ -193,7 +194,8 @@ class StatusSensor(ClimateOptimizerEntity, SensorEntity):
             return "error"
         if (
             not result.indoor_data_available
-            or not result.forecast_data_available
+            or not result.wind_data_available
+            or not result.cloud_data_available
             or (self.coordinator.price_configured and not result.price_data_available)
         ):
             return "degraded"
@@ -209,7 +211,8 @@ class StatusSensor(ClimateOptimizerEntity, SensorEntity):
         }
         if result is not None:
             attrs["indoor_sensor_ok"] = result.indoor_data_available
-            attrs["weather_forecast_ok"] = result.forecast_data_available
+            attrs["wind_forecast_ok"] = result.wind_data_available
+            attrs["cloud_sun_forecast_ok"] = result.cloud_data_available
             if self.coordinator.price_configured:
                 attrs["price_ok"] = result.price_data_available
         return attrs

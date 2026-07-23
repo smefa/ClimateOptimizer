@@ -50,9 +50,10 @@ def make_inputs(**overrides) -> HeuristicInputs:
         indoor_data_available=True,
         raw_outdoor_temp_c=3.0,
         wind_speed_ms=0.0,
+        wind_data_available=True,
         sun_elevation_deg=0.0,
         cloud_coverage_pct=0.0,
-        forecast_data_available=True,
+        cloud_data_available=True,
         current_price=None,
         price_data_available=False,
     )
@@ -103,6 +104,35 @@ def test_sun_below_horizon_has_no_effect():
     result = compute(make_inputs(sun_elevation_deg=-10.0), make_params())
     assert result.solar_effect == 0.0
     assert result.sun_adjustment_c == 0.0
+
+
+def test_wind_forecast_unavailable_is_flagged_and_noted_in_reason():
+    result = compute(
+        make_inputs(wind_speed_ms=0.0, wind_data_available=False), make_params()
+    )
+    assert result.wind_data_available is False
+    assert "wind forecast unavailable" in result.reason
+
+
+def test_cloud_forecast_unavailable_is_flagged_and_noted_in_reason():
+    result = compute(
+        make_inputs(cloud_coverage_pct=None, cloud_data_available=False),
+        make_params(),
+    )
+    assert result.cloud_data_available is False
+    assert "cloud/sun forecast unavailable" in result.reason
+
+
+def test_wind_and_cloud_available_are_independent_flags():
+    # Wind missing shouldn't affect the cloud flag or vice versa.
+    result = compute(
+        make_inputs(wind_data_available=False, cloud_data_available=True),
+        make_params(),
+    )
+    assert result.wind_data_available is False
+    assert result.cloud_data_available is True
+    assert "wind forecast unavailable" in result.reason
+    assert "cloud/sun forecast unavailable" not in result.reason
 
 
 def test_price_disabled_ignores_price_even_if_data_available():

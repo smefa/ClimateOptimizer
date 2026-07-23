@@ -202,13 +202,22 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         unit = state.attributes.get("unit_of_measurement", UnitOfTemperature.CELSIUS)
         return TemperatureConverter.convert(value, unit, UnitOfTemperature.CELSIUS)
 
-    async def _read_forecast(self) -> tuple[float, float | None, bool]:
-        """Return (wind_speed_ms, cloud_coverage_pct, forecast_data_available).
+    async def _read_forecast(
+        self,
+    ) -> tuple[float, bool, float | None, bool]:
+        """Return (wind_speed_ms, wind_data_available, cloud_coverage_pct, cloud_data_available).
 
+        Wind and cloud/sun are tracked independently: not every weather
+        integration provides both, and a missing wind_speed value shouldn't
+        cause a perfectly good cloud_coverage reading to be discarded (or
+        vice versa) — previously it did, and the combined flag also silently
+        treated "no cloud data" as if it were fine. Tries the hourly forecast
+        first, then daily, filling in whichever field(s) are still missing
+        from whichever type provides them, and stops once both are found.
         The weather entity is enrichment only now (raw outdoor temperature
         comes from a dedicated sensor), so any failure here — including the
-        entity itself being unavailable — soft-degrades to no wind/sun
-        adjustment rather than failing the whole update.
+        entity itself being unavailable — soft-degrades rather than failing
+        the whole update.
         """
         weather_entity_id = _entry_value(self.entry, CONF_WEATHER_ENTITY, None)
         weather_state = self.hass.states.get(weather_entity_id)
@@ -217,9 +226,14 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 "Weather entity %s is unavailable; continuing without wind/sun forecast data",
                 weather_entity_id,
             )
-            return 0.0, None, False
+            return 0.0, False, None, False
+
+        wind_speed_ms: float | None = None
+        cloud_coverage_pct: float | None = None
 
         for forecast_type in ("hourly", "daily"):
+            if wind_speed_ms is not None and cloud_coverage_pct is not None:
+                break
             try:
                 response = await self.hass.services.async_call(
                     "weather",
@@ -232,21 +246,19 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 if not forecast:
                     continue
                 first = forecast[0]
-                wind_speed = first.get("wind_speed")
-                cloud_coverage = first.get("cloud_coverage")
-                if wind_speed is None:
-                    continue
-                wind_unit = weather_state.attributes.get(
-                    "wind_speed_unit", UnitOfSpeed.METERS_PER_SECOND
-                )
-                wind_speed_ms = SpeedConverter.convert(
-                    float(wind_speed), wind_unit, UnitOfSpeed.METERS_PER_SECOND
-                )
-                return (
-                    wind_speed_ms,
-                    float(cloud_coverage) if cloud_coverage is not None else None,
-                    True,
-                )
+                if wind_speed_ms is None:
+                    raw_wind = first.get("wind_speed")
+                    if raw_wind is not None:
+                        wind_unit = weather_state.attributes.get(
+                            "wind_speed_unit", UnitOfSpeed.METERS_PER_SECOND
+                        )
+                        wind_speed_ms = SpeedConverter.convert(
+                            float(raw_wind), wind_unit, UnitOfSpeed.METERS_PER_SECOND
+                        )
+                if cloud_coverage_pct is None:
+                    raw_cloud = first.get("cloud_coverage")
+                    if raw_cloud is not None:
+                        cloud_coverage_pct = float(raw_cloud)
             except Exception as err:  # noqa: BLE001 - soft-degrade on any forecast failure
                 _LOGGER.debug(
                     "Forecast type %s unavailable for %s: %s",
@@ -254,11 +266,27 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
                     weather_entity_id,
                     err,
                 )
-        _LOGGER.warning(
-            "Could not retrieve wind/cloud forecast for %s; continuing without it",
-            weather_entity_id,
+
+        wind_data_available = wind_speed_ms is not None
+        cloud_data_available = cloud_coverage_pct is not None
+        if not wind_data_available:
+            _LOGGER.warning(
+                "Could not retrieve a wind forecast for %s; wind adjustment "
+                "will contribute 0 this cycle",
+                weather_entity_id,
+            )
+        if not cloud_data_available:
+            _LOGGER.warning(
+                "Could not retrieve a cloud/sun forecast for %s; solar term "
+                "will assume clear sky this cycle",
+                weather_entity_id,
+            )
+        return (
+            wind_speed_ms if wind_speed_ms is not None else 0.0,
+            wind_data_available,
+            cloud_coverage_pct,
+            cloud_data_available,
         )
-        return 0.0, None, False
 
     def _read_sun_elevation(self) -> float:
         sun_state = self.hass.states.get("sun.sun")
@@ -290,7 +318,12 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
     async def _async_update_data(self) -> HeuristicResult:
         raw_outdoor_temp_c = self._read_raw_outdoor_temp_c()
         indoor_temp_c, indoor_ok = self._read_indoor_temp_c()
-        wind_speed_ms, cloud_coverage_pct, forecast_ok = await self._read_forecast()
+        (
+            wind_speed_ms,
+            wind_ok,
+            cloud_coverage_pct,
+            cloud_ok,
+        ) = await self._read_forecast()
         sun_elevation_deg = self._read_sun_elevation()
         current_price, price_ok = self._read_price()
 
@@ -299,9 +332,10 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             indoor_data_available=indoor_ok,
             raw_outdoor_temp_c=raw_outdoor_temp_c,
             wind_speed_ms=wind_speed_ms,
+            wind_data_available=wind_ok,
             sun_elevation_deg=sun_elevation_deg,
             cloud_coverage_pct=cloud_coverage_pct,
-            forecast_data_available=forecast_ok,
+            cloud_data_available=cloud_ok,
             current_price=current_price,
             price_data_available=price_ok,
         )

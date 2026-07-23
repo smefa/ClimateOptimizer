@@ -34,9 +34,10 @@ class HeuristicInputs:
     indoor_data_available: bool
     raw_outdoor_temp_c: float
     wind_speed_ms: float
+    wind_data_available: bool
     sun_elevation_deg: float
     cloud_coverage_pct: float | None
-    forecast_data_available: bool
+    cloud_data_available: bool
     current_price: float | None
     price_data_available: bool
 
@@ -72,12 +73,13 @@ class HeuristicResult:
     sun_adjustment_c: float
     price_adjustment_c: float
     wind_speed_ms: float
+    wind_data_available: bool
     cloud_coverage_pct: float | None
+    cloud_data_available: bool
     solar_effect: float
     current_price: float | None
     price_shift_applied_c: float
     price_data_available: bool
-    forecast_data_available: bool
     reason: str
     model_version: str = MODEL_VERSION
     # Reserved for a future RC-model/MPC controller. Always None for the
@@ -152,10 +154,14 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         )
     else:
         reason = "Indoor sensor unavailable, compensation skipped for this term; "
-    reason += (
-        f"wind {inputs.wind_speed_ms:.1f} m/s → {wind_adjustment_c:+.1f}°C; "
-        f"sun {solar_effect * 100:.0f}% → {sun_adjustment_c:+.1f}°C"
-    )
+    if inputs.wind_data_available:
+        reason += f"wind {inputs.wind_speed_ms:.1f} m/s → {wind_adjustment_c:+.1f}°C; "
+    else:
+        reason += "wind forecast unavailable, treated as calm; "
+    if inputs.cloud_data_available:
+        reason += f"sun {solar_effect * 100:.0f}% → {sun_adjustment_c:+.1f}°C"
+    else:
+        reason += f"cloud/sun forecast unavailable, assumed clear sky → {sun_adjustment_c:+.1f}°C"
     if current_price is not None:
         reason += (
             f"; price {current_price:.2f} → target {effective_indoor_target_c:.1f}°C "
@@ -178,11 +184,12 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         sun_adjustment_c=sun_adjustment_c,
         price_adjustment_c=price_adjustment_c,
         wind_speed_ms=inputs.wind_speed_ms,
+        wind_data_available=inputs.wind_data_available,
         cloud_coverage_pct=inputs.cloud_coverage_pct,
+        cloud_data_available=inputs.cloud_data_available,
         solar_effect=solar_effect,
         current_price=current_price,
         price_shift_applied_c=price_shift_c,
         price_data_available=inputs.price_data_available,
-        forecast_data_available=inputs.forecast_data_available,
         reason=reason,
     )
