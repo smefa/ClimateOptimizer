@@ -34,13 +34,24 @@ switch's state is restored across Home Assistant restarts.
 
 `sensor.<name>_status` reports `ok`, `degraded`, or `error`, with attributes
 breaking down each source (`outdoor_sensor_ok`, `indoor_sensor_ok`,
-`weather_forecast_ok`, `price_ok` if configured, `last_error`). `error` means
-the outdoor sensor (the one required source) is currently unavailable and the
-main sensor's value has gone stale; `degraded` means the update is succeeding
-but a soft-degraded source (indoor sensor, weather forecast, or price) is
-currently down. Unlike every other entity here, this one is always available
+`wind_forecast_ok`, `cloud_sun_forecast_ok`, `price_ok` if configured,
+`last_error`). `error` means the outdoor sensor (the one required source) is
+currently unavailable and the main sensor's value has gone stale; `degraded`
+means the update is succeeding but a soft-degraded source (indoor sensor,
+wind forecast, cloud/sun forecast, or price) is currently down. Wind and
+cloud/sun are tracked separately since not every weather integration
+provides both. Unlike every other entity here, this one is always available
 — its whole job is to report problems, including when everything else would
 otherwise show unavailable.
+
+### Indoor target temperature
+
+`number.<name>_indoor_target_temperature` lets you adjust the target live —
+from a dashboard, a schedule, or an automation (e.g. lower it at night or
+when away) — without touching the options dialog. It's backed by an
+in-memory value rather than a config option, specifically so changing it
+doesn't trigger a full reload (which would otherwise reset the RC model's
+learning progress every time). Its state is restored across restarts.
 
 ## Installation
 
@@ -52,7 +63,8 @@ otherwise show unavailable.
    sensor entity — used as the current-temperature baseline, since it's
    generally more accurate than a weather service's estimate), a weather
    entity (used only for its wind/cloud forecast), an optional Nordpool price
-   entity, and your target indoor temperature.
+   entity, and a starting target indoor temperature (adjustable afterward via
+   the `number.<name>_indoor_target_temperature` entity, not this dialog).
 5. Tune coefficients, comfort bounds, and the price feature later via the
    integration's **Configure** (options) dialog — no reinstall needed.
 

@@ -131,19 +131,13 @@ class ClimateOptimizerOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(data=user_input)
 
+        # Indoor target temperature is intentionally not here: it's a
+        # number.* entity now (see number.py) so it can be adjusted live
+        # from a dashboard/automation without triggering a full entry
+        # reload. This flow only seeds its initial value at first setup.
         current = {**self.config_entry.data, **self.config_entry.options}
         schema = vol.Schema(
             {
-                vol.Required(
-                    CONF_INDOOR_TARGET_TEMPERATURE,
-                    default=current.get(
-                        CONF_INDOOR_TARGET_TEMPERATURE, DEFAULT_INDOOR_TARGET_TEMPERATURE
-                    ),
-                ): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=10, max=30, step=0.5, unit_of_measurement="°C", mode="box"
-                    )
-                ),
                 vol.Required(
                     CONF_WEATHER_ENTITY,
                     default=current.get(CONF_WEATHER_ENTITY),

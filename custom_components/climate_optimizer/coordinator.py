@@ -110,6 +110,19 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # as "actually applied" are gated by it.
         self.is_active: bool = False
 
+        # --- Indoor target temperature (live, number.py) ----------------------
+        # Backed by an in-memory coordinator value rather than a config entry
+        # option: changing an option triggers a full entry reload (see
+        # _async_update_listener in __init__.py), which would recreate the
+        # coordinator and wipe the RC estimator's learning progress on every
+        # nudge of the target temperature — exactly the kind of value people
+        # adjust often (day/night schedules, automations). Seeded from the
+        # config entry here for the very first run; number.py's RestoreEntity
+        # takes over after that, same pattern as `is_active` above.
+        self.indoor_target_c: float = _entry_value(
+            entry, CONF_INDOOR_TARGET_TEMPERATURE, DEFAULT_INDOOR_TARGET_TEMPERATURE
+        )
+
     def watched_entity_ids(self) -> list[str]:
         """Source entities whose state changes should trigger an immediate
         refresh, instead of waiting for the next polled interval.
@@ -140,9 +153,7 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
     def _params(self) -> HeuristicParams:
         entry = self.entry
         return HeuristicParams(
-            indoor_target_c=_entry_value(
-                entry, CONF_INDOOR_TARGET_TEMPERATURE, DEFAULT_INDOOR_TARGET_TEMPERATURE
-            ),
+            indoor_target_c=self.indoor_target_c,
             enable_price_compensation=_entry_value(
                 entry, CONF_ENABLE_PRICE_COMPENSATION, DEFAULT_ENABLE_PRICE_COMPENSATION
             ),

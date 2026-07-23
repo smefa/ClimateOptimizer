@@ -37,7 +37,6 @@
         "title": "ClimateOptimizer options",
         "description": "Tune how the compensated outdoor temperature is computed. Changes apply immediately.",
         "data": {
-          "indoor_target_temperature": "Indoor target temperature",
           "weather_entity": "Weather entity",
           "nordpool_price_entity": "Nordpool price sensor (optional)",
           "enable_price_compensation": "Lower target during expensive price periods",
@@ -92,6 +91,11 @@
     "switch": {
       "active": {
         "name": "Compensation active"
+      }
+    },
+    "number": {
+      "indoor_target_temperature": {
+        "name": "Indoor target temperature"
       }
     }
   }

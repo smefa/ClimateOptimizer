@@ -9,7 +9,7 @@ from homeassistant.helpers.event import async_track_state_change_event
 
 from .coordinator import ClimateOptimizerCoordinator
 
-PLATFORMS = [Platform.SENSOR, Platform.SWITCH]
+PLATFORMS = [Platform.NUMBER, Platform.SENSOR, Platform.SWITCH]
 
 type ClimateOptimizerConfigEntry = ConfigEntry[ClimateOptimizerCoordinator]
 
