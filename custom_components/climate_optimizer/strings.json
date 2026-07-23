@@ -8,7 +8,7 @@
           "name": "Name",
           "indoor_temp_sensor": "Indoor temperature sensor",
           "outdoor_temp_sensor": "Outdoor temperature sensor",
-          "weather_entity": "Weather entity (forecast: wind and sun)",
+          "weather_entity": "Weather entity",
           "nordpool_price_entity": "Nordpool price sensor (optional)",
           "indoor_target_temperature": "Indoor target temperature"
         }
@@ -20,7 +20,7 @@
           "name": "Name",
           "indoor_temp_sensor": "Indoor temperature sensor",
           "outdoor_temp_sensor": "Outdoor temperature sensor",
-          "weather_entity": "Weather entity (forecast: wind and sun)",
+          "weather_entity": "Weather entity",
           "nordpool_price_entity": "Nordpool price sensor (optional)",
           "indoor_target_temperature": "Indoor target temperature"
         }
@@ -38,7 +38,7 @@
         "description": "Tune how the compensated outdoor temperature is computed. Changes apply immediately.",
         "data": {
           "indoor_target_temperature": "Indoor target temperature",
-          "weather_entity": "Weather entity (forecast: wind and sun)",
+          "weather_entity": "Weather entity",
           "nordpool_price_entity": "Nordpool price sensor (optional)",
           "enable_price_compensation": "Lower target during expensive price periods",
           "k_indoor": "Indoor error coefficient (k_indoor)",
