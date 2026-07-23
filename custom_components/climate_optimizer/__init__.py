@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, EventStateChangedData, HomeAssistant
+from homeassistant.helpers.event import async_track_state_change_event
 
 from .coordinator import ClimateOptimizerCoordinator
 
@@ -27,6 +28,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ClimateOptimizerConfigEn
 
     entry.runtime_data = coordinator
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
+
+    # Don't rely solely on the coordinator's own polling interval to notice
+    # a required/soft-degraded source recovering: react immediately to that
+    # source's own state changes too. See
+    # ClimateOptimizerCoordinator.watched_entity_ids for why.
+    watched = coordinator.watched_entity_ids()
+    if watched:
+
+        async def _async_source_state_changed(
+            event: Event[EventStateChangedData],
+        ) -> None:
+            await coordinator.async_request_refresh()
+
+        entry.async_on_unload(
+            async_track_state_change_event(hass, watched, _async_source_state_changed)
+        )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

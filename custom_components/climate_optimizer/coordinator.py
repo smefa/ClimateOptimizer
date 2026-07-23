@@ -110,6 +110,24 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # as "actually applied" are gated by it.
         self.is_active: bool = False
 
+    def watched_entity_ids(self) -> list[str]:
+        """Source entities whose state changes should trigger an immediate
+        refresh, instead of waiting for the next polled interval.
+
+        HA's DataUpdateCoordinator skips notifying entities on consecutive
+        identical failures (see homeassistant/helpers/update_coordinator.py),
+        so there's no external visibility into whether its background timer
+        is still quietly retrying. Rather than depend on that timing, we
+        react directly to the required/soft-degraded sources' own state
+        changes (in particular unavailable -> available) so recovery is fast
+        and doesn't depend on guessing the coordinator's internal schedule.
+        """
+        ids = [
+            _entry_value(self.entry, CONF_OUTDOOR_TEMP_SENSOR, None),
+            _entry_value(self.entry, CONF_INDOOR_TEMP_SENSOR, None),
+        ]
+        return [entity_id for entity_id in ids if entity_id]
+
     @property
     def price_configured(self) -> bool:
         """Whether a Nordpool price entity was ever set, regardless of
