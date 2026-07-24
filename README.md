@@ -235,9 +235,19 @@ only keep hourly aggregates — too coarse to properly re-fit the RC model or
 backtest an MPC change later. With this on, real history survives and can be
 replayed offline through a candidate model change without waiting for new
 live data. The resolved file path is shown on `sensor.<name>_status`'s
-`data_log_path` attribute whenever logging is on. Not included yet: full
-multi-hour forecast snapshots (needed to faithfully replay MPC's exact
-historical decisions, not just the RC model's) — a possible future addition.
+`data_log_path` attribute whenever logging is on.
+
+Whenever MPC actually runs a cycle, the record also embeds the exact
+multi-hour forecast it planned against (`mpc_forecast_price`,
+`mpc_forecast_outdoor_temp_c`, `mpc_forecast_wind_speed_ms`,
+`mpc_forecast_solar_effect`, plus `mpc_horizon_hours`/`mpc_step_hours` and
+`mpc_forecast_valid_steps`) — not just the realised/actual values. This
+matters because forecasts get revised over time; the realised outcome isn't
+a substitute for what was actually known at decision time, so faithfully
+replaying or backtesting a past MPC plan needs the forecast snapshot, not
+just hindsight. Logged at whatever `mpc_horizon_hours` is currently
+configured (not a separate fixed window), so it always matches what the
+live solver is actually doing.
 
 ## License
 

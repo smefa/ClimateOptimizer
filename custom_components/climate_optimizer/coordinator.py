@@ -144,6 +144,12 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # deliberate future decision wires it live. Wrapped in the same
         # try/except shadow-safety pattern as the RC model.
         self.mpc_result: MPCResult | None = None
+        # The forecast arrays actually used for the latest plan — kept
+        # separate from `mpc_result` (not exposed on any live sensor
+        # attribute, which stays lean) and read only by the opt-in data
+        # logger, so a full multi-hour forecast can be replayed offline
+        # later without bloating HA's recorder/entity state size.
+        self.mpc_forecasts: MPCForecasts | None = None
 
         # --- Activation switch (learn mode vs live) ---------------------------
         # Default OFF ("learn mode"): the compensated-temperature sensor
@@ -744,6 +750,7 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 wind_speed_ms=tuple(wind[:steps]),
                 valid_steps=min(price_valid, weather_valid),
             )
+            self.mpc_forecasts = forecasts
             self.mpc_result = mpc_plan(
                 result.indoor_temp_c,
                 self._mpc_model_params(self.rc_result),
@@ -803,6 +810,25 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
                     "mpc_status": self.mpc_result.status,
                     "mpc_trustworthy": self.mpc_result.trustworthy,
                     "mpc_recommended_delta_c": self.mpc_result.recommended_delta_c,
+                }
+            )
+        if self.mpc_forecasts is not None:
+            # The exact multi-hour forecast MPC planned against this cycle —
+            # needed to faithfully replay/backtest a past decision later,
+            # since forecasts get revised over time and the realised values
+            # aren't a substitute for what was actually known at the time.
+            # Logged at whatever mpc_horizon_hours/step is currently
+            # configured, not a separate fixed window (see README).
+            mpc_config = self._mpc_config()
+            record.update(
+                {
+                    "mpc_horizon_hours": mpc_config.horizon_hours,
+                    "mpc_step_hours": mpc_config.step_hours,
+                    "mpc_forecast_valid_steps": self.mpc_forecasts.valid_steps,
+                    "mpc_forecast_price": list(self.mpc_forecasts.price),
+                    "mpc_forecast_outdoor_temp_c": list(self.mpc_forecasts.outdoor_temp_c),
+                    "mpc_forecast_wind_speed_ms": list(self.mpc_forecasts.wind_speed_ms),
+                    "mpc_forecast_solar_effect": list(self.mpc_forecasts.solar_effect),
                 }
             )
         return record
