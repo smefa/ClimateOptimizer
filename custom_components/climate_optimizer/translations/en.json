@@ -51,7 +51,10 @@
           "price_max_drop_c": "Maximum target drop from price",
           "update_interval_minutes": "Update interval (minutes)",
           "enable_wind_rc": "Model wind sensitivity in the thermal model (advanced, shadow-mode only)",
-          "rc_wind_reference_ms": "Reference wind speed for the wind model"
+          "rc_wind_reference_ms": "Reference wind speed for the wind model",
+          "mpc_horizon_hours": "MPC planning horizon (advanced, advisory-only)",
+          "mpc_max_heating_delta_c": "MPC max heating authority (compensation delta)",
+          "mpc_min_confidence": "MPC minimum RC-model confidence to be trustworthy"
         }
       }
     }
@@ -98,6 +101,26 @@
       },
       "rc_prediction_error": {
         "name": "RC model prediction error"
+      },
+      "mpc_recommended_delta": {
+        "name": "MPC recommended compensation delta"
+      },
+      "mpc_status": {
+        "name": "MPC status",
+        "state": {
+          "ok": "OK",
+          "not_trustworthy": "Not yet trustworthy",
+          "infeasible": "Infeasible",
+          "no_forecast": "No forecast",
+          "no_data": "No data",
+          "degenerate": "Misconfigured"
+        }
+      },
+      "mpc_projected_savings": {
+        "name": "MPC projected savings"
+      },
+      "mpc_planned_next_temperature": {
+        "name": "MPC planned next indoor temperature"
       }
     },
     "switch": {

@@ -26,6 +26,9 @@ from .const import (
     CONF_K_INDOOR,
     CONF_K_SUN,
     CONF_K_WIND,
+    CONF_MPC_HORIZON_HOURS,
+    CONF_MPC_MAX_HEATING_DELTA_C,
+    CONF_MPC_MIN_CONFIDENCE,
     CONF_NORDPOOL_PRICE_ENTITY,
     CONF_OUTDOOR_TEMP_SENSOR,
     CONF_PRICE_MAX_DROP_C,
@@ -43,6 +46,9 @@ from .const import (
     DEFAULT_K_INDOOR,
     DEFAULT_K_SUN,
     DEFAULT_K_WIND,
+    DEFAULT_MPC_HORIZON_HOURS,
+    DEFAULT_MPC_MAX_HEATING_DELTA_C,
+    DEFAULT_MPC_MIN_CONFIDENCE,
     DEFAULT_PRICE_MAX_DROP_C,
     DEFAULT_PRICE_THRESHOLD_MAX,
     DEFAULT_PRICE_THRESHOLD_START,
@@ -250,6 +256,40 @@ class ClimateOptimizerOptionsFlow(config_entries.OptionsFlow):
                 ): selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=1, max=15, step=0.5, unit_of_measurement="m/s", mode="box"
+                    )
+                ),
+                # Advanced / experimental: the Phase 3 MPC planner (advisory /
+                # shadow-mode only). These never affect compensated_outdoor_temp_c,
+                # only the MPC diagnostic sensors. Horizon is how far ahead the
+                # plan looks; max heating delta is the planner's assumed control
+                # authority; min confidence is the RC-model maturity below which
+                # the plan is reported "not yet trustworthy".
+                vol.Required(
+                    CONF_MPC_HORIZON_HOURS,
+                    default=current.get(CONF_MPC_HORIZON_HOURS, DEFAULT_MPC_HORIZON_HOURS),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=6, max=48, step=1, unit_of_measurement="h", mode="box"
+                    )
+                ),
+                vol.Required(
+                    CONF_MPC_MAX_HEATING_DELTA_C,
+                    default=current.get(
+                        CONF_MPC_MAX_HEATING_DELTA_C, DEFAULT_MPC_MAX_HEATING_DELTA_C
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=1, max=20, step=0.5, unit_of_measurement="°C", mode="box"
+                    )
+                ),
+                vol.Required(
+                    CONF_MPC_MIN_CONFIDENCE,
+                    default=current.get(
+                        CONF_MPC_MIN_CONFIDENCE, DEFAULT_MPC_MIN_CONFIDENCE
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0, max=1, step=0.05, mode="box"
                     )
                 ),
             }

@@ -24,6 +24,7 @@ from . import ClimateOptimizerConfigEntry
 from .const import DOMAIN
 from .coordinator import ClimateOptimizerCoordinator
 from .heuristic import HeuristicResult
+from .mpc import MPCResult
 from .rc_model import RCModelResult
 
 
@@ -48,6 +49,11 @@ async def async_setup_entry(
             RCWindGainSensor(coordinator, entry),
             RCModelConfidenceSensor(coordinator, entry),
             RCPredictionErrorSensor(coordinator, entry),
+            # Phase 3 shadow/advisory-mode MPC diagnostics (informational only).
+            MPCRecommendedDeltaSensor(coordinator, entry),
+            MPCStatusSensor(coordinator, entry),
+            MPCProjectedSavingsSensor(coordinator, entry),
+            MPCPlannedNextTempSensor(coordinator, entry),
         ]
     )
 
@@ -417,3 +423,153 @@ class RCPredictionErrorSensor(ClimateOptimizerEntity, SensorEntity):
         if result is None or result.prediction_error_c is None:
             return None
         return round(result.prediction_error_c, 3)
+
+
+class MPCRecommendedDeltaSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic (MPC, advisory/shadow only): the recommended next-step
+    compensation delta from the receding-horizon plan.
+
+    ADVISORY ONLY — this never influences the compensated outdoor temperature;
+    the heuristic pipeline gated by switch.<name>_active is still the only thing
+    that controls anything. This sensor carries the full MPC result as
+    attributes: the plan's reason string, the binding constraint, projected
+    cost/savings, the predicted indoor-temperature trajectory, the full
+    per-step plan, the trustworthiness gate result, and explicit echoes of the
+    RC-model parameters (gain, tau, solar, wind if enabled) the plan was
+    actually computed from this cycle — for troubleshooting how a plan arose.
+    """
+
+    _attr_translation_key = "mpc_recommended_delta"
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_mpc_recommended_delta"
+
+    @property
+    def native_value(self) -> float | None:
+        result: MPCResult | None = self.coordinator.mpc_result
+        if result is None or result.recommended_delta_c is None:
+            return None
+        return round(result.recommended_delta_c, 2)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        result: MPCResult | None = self.coordinator.mpc_result
+        if result is None:
+            return {}
+        attrs = asdict(result)
+        attrs.pop("recommended_delta_c", None)  # already the state value
+        return attrs
+
+
+class MPCStatusSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic (MPC, advisory only): the planner's status / trustworthiness.
+
+    `ok` = a trustworthy plan; `not_trustworthy` = a plan was computed but the
+    underlying RC model isn't mature/plausible enough to rely on it yet;
+    `infeasible` = comfort bounds can't be held over the horizon (best-effort
+    plan returned); `no_forecast`/`no_data`/`degenerate` = missing inputs.
+    """
+
+    _attr_translation_key = "mpc_status"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = [
+        "ok",
+        "not_trustworthy",
+        "infeasible",
+        "no_forecast",
+        "no_data",
+        "degenerate",
+    ]
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_mpc_status"
+
+    @property
+    def native_value(self) -> str | None:
+        result: MPCResult | None = self.coordinator.mpc_result
+        return result.status if result else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        result: MPCResult | None = self.coordinator.mpc_result
+        if result is None:
+            return {}
+        return {
+            "trustworthy": result.trustworthy,
+            "binding_constraint": result.binding_constraint,
+            "forecast_valid_steps": result.forecast_valid_steps,
+            "steps_planned": result.steps_planned,
+            "horizon_hours": result.horizon_hours,
+            "confidence": result.confidence,
+            "accepted_samples": result.accepted_samples,
+            "reason": result.reason,
+        }
+
+
+class MPCProjectedSavingsSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic (MPC, advisory only): projected horizon cost savings vs a
+    myopic hold-target baseline, in RELATIVE proxy units (price × degC), not a
+    currency figure — the absolute thermal scale is unidentifiable, so this is
+    meaningful for comparison/tracking, not as a money amount."""
+
+    _attr_translation_key = "mpc_projected_savings"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_mpc_projected_savings"
+
+    @property
+    def native_value(self) -> float | None:
+        result: MPCResult | None = self.coordinator.mpc_result
+        if result is None or result.projected_savings is None:
+            return None
+        return round(result.projected_savings, 3)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        result: MPCResult | None = self.coordinator.mpc_result
+        if result is None:
+            return {}
+        return {
+            "total_cost": result.total_cost,
+            "baseline_cost": result.baseline_cost,
+            "units": "relative proxy units (price × °C), not currency",
+        }
+
+
+class MPCPlannedNextTempSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic (MPC, advisory only): the indoor temperature the plan
+    predicts at the end of the first (applied) step."""
+
+    _attr_translation_key = "mpc_planned_next_temperature"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_mpc_planned_next_temperature"
+
+    @property
+    def native_value(self) -> float | None:
+        result: MPCResult | None = self.coordinator.mpc_result
+        if result is None or result.predicted_next_temp_c is None:
+            return None
+        return round(result.predicted_next_temp_c, 2)

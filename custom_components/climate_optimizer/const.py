@@ -27,6 +27,10 @@ CONF_UPDATE_INTERVAL_MINUTES = "update_interval_minutes"
 CONF_HEATING_CUTOFF_C = "heating_cutoff_c"
 CONF_ENABLE_WIND_RC = "enable_wind_rc"
 CONF_RC_WIND_REFERENCE_MS = "rc_wind_reference_ms"
+# Phase 3 MPC (shadow/advisory only) options
+CONF_MPC_HORIZON_HOURS = "mpc_horizon_hours"
+CONF_MPC_MAX_HEATING_DELTA_C = "mpc_max_heating_delta_c"
+CONF_MPC_MIN_CONFIDENCE = "mpc_min_confidence"
 
 # Defaults
 DEFAULT_INDOOR_TARGET_TEMPERATURE = 21.0
@@ -43,3 +47,12 @@ DEFAULT_UPDATE_INTERVAL_MINUTES = 15
 DEFAULT_HEATING_CUTOFF_C = 18.0
 DEFAULT_ENABLE_WIND_RC = False
 DEFAULT_RC_WIND_REFERENCE_MS = 5.0
+# MPC defaults. A 24 h horizon spans a full day-ahead price cycle (Nordpool
+# publishes tomorrow's prices ~13:00 local, so most of the day a 24 h horizon
+# is fully covered by real data). 8 degC of heating authority matches the
+# heuristic's typical compensation-delta magnitude. min_confidence 1.0 means
+# "only trust once the RC model has fully warmed up"; it is shadow-mode only
+# regardless, so this gate just governs the reported trustworthiness flag.
+DEFAULT_MPC_HORIZON_HOURS = 24
+DEFAULT_MPC_MAX_HEATING_DELTA_C = 8.0
+DEFAULT_MPC_MIN_CONFIDENCE = 1.0

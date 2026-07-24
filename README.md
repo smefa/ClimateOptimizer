@@ -132,6 +132,97 @@ the other terms. Turning this on changes the estimator's dimensionality, so
 (like any options change) it triggers a reload and resets learning progress
 for a fresh start.
 
+## MPC planner (Phase 3: advisory / shadow mode only)
+
+A Model Predictive Control (MPC) planner runs alongside the heuristic and the
+RC model. Each cycle it uses the RC model's *currently learned* physical
+parameters plus multi-hour forecasts (electricity price, outdoor temperature,
+and — only if the wind term is enabled — wind) to plan a cost-minimising
+sequence of compensation deltas over a horizon (default 24 h), subject to your
+hard comfort bounds. It uses **receding-horizon control**: it re-solves the
+whole plan every cycle with the latest forecasts and only ever surfaces the
+*first* step, discarding the rest.
+
+**It is advisory only.** Exactly like the RC model, it never influences
+`compensated_outdoor_temp_c` — the heuristic pipeline gated by
+`switch.<name>_active` remains the only thing that actually controls anything.
+The MPC planner exists so its recommendations can be observed and evaluated
+against reality over time, as groundwork before anyone trusts it to run heating.
+
+### What it does and how
+
+The solver is **dynamic programming over a discretised indoor-temperature
+state** (chosen over LP/QP: no scipy dependency, lightweight, and inherently
+explainable — you can see exactly which constraint binds). A backward
+value-iteration pass computes the cost-to-go at every (time, temperature) node
+using the RC model's dynamics; a forward pass from the current indoor
+temperature reads off the optimal control sequence. Comfort bounds are enforced
+as a dominating penalty, so a feasible plan never violates them; if the house
+starts outside the band or can't be held, it returns a least-violating
+best-effort plan and flags itself `infeasible` rather than failing.
+
+The planner is **heating-only** (it adds heat or coasts, never commands
+cooling — mirroring the summer-cutoff philosophy). Costs are in **relative
+proxy units** (price × °C), useful for ranking plans and reporting
+savings-vs-baseline, not a currency figure — the absolute thermal scale isn't
+identifiable from indoor-temperature dynamics alone. Savings are quoted against
+a myopic "hold the target" baseline, so they reflect both load-shifting (heat
+banked into the comfort band before price spikes) and energy-minimisation
+(riding cooler within comfort when price is flat).
+
+### Trustworthiness gate
+
+An MPC plan is only as good as the RC model under it, and that model hasn't yet
+had a long real-data validation run. The planner **always** computes a plan
+(observing it is useful), but marks it *not yet trustworthy* unless the RC
+estimate is both mature (confidence ≥ `mpc_min_confidence` and enough accepted
+samples) and physically plausible (positive envelope time constant, a clearly
+negative heat-pump gain, non-negative solar gain, and no parameter pinned at a
+clip bound). The point is to never present a plan as reliable when the
+underlying model isn't.
+
+### Sensors
+
+- `sensor.<name>_mpc_recommended_compensation_delta` — the recommended
+  first-step delta. Its attributes carry the whole plan: the `reason` string,
+  the `binding_constraint`, projected cost/savings, the predicted
+  indoor-temperature `predicted_trajectory`, the full per-step `plan`, the
+  trust gate result, and **explicit echoes of the RC parameters** (gain, tau,
+  solar, wind if enabled) the plan was actually computed from this cycle — so
+  you can troubleshoot *why* a plan looks the way it does. (The live RC gain /
+  tau / solar / wind sensors from Phase 2 track the same values continuously.)
+- `sensor.<name>_mpc_status` — `ok`, `not_trustworthy`, `infeasible`,
+  `no_forecast`, `no_data`, or `misconfigured`, with `trustworthy`,
+  `binding_constraint` and forecast-coverage details in attributes.
+- `sensor.<name>_mpc_projected_savings` — projected horizon savings vs the
+  hold-target baseline, in relative proxy units.
+- `sensor.<name>_mpc_planned_next_indoor_temperature` — the indoor temperature
+  the plan predicts at the end of the first step.
+
+### Options
+
+Three advisory-only options (Configure dialog): the planning horizon
+(`mpc_horizon_hours`, default 24 h), the assumed heating authority
+(`mpc_max_heating_delta_c`, default 8 °C), and the minimum RC confidence for a
+plan to be reported trustworthy (`mpc_min_confidence`, default 1.0). The
+state-space granularity is fixed at sensible internal defaults.
+
+### Known limitations (advisory-only groundwork)
+
+- **Solar is not yet forecast over the horizon** (that would need per-hour
+  future sun elevation): the planner assumes no solar gain across the horizon,
+  which is the comfort-safe direction (it never counts on free heat it might
+  not get). This is a natural next enhancement.
+- If the weather/price forecast is shorter than the horizon, the last value is
+  held (persistence); `forecast_valid_steps` and the `reason` string report how
+  many leading steps were real forecast.
+- Because the RC model treats a zero compensation delta as *no* heat-pump
+  contribution (the pump's own baseline weather curve isn't separately
+  modelled), the plan's *absolute* predicted temperatures are in the model's
+  reference frame, not real wall-thermometer degrees. The *relative* decisions
+  (when to spend heat given prices and thermal storage) are what's meaningful —
+  another reason this stays advisory-only for now.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfSpeed, UnitOfTemperature
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import SpeedConverter, TemperatureConverter
 
 from .const import (
@@ -28,6 +29,9 @@ from .const import (
     CONF_K_INDOOR,
     CONF_K_SUN,
     CONF_K_WIND,
+    CONF_MPC_HORIZON_HOURS,
+    CONF_MPC_MAX_HEATING_DELTA_C,
+    CONF_MPC_MIN_CONFIDENCE,
     CONF_NORDPOOL_PRICE_ENTITY,
     CONF_OUTDOOR_TEMP_SENSOR,
     CONF_PRICE_MAX_DROP_C,
@@ -45,6 +49,9 @@ from .const import (
     DEFAULT_K_INDOOR,
     DEFAULT_K_SUN,
     DEFAULT_K_WIND,
+    DEFAULT_MPC_HORIZON_HOURS,
+    DEFAULT_MPC_MAX_HEATING_DELTA_C,
+    DEFAULT_MPC_MIN_CONFIDENCE,
     DEFAULT_PRICE_MAX_DROP_C,
     DEFAULT_PRICE_THRESHOLD_MAX,
     DEFAULT_PRICE_THRESHOLD_START,
@@ -53,7 +60,22 @@ from .const import (
     DOMAIN,
 )
 from .heuristic import HeuristicInputs, HeuristicParams, HeuristicResult, compute
+from .mpc import (
+    MPCConfig,
+    MPCForecasts,
+    MPCModelParams,
+    MPCResult,
+    plan as mpc_plan,
+)
 from .rc_model import (
+    THETA_ENV_MAX,
+    THETA_ENV_MIN,
+    THETA_GAIN_MAX,
+    THETA_GAIN_MIN,
+    THETA_SOLAR_MAX,
+    THETA_SOLAR_MIN,
+    THETA_WIND_MAX,
+    THETA_WIND_MIN,
     RCModelConfig,
     RCModelInputs,
     RCModelResult,
@@ -109,6 +131,16 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         self._rc_state = rc_initial_state(enable_wind=self._rc_config().enable_wind)
         self.rc_result: RCModelResult | None = None
         self._rc_last_monotonic: float | None = None
+
+        # --- Phase 3 shadow/advisory-mode MPC planner (purely additive) ------
+        # The MPC planner re-solves a receding-horizon plan every cycle from
+        # whatever the RC model currently believes, and stores its latest
+        # result here for the MPC diagnostic sensors to read. Like the RC
+        # model it NEVER influences `data` (the HeuristicResult driving
+        # compensated_outdoor_temp_c); it is observation-only until a
+        # deliberate future decision wires it live. Wrapped in the same
+        # try/except shadow-safety pattern as the RC model.
+        self.mpc_result: MPCResult | None = None
 
         # --- Activation switch (learn mode vs live) ---------------------------
         # Default OFF ("learn mode"): the compensated-temperature sensor
@@ -174,6 +206,29 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             wind_reference_ms=_entry_value(
                 entry, CONF_RC_WIND_REFERENCE_MS, DEFAULT_RC_WIND_REFERENCE_MS
             ),
+        )
+
+    def _mpc_config(self) -> MPCConfig:
+        """MPC solver tuning. Comfort bounds and target mirror the heuristic's
+        (a plan is only meaningful against the same comfort envelope the real
+        controller respects); the horizon, heating authority and trust
+        threshold are the only user-facing MPC options. Discretisation
+        granularity is left at mpc.py's internal defaults."""
+        entry = self.entry
+        params = self._params()
+        return MPCConfig(
+            horizon_hours=_entry_value(
+                entry, CONF_MPC_HORIZON_HOURS, DEFAULT_MPC_HORIZON_HOURS
+            ),
+            max_heating_delta_c=_entry_value(
+                entry, CONF_MPC_MAX_HEATING_DELTA_C, DEFAULT_MPC_MAX_HEATING_DELTA_C
+            ),
+            min_confidence=_entry_value(
+                entry, CONF_MPC_MIN_CONFIDENCE, DEFAULT_MPC_MIN_CONFIDENCE
+            ),
+            comfort_min_c=params.comfort_min_c,
+            comfort_max_c=params.comfort_max_c,
+            indoor_target_c=params.indoor_target_c,
         )
 
     def _params(self) -> HeuristicParams:
@@ -384,6 +439,10 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # Shadow mode: feed the RC estimator but never let it affect `result`.
         self._update_rc_shadow_model(result)
 
+        # Advisory mode: compute an MPC plan from the RC model's current
+        # beliefs, again without ever affecting `result`.
+        await self._update_mpc_shadow(result)
+
         return result
 
     def _update_rc_shadow_model(self, result: HeuristicResult) -> None:
@@ -432,3 +491,242 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             _LOGGER.debug("RC shadow model: %s", self.rc_result.reason)
         except Exception as err:  # noqa: BLE001 - shadow mode must never break output
             _LOGGER.warning("RC shadow model update failed (ignored): %s", err)
+
+    # --- Phase 3 MPC (shadow/advisory) ---------------------------------------
+
+    @staticmethod
+    def _rc_params_pinned(rc_result: RCModelResult, enable_wind: bool) -> bool:
+        """Whether any RC parameter currently sits at (within a tiny tolerance
+        of) one of its physical clip bounds — a sign the estimator hit a
+        guardrail rather than converging, which the MPC trust gate treats as
+        "not plausible yet". Checked here (not in the pure mpc module) so mpc.py
+        need not know rc_model's bound constants.
+
+        `enable_wind` is passed explicitly rather than inferred from
+        `theta_wind != 0.0`: THETA_WIND_MIN is also 0.0, so a wind term
+        genuinely clipped down to its floor by real data would be
+        indistinguishable from one still sitting untouched at its cold-start
+        prior — inferring from the value alone would silently miss that real
+        clip event.
+        """
+        tol = 1e-6
+        checks = (
+            (rc_result.theta_env, THETA_ENV_MIN, THETA_ENV_MAX),
+            (rc_result.theta_gain, THETA_GAIN_MIN, THETA_GAIN_MAX),
+            (rc_result.theta_solar, THETA_SOLAR_MIN, THETA_SOLAR_MAX),
+        )
+        for value, lo, hi in checks:
+            if abs(value - lo) <= tol or abs(value - hi) <= tol:
+                return True
+        if enable_wind:
+            if (
+                abs(rc_result.theta_wind - THETA_WIND_MIN) <= tol
+                or abs(rc_result.theta_wind - THETA_WIND_MAX) <= tol
+            ):
+                return True
+        return False
+
+    def _mpc_model_params(self, rc_result: RCModelResult) -> MPCModelParams:
+        rc_config = self._rc_config()
+        return MPCModelParams(
+            theta_env=rc_result.theta_env,
+            theta_gain=rc_result.theta_gain,
+            theta_solar=rc_result.theta_solar,
+            theta_wind=rc_result.theta_wind,
+            enable_wind=rc_config.enable_wind,
+            wind_reference_ms=rc_config.wind_reference_ms,
+            confidence=rc_result.confidence,
+            accepted_samples=rc_result.accepted_samples,
+            params_pinned=self._rc_params_pinned(rc_result, rc_config.enable_wind),
+        )
+
+    @staticmethod
+    def _align_series(
+        entries: list[tuple[datetime, float]],
+        now: datetime,
+        steps: int,
+        step_hours: float,
+    ) -> tuple[list[float], int]:
+        """Sample a sorted (start_time, value) forecast series onto the MPC's
+        step grid. Returns (values, valid_count). Beyond the last forecast
+        entry the last value is held (persistence); `valid_count` is how many
+        leading steps fell within the forecast's real coverage."""
+        if not entries:
+            return [0.0] * steps, 0
+        entries = sorted(entries, key=lambda e: e[0])
+        first_dt = entries[0][0]
+        last_dt = entries[-1][0]
+        if len(entries) > 1:
+            est_step = (last_dt - first_dt) / (len(entries) - 1)
+        else:
+            est_step = timedelta(hours=1)
+        covered_until = last_dt + est_step
+        values: list[float] = []
+        valid = 0
+        for k in range(steps):
+            t = now + timedelta(hours=step_hours * k)
+            value = entries[0][1]
+            for dt, v in entries:
+                if dt <= t:
+                    value = v
+                else:
+                    break
+            values.append(value)
+            if t < covered_until:
+                valid += 1
+        return values, valid
+
+    def _read_price_forecast(
+        self, steps: int, step_hours: float, fallback_price: float | None
+    ) -> tuple[list[float], int]:
+        """Multi-hour price array from the Nordpool sensor's `raw_today` /
+        `raw_tomorrow` attributes (the well-known HACS Nordpool shape:
+        lists of {start, end, value}). Falls back to a flat current price when
+        those attributes are absent, so the plan still runs (as pure
+        energy-minimisation, with nothing to load-shift)."""
+        entity_id = _entry_value(self.entry, CONF_NORDPOOL_PRICE_ENTITY, None)
+        flat = float(fallback_price) if fallback_price is not None else 1.0
+        if not entity_id:
+            # No price configured at all — a flat price is the best we can do,
+            # and there is nothing further to fetch, so it is not a truncation.
+            return [flat] * steps, steps
+        state = self.hass.states.get(entity_id)
+        if not _state_is_usable(state):
+            return [flat] * steps, 0
+        entries: list[tuple[datetime, float]] = []
+        for attr in ("raw_today", "raw_tomorrow"):
+            raw = state.attributes.get(attr)
+            if not isinstance(raw, (list, tuple)):
+                continue
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                start = item.get("start")
+                value = item.get("value")
+                if isinstance(start, str):
+                    start = dt_util.parse_datetime(start)
+                if start is None or value is None:
+                    continue
+                try:
+                    entries.append((dt_util.as_local(start), float(value)))
+                except (TypeError, ValueError):
+                    continue
+        if not entries:
+            return [flat] * steps, 0
+        return self._align_series(entries, dt_util.now(), steps, step_hours)
+
+    async def _read_weather_forecast_arrays(
+        self, steps: int, step_hours: float, fallback_outdoor_c: float
+    ) -> tuple[list[float], list[float], int]:
+        """Multi-hour outdoor-temperature and wind arrays from the weather
+        integration's hourly `weather.get_forecasts` (the FULL array, not just
+        forecast[0]). Falls back to holding the current outdoor temperature
+        (persistence) with zero wind when no forecast is available."""
+        weather_entity_id = _entry_value(self.entry, CONF_WEATHER_ENTITY, None)
+        weather_state = self.hass.states.get(weather_entity_id)
+        outdoor_fallback = [fallback_outdoor_c] * steps
+        wind_fallback = [0.0] * steps
+        if not _state_is_usable(weather_state):
+            return outdoor_fallback, wind_fallback, 0
+        try:
+            response = await self.hass.services.async_call(
+                "weather",
+                "get_forecasts",
+                {"entity_id": weather_entity_id, "type": "hourly"},
+                blocking=True,
+                return_response=True,
+            )
+            forecast = response[weather_entity_id]["forecast"]
+        except Exception as err:  # noqa: BLE001 - soft-degrade on any forecast failure
+            _LOGGER.debug("MPC hourly forecast unavailable for %s: %s", weather_entity_id, err)
+            return outdoor_fallback, wind_fallback, 0
+        if not forecast:
+            return outdoor_fallback, wind_fallback, 0
+
+        temp_unit = weather_state.attributes.get("temperature_unit", UnitOfTemperature.CELSIUS)
+        wind_unit = weather_state.attributes.get(
+            "wind_speed_unit", UnitOfSpeed.METERS_PER_SECOND
+        )
+        temp_entries: list[tuple[datetime, float]] = []
+        wind_entries: list[tuple[datetime, float]] = []
+        for item in forecast:
+            when = item.get("datetime")
+            if isinstance(when, str):
+                when = dt_util.parse_datetime(when)
+            if when is None:
+                continue
+            when = dt_util.as_local(when)
+            temp = item.get("temperature")
+            if temp is not None:
+                try:
+                    temp_entries.append(
+                        (when, TemperatureConverter.convert(
+                            float(temp), temp_unit, UnitOfTemperature.CELSIUS
+                        ))
+                    )
+                except (TypeError, ValueError):
+                    pass
+            wind = item.get("wind_speed")
+            if wind is not None:
+                try:
+                    wind_entries.append(
+                        (when, SpeedConverter.convert(
+                            float(wind), wind_unit, UnitOfSpeed.METERS_PER_SECOND
+                        ))
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+        now = dt_util.now()
+        if temp_entries:
+            outdoor, temp_valid = self._align_series(temp_entries, now, steps, step_hours)
+        else:
+            outdoor, temp_valid = outdoor_fallback, 0
+        if wind_entries:
+            wind, _wind_valid = self._align_series(wind_entries, now, steps, step_hours)
+        else:
+            wind = wind_fallback
+        return outdoor, wind, temp_valid
+
+    async def _update_mpc_shadow(self, result: HeuristicResult) -> None:
+        """Compute this cycle's advisory MPC plan and store it for the MPC
+        diagnostic sensors. Strictly additive and wrapped like the RC shadow
+        model: any failure is swallowed (logged at warning) so a bug in the
+        experimental planner can never break the real heuristic output. Never
+        touches `data`/`compensated_outdoor_temp_c`."""
+        try:
+            if self.rc_result is None:
+                # No RC estimate yet (very first cycles); nothing to plan on.
+                return
+            config = self._mpc_config()
+            step_hours = config.step_hours
+            steps = max(1, int(round(config.horizon_hours / step_hours)))
+
+            price, price_valid = self._read_price_forecast(
+                steps, step_hours, result.current_price
+            )
+            outdoor, wind, weather_valid = await self._read_weather_forecast_arrays(
+                steps, step_hours, result.raw_outdoor_temp_c
+            )
+            # Solar is not forecast over the horizon yet (would need per-hour
+            # future sun elevation): assume no solar gain, which is the safe
+            # direction (never over-counts free heat, so plans stay
+            # comfort-safe). Documented as a known limitation / next step.
+            solar = [0.0] * steps
+
+            forecasts = MPCForecasts(
+                price=tuple(price[:steps]),
+                outdoor_temp_c=tuple(outdoor[:steps]),
+                solar_effect=tuple(solar[:steps]),
+                wind_speed_ms=tuple(wind[:steps]),
+                valid_steps=min(price_valid, weather_valid),
+            )
+            self.mpc_result = mpc_plan(
+                result.indoor_temp_c,
+                self._mpc_model_params(self.rc_result),
+                forecasts,
+                config,
+            )
+            _LOGGER.debug("MPC advisory plan: %s", self.mpc_result.reason)
+        except Exception as err:  # noqa: BLE001 - advisory mode must never break output
+            _LOGGER.warning("MPC advisory update failed (ignored): %s", err)
