@@ -1,5 +1,7 @@
 # ClimateOptimizer
 
+## NOT READY FOR PRODUCTION
+
 A Home Assistant custom integration (HACS) that computes a **compensated outdoor
 temperature** for a heat pump's weather-compensation curve, adjusted for:
 
