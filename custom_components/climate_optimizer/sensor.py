@@ -261,7 +261,10 @@ class StatusSensor(ClimateOptimizerEntity, SensorEntity):
         attrs: dict = {
             "outdoor_sensor_ok": self.coordinator.last_update_success,
             "last_error": str(last_error) if last_error else None,
+            "data_logging_enabled": self.coordinator.data_logging_enabled,
         }
+        if self.coordinator.data_log_path:
+            attrs["data_log_path"] = self.coordinator.data_log_path
         if result is not None:
             attrs["indoor_sensor_ok"] = result.indoor_data_available
             attrs["wind_forecast_ok"] = result.wind_data_available

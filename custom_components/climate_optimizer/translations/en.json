@@ -54,7 +54,8 @@
           "rc_wind_reference_ms": "Reference wind speed for the wind model",
           "mpc_horizon_hours": "MPC planning horizon (advanced, advisory-only)",
           "mpc_max_heating_delta_c": "MPC max heating authority (compensation delta)",
-          "mpc_min_confidence": "MPC minimum RC-model confidence to be trustworthy"
+          "mpc_min_confidence": "MPC minimum RC-model confidence to be trustworthy",
+          "enable_data_logging": "Log data locally for offline model testing (advanced)"
         }
       }
     }

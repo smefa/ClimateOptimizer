@@ -223,6 +223,22 @@ state-space granularity is fixed at sensible internal defaults.
   (when to spend heat given prices and thermal storage) are what's meaningful —
   another reason this stays advisory-only for now.
 
+## Local history logging (optional, off by default)
+
+`enable_data_logging` (options flow) appends one JSON line per update cycle
+to `/config/climate_optimizer_data/<entry_id>.jsonl` — the raw physical
+inputs (indoor/outdoor temp, wind, solar effect, price) plus the computed
+heuristic/RC/MPC results for that cycle. Purely local; nothing is
+transmitted anywhere. This exists because Home Assistant's own recorder
+purges history by default (commonly ~10 days) and its long-term statistics
+only keep hourly aggregates — too coarse to properly re-fit the RC model or
+backtest an MPC change later. With this on, real history survives and can be
+replayed offline through a candidate model change without waiting for new
+live data. The resolved file path is shown on `sensor.<name>_status`'s
+`data_log_path` attribute whenever logging is on. Not included yet: full
+multi-hour forecast snapshots (needed to faithfully replay MPC's exact
+historical decisions, not just the RC model's) — a possible future addition.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

@@ -21,6 +21,7 @@ from homeassistant.util.unit_conversion import SpeedConverter, TemperatureConver
 from .const import (
     CONF_COMFORT_MAX_C,
     CONF_COMFORT_MIN_C,
+    CONF_ENABLE_DATA_LOGGING,
     CONF_ENABLE_PRICE_COMPENSATION,
     CONF_ENABLE_WIND_RC,
     CONF_HEATING_CUTOFF_C,
@@ -42,6 +43,7 @@ from .const import (
     CONF_WEATHER_ENTITY,
     DEFAULT_COMFORT_MAX_C,
     DEFAULT_COMFORT_MIN_C,
+    DEFAULT_ENABLE_DATA_LOGGING,
     DEFAULT_ENABLE_PRICE_COMPENSATION,
     DEFAULT_ENABLE_WIND_RC,
     DEFAULT_HEATING_CUTOFF_C,
@@ -59,6 +61,7 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
 )
+from .data_logger import async_log_record, log_file_path
 from .heuristic import HeuristicInputs, HeuristicParams, HeuristicResult, compute
 from .mpc import (
     MPCConfig,
@@ -192,6 +195,21 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         configured in the first place.
         """
         return bool(_entry_value(self.entry, CONF_NORDPOOL_PRICE_ENTITY, None))
+
+    @property
+    def data_logging_enabled(self) -> bool:
+        return bool(
+            _entry_value(self.entry, CONF_ENABLE_DATA_LOGGING, DEFAULT_ENABLE_DATA_LOGGING)
+        )
+
+    @property
+    def data_log_path(self) -> str | None:
+        """Resolved path of this entry's local history log, or None if
+        logging is off — surfaced on the status sensor so it's discoverable
+        without digging through the integration's source."""
+        if not self.data_logging_enabled:
+            return None
+        return str(log_file_path(self.hass, self.entry.entry_id))
 
     def _rc_config(self) -> RCModelConfig:
         """RC shadow-model estimator tuning, currently just the optional
@@ -442,6 +460,11 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # Advisory mode: compute an MPC plan from the RC model's current
         # beliefs, again without ever affecting `result`.
         await self._update_mpc_shadow(result)
+
+        # Opt-in: append this cycle to the local history log, again without
+        # ever affecting `result` — see data_logger.py.
+        if self.data_logging_enabled:
+            await self._log_data_point(result)
 
         return result
 
@@ -730,3 +753,67 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             _LOGGER.debug("MPC advisory plan: %s", self.mpc_result.reason)
         except Exception as err:  # noqa: BLE001 - advisory mode must never break output
             _LOGGER.warning("MPC advisory update failed (ignored): %s", err)
+
+    # --- Opt-in local history logging (data_logger.py) -----------------------
+
+    def _build_log_record(self, result: HeuristicResult) -> dict:
+        """Flatten this cycle's raw inputs and computed results into one
+        record for the local history log. Raw physical data first (what a
+        future offline re-fit of rc_model.py would actually need), computed
+        results appended for cross-reference against what the live system
+        did at the time. See data_logger.py for why/where this is written.
+        """
+        applied_delta_c = (
+            (result.compensated_outdoor_temp_c - result.raw_outdoor_temp_c)
+            if self.is_active
+            else 0.0
+        )
+        record: dict = {
+            "ts": dt_util.utcnow().isoformat(),
+            "is_active": self.is_active,
+            "indoor_target_c": self.indoor_target_c,
+            "indoor_temp_c": result.indoor_temp_c,
+            "indoor_data_available": result.indoor_data_available,
+            "raw_outdoor_temp_c": result.raw_outdoor_temp_c,
+            "wind_speed_ms": result.wind_speed_ms,
+            "wind_data_available": result.wind_data_available,
+            "cloud_coverage_pct": result.cloud_coverage_pct,
+            "cloud_data_available": result.cloud_data_available,
+            "solar_effect": result.solar_effect,
+            "current_price": result.current_price,
+            "price_data_available": result.price_data_available,
+            "compensated_outdoor_temp_c": result.compensated_outdoor_temp_c,
+            "applied_delta_c": applied_delta_c,
+            "heating_cutoff_engaged": result.heating_cutoff_engaged,
+        }
+        if self.rc_result is not None:
+            record.update(
+                {
+                    "rc_theta_env": self.rc_result.theta_env,
+                    "rc_theta_gain": self.rc_result.theta_gain,
+                    "rc_theta_solar": self.rc_result.theta_solar,
+                    "rc_theta_wind": self.rc_result.theta_wind,
+                    "rc_confidence": self.rc_result.confidence,
+                    "rc_accepted_samples": self.rc_result.accepted_samples,
+                }
+            )
+        if self.mpc_result is not None:
+            record.update(
+                {
+                    "mpc_status": self.mpc_result.status,
+                    "mpc_trustworthy": self.mpc_result.trustworthy,
+                    "mpc_recommended_delta_c": self.mpc_result.recommended_delta_c,
+                }
+            )
+        return record
+
+    async def _log_data_point(self, result: HeuristicResult) -> None:
+        """Append this cycle to the local history log. Strictly additive,
+        same shadow-safety pattern as the RC/MPC updates: any failure here
+        is swallowed (logged at warning) so a disk/permissions problem can
+        never affect the real output."""
+        try:
+            record = self._build_log_record(result)
+            await async_log_record(self.hass, self.entry.entry_id, record)
+        except Exception as err:  # noqa: BLE001 - logging must never break output
+            _LOGGER.warning("ClimateOptimizer data logging failed (ignored): %s", err)

@@ -18,6 +18,7 @@ from homeassistant.helpers import selector
 from .const import (
     CONF_COMFORT_MAX_C,
     CONF_COMFORT_MIN_C,
+    CONF_ENABLE_DATA_LOGGING,
     CONF_ENABLE_PRICE_COMPENSATION,
     CONF_ENABLE_WIND_RC,
     CONF_HEATING_CUTOFF_C,
@@ -39,6 +40,7 @@ from .const import (
     CONF_WEATHER_ENTITY,
     DEFAULT_COMFORT_MAX_C,
     DEFAULT_COMFORT_MIN_C,
+    DEFAULT_ENABLE_DATA_LOGGING,
     DEFAULT_ENABLE_PRICE_COMPENSATION,
     DEFAULT_ENABLE_WIND_RC,
     DEFAULT_HEATING_CUTOFF_C,
@@ -292,6 +294,14 @@ class ClimateOptimizerOptionsFlow(config_entries.OptionsFlow):
                         min=0, max=1, step=0.05, mode="box"
                     )
                 ),
+                # Opt-in local history log (data_logger.py) for offline model
+                # testing later — purely local, off by default. See README.
+                vol.Required(
+                    CONF_ENABLE_DATA_LOGGING,
+                    default=current.get(
+                        CONF_ENABLE_DATA_LOGGING, DEFAULT_ENABLE_DATA_LOGGING
+                    ),
+                ): selector.BooleanSelector(),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)
