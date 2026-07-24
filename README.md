@@ -13,8 +13,7 @@ temperature** for a heat pump's weather-compensation curve, adjusted for:
 ClimateOptimizer does **not** write to your heat pump directly. It publishes a
 sensor, `sensor.<name>_compensated_outdoor_temperature`, with the computed value
 and full attribute breakdown of *why* it's that value. You wire that sensor into
-your heat pump's own external-temperature input (however your specific
-integration/automation supports that).
+your heat pump's own external-temperature input if possible or using special dedicated hardware like OhmOnWifi
 
 Everything is configured from the Home Assistant UI — no YAML.
 
