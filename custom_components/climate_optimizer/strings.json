@@ -49,7 +49,9 @@
           "price_threshold_start": "Price where reduction starts",
           "price_threshold_max": "Price where reduction is at its maximum",
           "price_max_drop_c": "Maximum target drop from price",
-          "update_interval_minutes": "Update interval (minutes)"
+          "update_interval_minutes": "Update interval (minutes)",
+          "enable_wind_rc": "Model wind sensitivity in the thermal model (advanced, shadow-mode only)",
+          "rc_wind_reference_ms": "Reference wind speed for the wind model"
         }
       }
     }
@@ -87,6 +89,9 @@
       },
       "rc_solar_gain": {
         "name": "RC model solar gain"
+      },
+      "rc_wind_gain": {
+        "name": "RC model wind gain"
       },
       "rc_model_confidence": {
         "name": "RC model confidence"

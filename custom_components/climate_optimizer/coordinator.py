@@ -21,6 +21,7 @@ from .const import (
     CONF_COMFORT_MAX_C,
     CONF_COMFORT_MIN_C,
     CONF_ENABLE_PRICE_COMPENSATION,
+    CONF_ENABLE_WIND_RC,
     CONF_HEATING_CUTOFF_C,
     CONF_INDOOR_TARGET_TEMPERATURE,
     CONF_INDOOR_TEMP_SENSOR,
@@ -32,11 +33,13 @@ from .const import (
     CONF_PRICE_MAX_DROP_C,
     CONF_PRICE_THRESHOLD_MAX,
     CONF_PRICE_THRESHOLD_START,
+    CONF_RC_WIND_REFERENCE_MS,
     CONF_UPDATE_INTERVAL_MINUTES,
     CONF_WEATHER_ENTITY,
     DEFAULT_COMFORT_MAX_C,
     DEFAULT_COMFORT_MIN_C,
     DEFAULT_ENABLE_PRICE_COMPENSATION,
+    DEFAULT_ENABLE_WIND_RC,
     DEFAULT_HEATING_CUTOFF_C,
     DEFAULT_INDOOR_TARGET_TEMPERATURE,
     DEFAULT_K_INDOOR,
@@ -45,11 +48,13 @@ from .const import (
     DEFAULT_PRICE_MAX_DROP_C,
     DEFAULT_PRICE_THRESHOLD_MAX,
     DEFAULT_PRICE_THRESHOLD_START,
+    DEFAULT_RC_WIND_REFERENCE_MS,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
 )
 from .heuristic import HeuristicInputs, HeuristicParams, HeuristicResult, compute
 from .rc_model import (
+    RCModelConfig,
     RCModelInputs,
     RCModelResult,
     initial_state as rc_initial_state,
@@ -96,8 +101,12 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # Persistent estimator state and the latest result live as instance
         # attributes; the RC model NEVER influences `data` (the HeuristicResult
         # that drives compensated_outdoor_temp_c). Diagnostic sensors read
-        # `rc_result`.
-        self._rc_state = rc_initial_state()
+        # `rc_result`. Estimator dimensionality (3 or 4 params) is fixed at
+        # construction time by whether the optional wind term is enabled —
+        # see rc_model.py's module docstring for why this can't just be
+        # toggled live without recreating the state. Options changes already
+        # trigger a full coordinator reload, so this stays in sync.
+        self._rc_state = rc_initial_state(enable_wind=self._rc_config().enable_wind)
         self.rc_result: RCModelResult | None = None
         self._rc_last_monotonic: float | None = None
 
@@ -151,6 +160,21 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         configured in the first place.
         """
         return bool(_entry_value(self.entry, CONF_NORDPOOL_PRICE_ENTITY, None))
+
+    def _rc_config(self) -> RCModelConfig:
+        """RC shadow-model estimator tuning, currently just the optional
+        wind term. `enable_wind` here must match whatever `_rc_state` was
+        constructed with (see __init__) — both read the same config-entry
+        option, and an options change reloads the whole entry, so they can't
+        drift apart within one coordinator's lifetime.
+        """
+        entry = self.entry
+        return RCModelConfig(
+            enable_wind=_entry_value(entry, CONF_ENABLE_WIND_RC, DEFAULT_ENABLE_WIND_RC),
+            wind_reference_ms=_entry_value(
+                entry, CONF_RC_WIND_REFERENCE_MS, DEFAULT_RC_WIND_REFERENCE_MS
+            ),
+        )
 
     def _params(self) -> HeuristicParams:
         entry = self.entry
@@ -399,9 +423,12 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 outdoor_temp_c=result.raw_outdoor_temp_c,
                 compensation_delta_c=applied_delta_c,
                 solar_effect=result.solar_effect,
+                wind_speed_ms=result.wind_speed_ms,
                 dt_seconds=dt_seconds,
             )
-            self._rc_state, self.rc_result = rc_step(self._rc_state, rc_inputs)
+            self._rc_state, self.rc_result = rc_step(
+                self._rc_state, rc_inputs, self._rc_config()
+            )
             _LOGGER.debug("RC shadow model: %s", self.rc_result.reason)
         except Exception as err:  # noqa: BLE001 - shadow mode must never break output
             _LOGGER.warning("RC shadow model update failed (ignored): %s", err)

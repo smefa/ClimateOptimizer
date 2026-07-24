@@ -45,6 +45,7 @@ async def async_setup_entry(
             RCThermalTimeConstantSensor(coordinator, entry),
             RCHeatPumpGainSensor(coordinator, entry),
             RCSolarGainSensor(coordinator, entry),
+            RCWindGainSensor(coordinator, entry),
             RCModelConfidenceSensor(coordinator, entry),
             RCPredictionErrorSensor(coordinator, entry),
         ]
@@ -343,6 +344,32 @@ class RCSolarGainSensor(ClimateOptimizerEntity, SensorEntity):
     def native_value(self) -> float | None:
         result: RCModelResult | None = self.coordinator.rc_result
         return round(result.theta_solar, 4) if result else None
+
+
+class RCWindGainSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic (shadow model): estimated wind-sensitivity coefficient.
+
+    Only meaningful when the optional wind term is enabled in options
+    (advanced, off by default) — reads a permanently-pinned 0.0 otherwise,
+    since the estimator is genuinely 3-dimensional (no wind parameter to
+    estimate at all) when the feature is disabled. See rc_model.py's module
+    docstring for the interaction-term design and why it's opt-in.
+    """
+
+    _attr_translation_key = "rc_wind_gain"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_rc_wind_gain"
+
+    @property
+    def native_value(self) -> float | None:
+        result: RCModelResult | None = self.coordinator.rc_result
+        return round(result.theta_wind, 4) if result else None
 
 
 class RCModelConfidenceSensor(ClimateOptimizerEntity, SensorEntity):

@@ -101,7 +101,7 @@ cooling.
 ## RC thermal model (Phase 2: shadow mode only)
 
 A grey-box RC thermal model, fit online from live data via recursive least
-squares, runs alongside the heuristic and exposes 5 diagnostic sensors
+squares, runs alongside the heuristic and exposes diagnostic sensors
 (thermal time constant, heat-pump gain, solar gain, confidence, prediction
 error) — purely for observation. It never influences
 `compensated_outdoor_temp_c`; the heuristic above is still what actually runs.
@@ -112,6 +112,25 @@ from passive data while off. A future phase will use this model for a proper
 multi-hour cost-optimizing controller once it's proven accurate against real
 house data — the heuristic is structured so that can slot in later without
 breaking existing sensors/automations.
+
+#### Optional wind term (advanced, off by default)
+
+For houses expected to be genuinely wind-sensitive — old, leaky, exposed —
+enable `enable_wind_rc` in options to add a 4th estimated parameter,
+`sensor.<name>_rc_model_wind_gain`. It's off by default because for a
+typical well-sealed house, wind speed is highly correlated with outdoor
+temperature in normal weather data, and a small true wind effect can't be
+reliably told apart from that correlation — enabling it just adds estimation
+noise for no benefit. A leaky house's true wind sensitivity is large enough
+to be statistically distinguishable, which is why this is a per-installation
+choice rather than always on or always off. The wind term is an *interaction*
+with the temperature gap (`(T_out - T_in) × wind`), not a plain additive
+term — wind physically can't cause heat loss with no temperature difference
+to amplify — and wind speed is normalised by a configurable reference speed
+(`rc_wind_reference_ms`, default 5 m/s) to keep it numerically comparable to
+the other terms. Turning this on changes the estimator's dimensionality, so
+(like any options change) it triggers a reload and resets learning progress
+for a fresh start.
 
 ## License
 

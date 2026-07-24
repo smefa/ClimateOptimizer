@@ -19,6 +19,7 @@ from .const import (
     CONF_COMFORT_MAX_C,
     CONF_COMFORT_MIN_C,
     CONF_ENABLE_PRICE_COMPENSATION,
+    CONF_ENABLE_WIND_RC,
     CONF_HEATING_CUTOFF_C,
     CONF_INDOOR_TARGET_TEMPERATURE,
     CONF_INDOOR_TEMP_SENSOR,
@@ -30,11 +31,13 @@ from .const import (
     CONF_PRICE_MAX_DROP_C,
     CONF_PRICE_THRESHOLD_MAX,
     CONF_PRICE_THRESHOLD_START,
+    CONF_RC_WIND_REFERENCE_MS,
     CONF_UPDATE_INTERVAL_MINUTES,
     CONF_WEATHER_ENTITY,
     DEFAULT_COMFORT_MAX_C,
     DEFAULT_COMFORT_MIN_C,
     DEFAULT_ENABLE_PRICE_COMPENSATION,
+    DEFAULT_ENABLE_WIND_RC,
     DEFAULT_HEATING_CUTOFF_C,
     DEFAULT_INDOOR_TARGET_TEMPERATURE,
     DEFAULT_K_INDOOR,
@@ -43,6 +46,7 @@ from .const import (
     DEFAULT_PRICE_MAX_DROP_C,
     DEFAULT_PRICE_THRESHOLD_MAX,
     DEFAULT_PRICE_THRESHOLD_START,
+    DEFAULT_RC_WIND_REFERENCE_MS,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
 )
@@ -225,6 +229,27 @@ class ClimateOptimizerOptionsFlow(config_entries.OptionsFlow):
                 ): selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=5, max=60, step=1, unit_of_measurement="min", mode="box"
+                    )
+                ),
+                # Advanced / experimental: the Phase 2 shadow-mode RC model's
+                # optional wind term. Shadow mode only — this never affects
+                # compensated_outdoor_temp_c, only the RC diagnostic sensors.
+                # Off by default: only worth enabling for houses expected to
+                # be genuinely wind-sensitive (old, leaky, exposed); for a
+                # typical house it just adds estimation noise. See
+                # rc_model.py's module docstring for why.
+                vol.Required(
+                    CONF_ENABLE_WIND_RC,
+                    default=current.get(CONF_ENABLE_WIND_RC, DEFAULT_ENABLE_WIND_RC),
+                ): selector.BooleanSelector(),
+                vol.Required(
+                    CONF_RC_WIND_REFERENCE_MS,
+                    default=current.get(
+                        CONF_RC_WIND_REFERENCE_MS, DEFAULT_RC_WIND_REFERENCE_MS
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=1, max=15, step=0.5, unit_of_measurement="m/s", mode="box"
                     )
                 ),
             }

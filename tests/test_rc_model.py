@@ -41,6 +41,7 @@ def make_inputs(**overrides) -> RCModelInputs:
         outdoor_temp_c=3.0,
         compensation_delta_c=-2.0,
         solar_effect=0.0,
+        wind_speed_ms=0.0,
         dt_seconds=DT,
     )
     defaults.update(overrides)
@@ -95,10 +96,11 @@ def _simulate_true_system(theta_true, n_cycles, noise_std=0.0, seed=1):
 
 
 def _run(cycles, config=None):
-    state = initial_state()
+    config = config or RCModelConfig()
+    state = initial_state(enable_wind=config.enable_wind)
     last = None
     for c in cycles:
-        state, last = step(state, make_inputs(**c), config or RCModelConfig())
+        state, last = step(state, make_inputs(**c), config)
     return state, last
 
 
@@ -196,6 +198,7 @@ def test_parameter_clipping_engages_and_holds_bounds():
                 outdoor_temp_c=outdoor,
                 compensation_delta_c=0.0,
                 solar_effect=1.0,          # positive solar but paired with...
+                wind_speed_ms=0.0,
                 dt_seconds=DT,
             ),
             config,
@@ -235,6 +238,7 @@ def test_long_run_is_numerically_stable():
                 outdoor_temp_c=outdoor,
                 compensation_delta_c=u,
                 solar_effect=solar,
+                wind_speed_ms=0.0,
                 dt_seconds=DT,
             ),
             config,
@@ -304,6 +308,242 @@ def test_prediction_error_populated_after_two_accepted_cycles():
     assert later, "expected at least one scored prediction error"
     # With zero noise and a self-consistent system the prediction error is tiny.
     assert abs(later[-1].prediction_error_c) < 0.5
+
+
+def _simulate_true_system_wind(theta_true, n_cycles, wind_fn, noise_std=0.0, seed=1):
+    """Like _simulate_true_system but with a 4th (wind) term and a caller-
+    supplied wind_fn(rng) -> wind_speed_ms, so tests can control whether wind
+    is independently excited (identifiable) or collinear with cold (not).
+    """
+    rng = random.Random(seed)
+    theta_env, theta_gain, theta_solar, theta_wind = theta_true
+    indoor = 21.0
+    cycles = []
+    for k in range(n_cycles):
+        outdoor = rng.uniform(-10.0, 10.0)
+        u = rng.uniform(-4.0, 1.0)
+        solar = rng.uniform(0.0, 1.0)
+        wind = wind_fn(rng, outdoor)
+        d_indoor = (
+            theta_env * (outdoor - indoor) * DT_H
+            + theta_gain * u * DT_H
+            + theta_solar * solar * DT_H
+            + theta_wind * (outdoor - indoor) * (wind / rc_model.DEFAULT_WIND_REFERENCE_MS) * DT_H
+        )
+        if noise_std:
+            d_indoor += rng.gauss(0.0, noise_std)
+        next_indoor = indoor + d_indoor
+        cycles.append(
+            dict(
+                indoor_temp_c=indoor,
+                outdoor_temp_c=outdoor,
+                compensation_delta_c=u,
+                solar_effect=solar,
+                wind_speed_ms=wind,
+            )
+        )
+        indoor = next_indoor
+    cycles.append(
+        dict(
+            indoor_temp_c=indoor,
+            outdoor_temp_c=0.0,
+            compensation_delta_c=0.0,
+            solar_effect=0.0,
+            wind_speed_ms=0.0,
+        )
+    )
+    return cycles
+
+
+def test_wind_disabled_state_is_three_dimensional():
+    state = initial_state()  # default enable_wind=False
+    assert len(state.theta) == 3
+    assert len(state.p_matrix) == 3
+
+
+def test_wind_disabled_result_always_reports_zero_wind_gain():
+    theta_true = (0.05, -0.15, 0.40)
+    cycles = _simulate_true_system(theta_true, n_cycles=60, noise_std=0.01, seed=8)
+    state = initial_state()
+    result = None
+    for c in cycles:
+        # Even though wind_speed_ms defaults to 0.0 via make_inputs, feed some
+        # nonzero wind to prove it's genuinely ignored when disabled, not just
+        # coincidentally always zero in the input.
+        state, result = step(
+            state, make_inputs(wind_speed_ms=7.0, **c), RCModelConfig()
+        )
+    assert result.theta_wind == 0.0
+
+
+def test_wind_param_converges_on_synthetic_windy_system():
+    # A deliberately wind-sensitive (leaky) house: sizeable true theta_wind.
+    theta_true = (0.05, -0.15, 0.40, 0.20)
+    cycles = _simulate_true_system_wind(
+        theta_true,
+        n_cycles=800,
+        wind_fn=lambda rng, outdoor: rng.uniform(0.0, 15.0),  # independent of outdoor
+        noise_std=0.01,
+        seed=21,
+    )
+    config = RCModelConfig(enable_wind=True)
+    state, result = _run(cycles, config)
+
+    assert result.accepted_samples > 700
+    assert len(state.theta) == 4
+    assert math.isclose(state.theta[0], theta_true[0], rel_tol=0.25)
+    assert math.isclose(state.theta[3], theta_true[3], rel_tol=0.35)
+    assert result.theta_wind > 0.05  # clearly nonzero, not stuck at the prior
+
+
+def test_wind_nonidentifiable_when_collinear_stays_bounded():
+    # Wind strongly correlated with cold (mimicking real weather: cold days
+    # tend to be windy days) but with a SMALL true wind effect. This is the
+    # scenario the feature defaults to off for; with it explicitly enabled
+    # anyway, the estimator must not manufacture a large spurious coefficient
+    # from the collinearity - it should stay small/bounded, not blow up.
+    theta_true = (0.05, -0.15, 0.40, 0.01)  # tiny true wind sensitivity
+
+    def collinear_wind(rng, outdoor):
+        # Colder outdoor -> windier, plus noise, clipped to a sane range.
+        base = _clamp_local(-outdoor * 0.5, 0.0, 20.0)
+        return _clamp_local(base + rng.gauss(0.0, 2.0), 0.0, 20.0)
+
+    cycles = _simulate_true_system_wind(
+        theta_true, n_cycles=500, wind_fn=collinear_wind, noise_std=0.02, seed=13
+    )
+    config = RCModelConfig(enable_wind=True)
+    state, result = _run(cycles, config)
+
+    assert math.isfinite(state.theta[3])
+    # Should not have run away to anywhere near the upper bound from noise.
+    assert state.theta[3] < 0.15
+
+
+def _clamp_local(v, lo, hi):
+    return max(lo, min(hi, v))
+
+
+def test_wind_clip_nonnegative():
+    # Adversarial: force indoor to warm up steadily despite cold+windy
+    # conditions, which would require a negative theta_wind to "explain" -
+    # must clip at THETA_WIND_MIN = 0.0, not go negative.
+    state = initial_state(enable_wind=True)
+    config = RCModelConfig(enable_wind=True)
+    indoor = 21.0
+    result = None
+    for k in range(300):
+        state, result = step(
+            state,
+            RCModelInputs(
+                indoor_temp_c=indoor,
+                indoor_data_available=True,
+                outdoor_temp_c=-20.0,
+                compensation_delta_c=0.0,
+                solar_effect=0.0,
+                wind_speed_ms=15.0,
+                dt_seconds=DT,
+            ),
+            config,
+        )
+        indoor += 0.02  # steady rise despite cold + high wind
+    assert rc_model.THETA_WIND_MIN <= state.theta[3] <= rc_model.THETA_WIND_MAX
+    assert math.isfinite(state.theta[3])
+
+
+def test_wind_clip_upper_bound():
+    # Adversarial: indoor plummets much faster than the envelope+solar+gain
+    # terms alone can explain, only when wind is high - pushes theta_wind up.
+    state = initial_state(enable_wind=True)
+    config = RCModelConfig(enable_wind=True)
+    indoor = 21.0
+    result = None
+    for k in range(300):
+        state, result = step(
+            state,
+            RCModelInputs(
+                indoor_temp_c=indoor,
+                indoor_data_available=True,
+                outdoor_temp_c=-20.0,
+                compensation_delta_c=0.0,
+                solar_effect=0.0,
+                wind_speed_ms=20.0,
+                dt_seconds=DT,
+            ),
+            config,
+        )
+        indoor -= 2.0  # implausibly steep drop, far beyond what env alone gives
+    assert state.theta[3] <= rc_model.THETA_WIND_MAX
+    assert math.isfinite(state.theta[3])
+
+
+def test_wind_long_run_numerically_stable_with_storm_leverage():
+    theta_true = (0.03, -0.10, 0.25, 0.15)
+    rng = random.Random(77)
+
+    def gusty_wind(rng, outdoor):
+        # Occasional storm-magnitude gusts mixed into normal wind.
+        if rng.random() < 0.05:
+            return rng.uniform(15.0, 20.0)
+        return rng.uniform(0.0, 6.0)
+
+    state = initial_state(enable_wind=True)
+    config = RCModelConfig(enable_wind=True)
+    indoor = 21.0
+    result = None
+    for k in range(2000):
+        outdoor = rng.uniform(-15.0, 15.0)
+        u = rng.uniform(-4.0, 2.0)
+        solar = rng.uniform(0.0, 1.0)
+        wind = gusty_wind(rng, outdoor)
+        d = (
+            theta_true[0] * (outdoor - indoor) * DT_H
+            + theta_true[1] * u * DT_H
+            + theta_true[2] * solar * DT_H
+            + theta_true[3] * (outdoor - indoor) * (wind / rc_model.DEFAULT_WIND_REFERENCE_MS) * DT_H
+            + rng.gauss(0.0, 0.02)
+        )
+        state, result = step(
+            state,
+            RCModelInputs(
+                indoor_temp_c=indoor,
+                indoor_data_available=True,
+                outdoor_temp_c=outdoor,
+                compensation_delta_c=u,
+                solar_effect=solar,
+                wind_speed_ms=wind,
+                dt_seconds=DT,
+            ),
+            config,
+        )
+        indoor += d
+
+    assert all(math.isfinite(v) for v in state.theta)
+    assert math.isfinite(result.cov_trace)
+    assert result.cov_trace <= rc_model.P_TRACE_MAX * 1.0001
+    assert result.cov_trace > 0
+    for i in range(4):
+        assert math.isfinite(state.p_matrix[i][i])
+        assert state.p_matrix[i][i] > 0
+
+
+def test_wind_scale_matching_at_reference_speed():
+    # At wind == wind_reference_ms, the wind regressor's magnitude should be
+    # comparable to the envelope regressor's (the whole point of normalising
+    # by a reference speed rather than using raw m/s) - not orders of
+    # magnitude larger.
+    outdoor, indoor_t = -15.0, 21.0
+    envelope_term = (outdoor - indoor_t) * DT_H
+    wind_term = (
+        (outdoor - indoor_t)
+        * (rc_model.DEFAULT_WIND_REFERENCE_MS / rc_model.DEFAULT_WIND_REFERENCE_MS)
+        * DT_H
+    )
+    assert wind_term == envelope_term  # identical by construction at v=v_ref
+
+    # At a storm (20 m/s), it should be elevated but not wildly disproportionate.
+    storm_term = (outdoor - indoor_t) * (20.0 / rc_model.DEFAULT_WIND_REFERENCE_MS) * DT_H
+    assert abs(storm_term) <= abs(envelope_term) * 5
 
 
 def test_non_finite_input_rejected():

@@ -44,12 +44,49 @@ reporting an arbitrary split, not an estimate. We therefore estimate the
 identifiable lumped parameters and expose the physically meaningful
 `time_constant_h` (tau), the heat-pump gain coefficient and the solar gain
 coefficient. This is the deliberate "prefer the simpler, well-conditioned
-formulation" call: each of the three regressors is excited by a distinct
-physical driver (envelope temperature difference, applied compensation delta,
-sunlight), so the 3x3 problem stays well-conditioned at typical HA cadences
-(e.g. 15 min, noisy sensors), whereas adding a separate wind regressor
-(collinear with the envelope term, both scaling with T_out - T_in) would make
-it fragile. Wind is left out of the estimated set for this first slice.
+formulation" call: each regressor is excited by a distinct physical driver
+(envelope temperature difference, applied compensation delta, sunlight), so
+the problem stays well-conditioned at typical HA cadences (e.g. 15 min,
+noisy sensors), whereas adding a wind regressor by default (collinear with
+the envelope term, both scaling with T_out - T_in) would make it fragile for
+most houses.
+
+Optional 4th term: wind (opt-in, per-installation)
+----------------------------------------------------
+For houses expected to be genuinely wind-sensitive (old, leaky, exposed —
+the collinearity risk above is proportional to how *small* the true wind
+effect is, and a leaky house's true effect is large enough to be
+statistically distinguishable from the collinear envelope term), the caller
+may enable a 4th regressor via `RCModelConfig.enable_wind`:
+
+    dT_in += theta_wind * (T_out - T_in) * (wind_speed / wind_reference_ms) * dt
+
+This is an *interaction* term, not a plain additive `+ theta_wind * wind`,
+because wind physically cannot cause heat loss with zero indoor/outdoor
+temperature difference — both real wind-loss mechanisms (wind-driven
+infiltration, exterior convective film) scale with the temperature gap, not
+with wind speed alone. `theta_wind >= 0` is enforced as a hard physical
+constraint: wind can only amplify heat exchange in whichever direction the
+gradient already points, never reverse it. Wind speed is normalised by a
+reference speed (default 5 m/s) before forming the interaction term
+specifically to keep its magnitude comparable to the other regressors (which
+are themselves deliberately `dt`-scaled for the same reason) — an
+unnormalised raw-m/s interaction term can reach roughly 20-60x the envelope
+regressor's typical range given realistic Nordic temperature/wind extremes,
+which would reintroduce a conditioning problem via magnitude imbalance
+instead of collinearity.
+
+When disabled (the default), the estimator is genuinely 3-dimensional, not a
+4-dimensional estimator with the wind term silently zeroed — carrying a
+permanently-unexcited 4th dimension would still slowly inflate its share of
+the shared covariance-windup budget every cycle purely from the forgetting
+factor, and over a long enough run that would eventually trip the trace cap
+and rescale the *entire* matrix, including the three real parameters. That
+would make "disabled" subtly different from the original 3-parameter
+behaviour over long runs, not identical. Sizing the estimator itself (state
+dimensionality tied to `enable_wind` at `initial_state()` time) avoids this
+entirely and guarantees bit-for-bit identical behaviour to the original
+3-parameter model when wind is off.
 
 Estimation: Recursive Least Squares with a forgetting factor, plus guardrails
 (covariance-windup capping + symmetrisation + PD safeguards, physically
@@ -67,17 +104,23 @@ MODEL_VERSION = "rc_rls_v1"
 # --- RLS / model configuration (inlined; no const.py dependency) -------------
 
 DEFAULT_FORGETTING_FACTOR = 0.99  # sane middle of the usual 0.98-0.995 band
+DEFAULT_WIND_REFERENCE_MS = 5.0   # moderate/typical wind; keeps the wind
+                                   # interaction term's magnitude comparable
+                                   # to the envelope regressor (see module
+                                   # docstring)
 
 # Cold-start priors. A 30 h time constant is a plausible medium-mass house;
-# the gain/solar coefficients start at zero and are driven purely by data.
+# the gain/solar/wind coefficients start at zero and are driven purely by
+# data. Index order throughout this module: env, gain, solar, [wind].
 INIT_TAU_H = 30.0
 INIT_THETA_ENV = 1.0 / INIT_TAU_H
 INIT_THETA_GAIN = 0.0
 INIT_THETA_SOLAR = 0.0
+INIT_THETA_WIND = 0.0
 # Wide initial covariance so early estimates are not overconfident. Each theta
 # is O(<=1) here, so a diagonal of 1.0 corresponds to a prior std of ~1, far
 # larger than the priors themselves -> deliberately uncertain at cold start.
-INIT_P_DIAG = (1.0, 1.0, 1.0)
+INIT_P_DIAG = (1.0, 1.0, 1.0, 1.0)
 
 # Physically sensible parameter bounds; clipping engages if the estimator
 # tries to wander outside them. tau in [1 h, 500 h] -> theta_env in [1/500, 1].
@@ -89,6 +132,17 @@ THETA_GAIN_MIN = -5.0            # sign is brand-dependent; bound magnitude only
 THETA_GAIN_MAX = 5.0
 THETA_SOLAR_MIN = 0.0           # sunlight can only add heat
 THETA_SOLAR_MAX = 5.0
+THETA_WIND_MIN = 0.0            # wind can only amplify heat exchange, never
+THETA_WIND_MAX = 0.5            # reverse it; upper bound is engineering
+                                 # judgment (see module docstring), flagged
+                                 # for revision once real data justifies it
+
+_THETA_BOUNDS = (
+    (THETA_ENV_MIN, THETA_ENV_MAX),
+    (THETA_GAIN_MIN, THETA_GAIN_MAX),
+    (THETA_SOLAR_MIN, THETA_SOLAR_MAX),
+    (THETA_WIND_MIN, THETA_WIND_MAX),
+)
 
 # Covariance-windup guard: if excitation is poor the forgetting factor inflates
 # P without bound. Cap its trace and rescale if exceeded.
@@ -115,19 +169,23 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
-# --- tiny 3x3 linear algebra (stdlib only) -----------------------------------
+# --- tiny NxN linear algebra (stdlib only) -----------------------------------
+# N is 3 (env, gain, solar) or 4 (+ wind), taken from the length of the
+# vectors/matrices passed in — never hardcoded, so the same code serves both
+# estimator sizes without duplication.
 
 
 def _matvec(matrix: list[list[float]], vec: list[float]) -> list[float]:
-    return [sum(matrix[i][j] * vec[j] for j in range(3)) for i in range(3)]
+    n = len(vec)
+    return [sum(matrix[i][j] * vec[j] for j in range(n)) for i in range(n)]
 
 
 def _dot(a: list[float], b: list[float]) -> float:
-    return sum(a[i] * b[i] for i in range(3))
+    return sum(a[i] * b[i] for i in range(len(a)))
 
 
 def _trace(matrix: list[list[float]]) -> float:
-    return matrix[0][0] + matrix[1][1] + matrix[2][2]
+    return sum(matrix[i][i] for i in range(len(matrix)))
 
 
 def _all_finite(values) -> bool:
@@ -139,13 +197,23 @@ def _all_finite(values) -> bool:
 
 @dataclass(frozen=True)
 class RCModelConfig:
-    """Estimator tuning. Defaults are production-sane; overridable in tests."""
+    """Estimator tuning. Defaults are production-sane; overridable in tests.
+
+    `enable_wind` must match whatever `initial_state(enable_wind=...)` was
+    constructed with — it determines the estimator's dimensionality (3 or
+    4), and `step()` assumes `state` and `config` agree. The coordinator
+    sources both from the same config-entry option, and options changes
+    trigger a full coordinator reload (fresh `initial_state()` call), so
+    this invariant holds in practice without needing a runtime check here.
+    """
 
     forgetting_factor: float = DEFAULT_FORGETTING_FACTOR
     outlier_sigma: float = OUTLIER_SIGMA
     abs_max_indoor_step_c: float = ABS_MAX_INDOOR_STEP_C
     warmup_samples: int = WARMUP_SAMPLES
     p_trace_max: float = P_TRACE_MAX
+    enable_wind: bool = False
+    wind_reference_ms: float = DEFAULT_WIND_REFERENCE_MS
 
 
 @dataclass(frozen=True)
@@ -154,12 +222,13 @@ class RCModelState:
 
     Immutable: `step()` returns a fresh state, so there is no hidden mutable
     global state and the function is trivially unit-testable, exactly like
-    `heuristic.compute()`.
+    `heuristic.compute()`. `theta`/`p_matrix` are length 3 or 4 depending on
+    whether `initial_state()` was called with `enable_wind`.
     """
 
-    theta: tuple[float, float, float]
+    theta: tuple[float, ...]
     # Covariance P as a tuple-of-tuples (immutable); worked on as lists inside.
-    p_matrix: tuple[tuple[float, float, float], ...]
+    p_matrix: tuple[tuple[float, ...], ...]
     accepted_samples: int
     rejected_samples: int
     clip_events: int
@@ -169,6 +238,7 @@ class RCModelState:
     prev_outdoor_temp_c: float | None
     prev_u_c: float | None
     prev_solar: float | None
+    prev_wind_speed_ms: float | None
     prev_predicted_next_indoor_c: float | None
 
 
@@ -181,7 +251,11 @@ class RCModelInputs:
     outdoor_temp_c: float          # *raw* outdoor temp (the envelope driver)
     compensation_delta_c: float    # u = compensated - raw applied this cycle
     solar_effect: float            # in [0, 1], as the heuristic computes it
-    dt_seconds: float              # actual elapsed time since the last cycle
+    wind_speed_ms: float           # always a real value (coordinator defaults
+                                    # to 0.0 when forecast wind is unavailable,
+                                    # same soft-degrade convention as solar);
+                                    # only used when RCModelConfig.enable_wind
+    dt_seconds: float               # actual elapsed time since the last cycle
 
 
 @dataclass(frozen=True)
@@ -193,6 +267,8 @@ class RCModelResult:
     theta_env: float
     theta_gain: float
     theta_solar: float
+    theta_wind: float               # 0.0 (pinned, never estimated) unless
+                                     # the wind term is enabled
     time_constant_h: float
     accepted_samples: int
     rejected_samples: int
@@ -205,14 +281,22 @@ class RCModelResult:
     model_version: str = MODEL_VERSION
 
 
-def initial_state() -> RCModelState:
-    """Cold-start state: prior parameters + wide covariance, no history yet."""
+def initial_state(enable_wind: bool = False) -> RCModelState:
+    """Cold-start state: prior parameters + wide covariance, no history yet.
+
+    `enable_wind` fixes the estimator's dimensionality (3 or 4) for the
+    lifetime of this state — see the module docstring for why this is sized
+    up front rather than always carrying a 4th, possibly-unused dimension.
+    """
+    theta = [INIT_THETA_ENV, INIT_THETA_GAIN, INIT_THETA_SOLAR]
+    if enable_wind:
+        theta.append(INIT_THETA_WIND)
+    n = len(theta)
     return RCModelState(
-        theta=(INIT_THETA_ENV, INIT_THETA_GAIN, INIT_THETA_SOLAR),
-        p_matrix=(
-            (INIT_P_DIAG[0], 0.0, 0.0),
-            (0.0, INIT_P_DIAG[1], 0.0),
-            (0.0, 0.0, INIT_P_DIAG[2]),
+        theta=tuple(theta),
+        p_matrix=tuple(
+            tuple(INIT_P_DIAG[i] if i == j else 0.0 for j in range(n))
+            for i in range(n)
         ),
         accepted_samples=0,
         rejected_samples=0,
@@ -223,6 +307,7 @@ def initial_state() -> RCModelState:
         prev_outdoor_temp_c=None,
         prev_u_c=None,
         prev_solar=None,
+        prev_wind_speed_ms=None,
         prev_predicted_next_indoor_c=None,
     )
 
@@ -234,13 +319,15 @@ def _confidence(accepted_samples: int, warmup: int) -> float:
 
 
 def _clip_theta(theta: list[float]) -> tuple[list[float], bool]:
-    """Clip parameters to physical bounds. Returns (clipped, any_clip_hit)."""
-    clipped = [
-        _clamp(theta[0], THETA_ENV_MIN, THETA_ENV_MAX),
-        _clamp(theta[1], THETA_GAIN_MIN, THETA_GAIN_MAX),
-        _clamp(theta[2], THETA_SOLAR_MIN, THETA_SOLAR_MAX),
-    ]
-    hit = any(clipped[i] != theta[i] for i in range(3))
+    """Clip parameters to physical bounds. Returns (clipped, any_clip_hit).
+
+    Works for either estimator size: `_THETA_BOUNDS` has entries for all 4
+    possible dimensions (env, gain, solar, wind); only the first `len(theta)`
+    are used.
+    """
+    n = len(theta)
+    clipped = [_clamp(theta[i], *_THETA_BOUNDS[i]) for i in range(n)]
+    hit = any(clipped[i] != theta[i] for i in range(n))
     return clipped, hit
 
 
@@ -252,7 +339,8 @@ def _rls_update(
     forgetting: float,
     p_trace_max: float,
 ) -> tuple[list[float], list[list[float]], float, bool]:
-    """One numerically-guarded RLS step.
+    """One numerically-guarded RLS step, generic over the estimator size N
+    (N = len(theta), 3 or 4).
 
     Returns (theta_new, p_new, a_priori_residual, clip_hit). Guards:
       * standard forgetting-factor RLS gain/covariance update,
@@ -262,6 +350,7 @@ def _rls_update(
       * cap trace(P) to bound covariance windup under poor excitation,
       * clip theta to physical bounds and report if a bound was hit.
     """
+    n = len(theta)
     p_phi = _matvec(p_matrix, phi)          # P * phi
     phi_p_phi = _dot(phi, p_phi)            # phi^T P phi (scalar, >= 0)
     denom = forgetting + phi_p_phi
@@ -269,30 +358,29 @@ def _rls_update(
         # Degenerate; skip the numeric update but keep parameters.
         return theta, p_matrix, 0.0, False
 
-    gain = [p_phi[i] / denom for i in range(3)]
+    gain = [p_phi[i] / denom for i in range(n)]
     residual = y - _dot(theta, phi)         # a priori error
-    theta_new = [theta[i] + gain[i] * residual for i in range(3)]
+    theta_new = [theta[i] + gain[i] * residual for i in range(n)]
 
     # P <- (P - gain * (P*phi)^T) / lambda
     p_new = [
-        [(p_matrix[i][j] - gain[i] * p_phi[j]) / forgetting for j in range(3)]
-        for i in range(3)
+        [(p_matrix[i][j] - gain[i] * p_phi[j]) / forgetting for j in range(n)]
+        for i in range(n)
     ]
     # Symmetrise.
-    for i in range(3):
-        for j in range(i + 1, 3):
+    for i in range(n):
+        for j in range(i + 1, n):
             avg = 0.5 * (p_new[i][j] + p_new[j][i])
             p_new[i][j] = avg
             p_new[j][i] = avg
 
     # Positive-definiteness / finiteness safeguard.
-    flat = [p_new[i][j] for i in range(3) for j in range(3)]
-    diag_ok = p_new[0][0] > 0 and p_new[1][1] > 0 and p_new[2][2] > 0
+    flat = [p_new[i][j] for i in range(n) for j in range(n)]
+    diag_ok = all(p_new[i][i] > 0 for i in range(n))
     if not _all_finite(flat) or not _all_finite(theta_new) or not diag_ok:
         p_new = [
-            [INIT_P_DIAG[0], 0.0, 0.0],
-            [0.0, INIT_P_DIAG[1], 0.0],
-            [0.0, 0.0, INIT_P_DIAG[2]],
+            [INIT_P_DIAG[i] if i == j else 0.0 for j in range(n)]
+            for i in range(n)
         ]
         if not _all_finite(theta_new):
             theta_new = list(theta)
@@ -301,7 +389,7 @@ def _rls_update(
     tr = _trace(p_new)
     if tr > p_trace_max and tr > 0:
         scale = p_trace_max / tr
-        p_new = [[p_new[i][j] * scale for j in range(3)] for i in range(3)]
+        p_new = [[p_new[i][j] * scale for j in range(n)] for i in range(n)]
 
     theta_new, clip_hit = _clip_theta(theta_new)
     return theta_new, p_new, residual, clip_hit
@@ -323,6 +411,7 @@ def _result(
     theta = state.theta
     theta_env = theta[0]
     time_constant_h = 1.0 / theta_env if theta_env > 0 else float("inf")
+    theta_wind = theta[3] if len(theta) > 3 else 0.0
     p_list = [list(row) for row in state.p_matrix]
     return RCModelResult(
         predicted_next_indoor_temp_c=predicted_next,
@@ -330,6 +419,7 @@ def _result(
         theta_env=theta_env,
         theta_gain=theta[1],
         theta_solar=theta[2],
+        theta_wind=theta_wind,
         time_constant_h=time_constant_h,
         accepted_samples=state.accepted_samples,
         rejected_samples=state.rejected_samples,
@@ -350,7 +440,9 @@ def step(
     """Advance the shadow estimator by one cycle: (state, inputs) -> (state, result).
 
     Pure and side-effect free. The caller persists the returned state and feeds
-    it back next cycle. Outlier-rejection rule (two stages):
+    it back next cycle. `state` must have been created with
+    `initial_state(enable_wind=config.enable_wind)` — see RCModelConfig's
+    docstring. Outlier-rejection rule (two stages):
       1. Hard plausibility gate (always on): reject if any input is non-finite,
          if dt is out of [MIN_DT, MAX_DT] (a gap implies a discontinuity, e.g.
          HA restart -> re-anchor instead of fitting across it), or if the raw
@@ -393,6 +485,7 @@ def step(
             inputs.outdoor_temp_c,
             inputs.compensation_delta_c,
             inputs.solar_effect,
+            inputs.wind_speed_ms,
             inputs.dt_seconds,
         )
     )
@@ -406,6 +499,7 @@ def step(
             prev_outdoor_temp_c=inputs.outdoor_temp_c,
             prev_u_c=inputs.compensation_delta_c,
             prev_solar=inputs.solar_effect,
+            prev_wind_speed_ms=inputs.wind_speed_ms,
             prev_predicted_next_indoor_c=predicted_next,
         )
 
@@ -476,11 +570,21 @@ def step(
         )
 
     # Regressors are driven by the *previous* cycle's conditions over dt.
+    wind_ref = config.wind_reference_ms if config.wind_reference_ms > 0 else (
+        DEFAULT_WIND_REFERENCE_MS
+    )
     phi = [
         (state.prev_outdoor_temp_c - state.prev_indoor_temp_c) * dt_h,
         state.prev_u_c * dt_h,
         state.prev_solar * dt_h,
     ]
+    if config.enable_wind:
+        prev_wind = state.prev_wind_speed_ms if state.prev_wind_speed_ms is not None else 0.0
+        phi.append(
+            (state.prev_outdoor_temp_c - state.prev_indoor_temp_c)
+            * (prev_wind / wind_ref)
+            * dt_h
+        )
     theta_list = list(state.theta)
     a_priori_resid = y - _dot(theta_list, phi)
 
@@ -530,10 +634,16 @@ def step(
         inputs.compensation_delta_c * dt_h,
         inputs.solar_effect * dt_h,
     ]
+    if config.enable_wind:
+        phi_now.append(
+            (inputs.outdoor_temp_c - inputs.indoor_temp_c)
+            * (inputs.wind_speed_ms / wind_ref)
+            * dt_h
+        )
     predicted_next = inputs.indoor_temp_c + _dot(theta_new, phi_now)
 
     new_state = RCModelState(
-        theta=(theta_new[0], theta_new[1], theta_new[2]),
+        theta=tuple(theta_new),
         p_matrix=_to_tuple_matrix(p_new),
         accepted_samples=state.accepted_samples + 1,
         rejected_samples=state.rejected_samples,
@@ -544,13 +654,19 @@ def step(
         prev_outdoor_temp_c=inputs.outdoor_temp_c,
         prev_u_c=inputs.compensation_delta_c,
         prev_solar=inputs.solar_effect,
+        prev_wind_speed_ms=inputs.wind_speed_ms,
         prev_predicted_next_indoor_c=predicted_next,
     )
 
     tau = 1.0 / theta_new[0] if theta_new[0] > 0 else float("inf")
     reason = (
         f"RC RLS: tau={tau:.1f}h, gain={theta_new[1]:+.3f}, "
-        f"solar={theta_new[2]:.3f}; accepted (resid {residual:+.2f} degC); "
+        f"solar={theta_new[2]:.3f}"
+    )
+    if config.enable_wind:
+        reason += f", wind={theta_new[3]:+.3f}"
+    reason += (
+        f"; accepted (resid {residual:+.2f} degC); "
         f"{new_state.accepted_samples} accepted / {new_state.rejected_samples} "
         f"rejected; confidence "
         f"{_confidence(new_state.accepted_samples, config.warmup_samples) * 100:.0f}%"
