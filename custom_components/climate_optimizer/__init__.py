@@ -16,6 +16,11 @@ type ClimateOptimizerConfigEntry = ConfigEntry[ClimateOptimizerCoordinator]
 
 async def async_setup_entry(hass: HomeAssistant, entry: ClimateOptimizerConfigEntry) -> bool:
     coordinator = ClimateOptimizerCoordinator(hass, entry)
+    # Restore the RC shadow model's persisted estimator state (if any) BEFORE
+    # the first refresh, so the first cycle already continues from prior
+    # learning instead of the cold-start prior. Strictly additive: this never
+    # raises and cleanly cold-starts on empty/corrupt/incompatible state.
+    await coordinator.async_load_rc_state()
     # Deliberately async_refresh(), not async_config_entry_first_refresh():
     # the latter turns a failed first cycle (e.g. the outdoor sensor still
     # being unavailable while HA is starting up) into ConfigEntryNotReady,
@@ -50,6 +55,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ClimateOptimizerConfigEn
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ClimateOptimizerConfigEntry) -> bool:
+    # Flush any pending debounced RC-state write before teardown: HA only
+    # auto-flushes Store.async_delay_save on full shutdown, not on an entry
+    # reload, so without this the most recent learning could be lost on every
+    # options change / reload. Strictly additive and self-guarded.
+    await entry.runtime_data.async_save_rc_state_now()
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 

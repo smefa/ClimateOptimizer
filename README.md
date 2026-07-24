@@ -31,6 +31,22 @@ flag, so you can watch what it *would* do before switching it on. Flip the
 switch on when you're ready to let it actually influence your heat pump. The
 switch's state is restored across Home Assistant restarts.
 
+Think of the switch as a **training/live toggle**, not just a safety cutout.
+With it *off*, the published value equals the raw outdoor temperature exactly —
+a true no-op that can never behave worse than your heat pump's built-in
+weather-compensation curve did before this integration was installed, which is
+why off is the safe universal default. But "off" is not *purely* a fallback:
+the RC shadow model can only learn your heat pump's **gain** (how strongly a
+compensation nudge moves indoor temperature) while the switch is *on*, because
+that is the only time a real, deliberate compensation delta is actually applied
+to excite that signal (see the RC model section). Switching to live mode is
+therefore also what lets the model calibrate itself to your specific house —
+it is opt-in training, with the understood trade-off that the heuristic's
+fixed coefficients are uncalibrated until then and could respond sluggishly or
+oscillate on some houses while it does. The direction of any correction is
+always right (negative feedback toward your indoor target); only the magnitude
+is uncertain before calibration.
+
 ### Status sensor
 
 `sensor.<name>_status` reports `ok`, `degraded`, or `error`, with attributes
@@ -113,6 +129,24 @@ from passive data while off. A future phase will use this model for a proper
 multi-hour cost-optimizing controller once it's proven accurate against real
 house data — the heuristic is structured so that can slot in later without
 breaking existing sensors/automations.
+
+The model's learned state — its parameter estimates, the RLS covariance
+matrix, and the warmup/confidence and accepted/rejected counters — is
+**persisted across Home Assistant restarts and reloads**. It's written to
+HA's local storage (a debounced JSON store keyed by the config entry, so
+renaming a zone never orphans its learning), reloaded before the first cycle
+after a restart, and flushed on unload. Without this the estimator reset to a
+cold-start prior on every restart or deploy, which threw away accumulated
+learning and — observed in practice — could let the time constant drift up into
+its clip ceiling after frequent restarts, making a full heating season of
+learning impossible if restarts were at all common. Persistence is strictly
+additive and defensive: an empty, corrupt, version-mismatched, or
+wrong-dimensionality store (e.g. left over from before the wind term was
+toggled) is silently discarded in favour of a clean cold start, and any
+storage error is logged and swallowed — it can never break or delay the real
+published output. Note that toggling the optional wind term (below) still
+resets learning on purpose, because it changes the estimator's shape and the
+old saved state no longer matches.
 
 #### Optional wind term (advanced, off by default)
 

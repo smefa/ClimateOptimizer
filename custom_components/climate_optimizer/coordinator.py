@@ -14,6 +14,7 @@ from datetime import datetime, timedelta
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfSpeed, UnitOfTemperature
 from homeassistant.core import HomeAssistant, State
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import SpeedConverter, TemperatureConverter
@@ -85,8 +86,23 @@ from .rc_model import (
     initial_state as rc_initial_state,
     step as rc_step,
 )
+from .rc_store import (
+    STORAGE_VERSION as RC_STORAGE_VERSION,
+    deserialize_state as rc_deserialize_state,
+    serialize_state as rc_serialize_state,
+    store_key as rc_store_key,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+# Debounce window for persisting the RC shadow-model state. `Store.async_delay_save`
+# coalesces every schedule request inside this window into a single disk write,
+# and always flushes on Home Assistant shutdown. A short delay is enough: normal
+# cycles are minutes apart (so this is ~one write per cycle at most), and the
+# real purpose of the debounce is to collapse the *burst* of extra refreshes
+# that a watched source recovering (unavailable -> available) can trigger within
+# a few seconds into one write instead of several.
+RC_STATE_SAVE_DELAY_SECONDS = 30.0
 
 
 def _entry_value(entry: ConfigEntry, key: str, default):
@@ -134,6 +150,18 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         self._rc_state = rc_initial_state(enable_wind=self._rc_config().enable_wind)
         self.rc_result: RCModelResult | None = None
         self._rc_last_monotonic: float | None = None
+        # Persistence for the RC estimator state across HA restarts/reloads.
+        # Without this, every restart wipes `_rc_state` back to the cold-start
+        # prior — losing accumulated learning (theta_gain, the warmup/confidence
+        # counters, tau) and, per project history, letting tau drift up into its
+        # 500h clip ceiling after frequent restarts. The Store is constructed
+        # here (cheap, no I/O); state is loaded once via `async_load_rc_state()`
+        # before the first refresh and written debounced after each cycle. Like
+        # everything else RC/MPC-related this is STRICTLY ADDITIVE: a load/save
+        # failure is caught and logged, never affecting the published output.
+        self._rc_store: Store[dict] = Store(
+            hass, RC_STORAGE_VERSION, rc_store_key(entry.entry_id)
+        )
 
         # --- Phase 3 shadow/advisory-mode MPC planner (purely additive) ------
         # The MPC planner re-solves a receding-horizon plan every cycle from
@@ -518,8 +546,71 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 self._rc_state, rc_inputs, self._rc_config()
             )
             _LOGGER.debug("RC shadow model: %s", self.rc_result.reason)
+            # Debounced persist of the updated estimator state. `_serialize_rc_state`
+            # is evaluated at write time (after the delay), so it always captures
+            # the latest `_rc_state`; multiple schedules inside the window collapse
+            # into a single write. Inside this try/except, so a persistence bug
+            # can never break the real output — same shadow-safety contract.
+            self._rc_store.async_delay_save(
+                self._serialize_rc_state, RC_STATE_SAVE_DELAY_SECONDS
+            )
         except Exception as err:  # noqa: BLE001 - shadow mode must never break output
             _LOGGER.warning("RC shadow model update failed (ignored): %s", err)
+
+    def _serialize_rc_state(self) -> dict:
+        """Data callback for `Store.async_delay_save`: serialize the current
+        RC estimator state. Called at write time, not schedule time."""
+        return rc_serialize_state(self._rc_state)
+
+    async def async_load_rc_state(self) -> None:
+        """Load persisted RC estimator state, if any, into `_rc_state`.
+
+        Called once from `async_setup_entry` before the first refresh. Strictly
+        additive and defensive: on an empty store, a corrupt/incompatible
+        payload, a dimensionality mismatch against the currently configured
+        `enable_wind`, or any load error, `_rc_state` is left at the fresh
+        cold-start prior set in `__init__`. Never raises."""
+        try:
+            data = await self._rc_store.async_load()
+        except Exception as err:  # noqa: BLE001 - never break setup over shadow state
+            _LOGGER.warning(
+                "Could not load persisted RC shadow state (starting fresh): %s", err
+            )
+            return
+        if data is None:
+            _LOGGER.debug("No persisted RC shadow state; starting from cold-start prior")
+            return
+        restored = rc_deserialize_state(
+            data, enable_wind=self._rc_config().enable_wind
+        )
+        if restored is None:
+            _LOGGER.warning(
+                "Persisted RC shadow state was incompatible or corrupt "
+                "(schema/model version, dimensionality, or structure); "
+                "starting from the cold-start prior"
+            )
+            return
+        self._rc_state = restored
+        _LOGGER.debug(
+            "Restored RC shadow state: %d accepted / %d rejected samples",
+            restored.accepted_samples,
+            restored.rejected_samples,
+        )
+
+    async def async_save_rc_state_now(self) -> None:
+        """Flush the RC estimator state to disk immediately.
+
+        Called on config-entry unload/reload, where a pending debounced save
+        would otherwise be lost (HA only auto-flushes `async_delay_save` on full
+        shutdown, not on an entry reload). Persisting here means a season of
+        learning survives an options change too, as long as `enable_wind` is
+        unchanged — if it changed, the reloaded coordinator's dimensionality
+        check discards the mismatched state and cold-starts, which is correct.
+        Strictly additive: any failure is caught and logged."""
+        try:
+            await self._rc_store.async_save(rc_serialize_state(self._rc_state))
+        except Exception as err:  # noqa: BLE001 - never break unload over shadow state
+            _LOGGER.warning("Could not persist RC shadow state on unload (ignored): %s", err)
 
     # --- Phase 3 MPC (shadow/advisory) ---------------------------------------
 
