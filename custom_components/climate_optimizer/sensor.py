@@ -318,6 +318,14 @@ class RCHeatPumpGainSensor(ClimateOptimizerEntity, SensorEntity):
 
     The C-normalised effect on indoor temperature per degC of compensation
     delta the heuristic applies. Dimensionless proxy, not a physical power.
+
+    Reads *unavailable* (None) until the gain dimension has actually been added
+    to the model — which only happens once a real compensation delta has excited
+    the heat pump (activation switch on AND not suppressed by the summer
+    heating-cutoff). This is deliberately distinct from a learned value of 0.0:
+    "we have not modelled the pump yet" is not the same as "the pump's modelled
+    effect is zero", and conflating them would be misleading. The `gain_modeled`
+    flag is also exposed on the RC time-constant sensor's attributes.
     """
 
     _attr_translation_key = "rc_heat_pump_gain"
@@ -333,7 +341,9 @@ class RCHeatPumpGainSensor(ClimateOptimizerEntity, SensorEntity):
     @property
     def native_value(self) -> float | None:
         result: RCModelResult | None = self.coordinator.rc_result
-        return round(result.theta_gain, 4) if result else None
+        if result is None or not result.gain_modeled:
+            return None
+        return round(result.theta_gain, 4)
 
 
 class RCSolarGainSensor(ClimateOptimizerEntity, SensorEntity):

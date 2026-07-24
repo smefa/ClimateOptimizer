@@ -123,30 +123,57 @@ squares, runs alongside the heuristic and exposes diagnostic sensors
 error) — purely for observation. It never influences
 `compensated_outdoor_temp_c`; the heuristic above is still what actually runs.
 Because the activation switch gates what's *actually applied*, the model only
-learns heat-pump gain while the switch is on (it needs real excitation on
-that signal) — it can still learn the envelope time constant and solar gain
-from passive data while off. A future phase will use this model for a proper
-multi-hour cost-optimizing controller once it's proven accurate against real
-house data — the heuristic is structured so that can slot in later without
-breaking existing sensors/automations.
+learns heat-pump gain while a real compensation delta is being applied (it
+needs real excitation on that signal) — it can still learn the envelope time
+constant and solar gain from passive data the rest of the time. A future phase
+will use this model for a proper multi-hour cost-optimizing controller once
+it's proven accurate against real house data — the heuristic is structured so
+that can slot in later without breaking existing sensors/automations.
+
+**The heat-pump gain is only added to the model once it's actually been
+excited.** The gain parameter's only driver is the compensation delta that was
+*really applied*, which is zero whenever the activation switch is off *or* the
+summer heating-cutoff has kicked in (compensated equals raw, so nothing is
+applied even with the switch on). If the model carried a gain parameter during
+such an idle stretch — potentially the whole warm half of the year — that
+never-excited parameter's uncertainty would balloon every cycle (a property of
+the recursive-least-squares forgetting factor) and, after about two weeks,
+trip an internal covariance safeguard that then drags down confidence in the
+envelope and solar parameters that *are* being learned correctly from passive
+weather. So the estimator simply doesn't include the gain parameter until the
+first time a genuinely non-zero applied delta reaches it; at that point the
+gain dimension is added while every already-learned parameter (time constant,
+solar, wind) and its confidence is preserved exactly. Until then, the heat-pump
+gain sensor reads *unavailable* (honestly "not modelled yet", as distinct from
+a learned value of zero), and the MPC planner below reports "heat pump has not
+yet been excited" as its own distinct not-trustworthy reason. Once added, the
+gain parameter stays for good. (Known limitation, left for future work: if the
+switch is turned back off for another long idle stretch *after* gain has been
+added, that same slow uncertainty build-up can recur on the now-present gain
+dimension; solving it properly needs selective per-parameter forgetting, a more
+invasive change deferred on purpose.)
 
 The model's learned state — its parameter estimates, the RLS covariance
-matrix, and the warmup/confidence and accepted/rejected counters — is
-**persisted across Home Assistant restarts and reloads**. It's written to
-HA's local storage (a debounced JSON store keyed by the config entry, so
-renaming a zone never orphans its learning), reloaded before the first cycle
-after a restart, and flushed on unload. Without this the estimator reset to a
-cold-start prior on every restart or deploy, which threw away accumulated
-learning and — observed in practice — could let the time constant drift up into
-its clip ceiling after frequent restarts, making a full heating season of
-learning impossible if restarts were at all common. Persistence is strictly
-additive and defensive: an empty, corrupt, version-mismatched, or
-wrong-dimensionality store (e.g. left over from before the wind term was
-toggled) is silently discarded in favour of a clean cold start, and any
-storage error is logged and swallowed — it can never break or delay the real
-published output. Note that toggling the optional wind term (below) still
-resets learning on purpose, because it changes the estimator's shape and the
-old saved state no longer matches.
+matrix, whether the gain dimension has been added yet, and the
+warmup/confidence and accepted/rejected counters — is **persisted across Home
+Assistant restarts and reloads**. It's written to HA's local storage (a
+debounced JSON store keyed by the config entry, so renaming a zone never
+orphans its learning), reloaded before the first cycle after a restart, and
+flushed on unload. Without this the estimator reset to a cold-start prior on
+every restart or deploy, which threw away accumulated learning and — observed
+in practice — could let the time constant drift up into its clip ceiling after
+frequent restarts, making a full heating season of learning impossible if
+restarts were at all common. Persistence is strictly additive and defensive:
+an empty, corrupt, version-mismatched, or wrong-dimensionality store is
+silently discarded in favour of a clean cold start, and any storage error is
+logged and swallowed — it can never break or delay the real published output.
+The stored state records both whether the wind term is enabled and whether the
+gain dimension has been added, so the two same-length shapes it can take
+(envelope + solar + wind, versus envelope + solar + gain) are never confused on
+reload. Note that toggling the optional wind term (below) still resets learning
+on purpose, because it changes the estimator's shape and the old saved state no
+longer matches; states saved by versions before the lazy-gain change are also
+discarded and cold-started, by design.
 
 #### Optional wind term (advanced, off by default)
 

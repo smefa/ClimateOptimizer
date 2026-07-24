@@ -110,10 +110,14 @@ def _assert_states_equal(a: RCModelState, b: RCModelState) -> None:
 # --- round trips -------------------------------------------------------------
 
 
-def test_roundtrip_cold_start_3d():
+def test_roundtrip_cold_start_no_gain_2d():
+    # Cold start with wind off is now 2-dim ([env, solar]); has_gain False must
+    # round-trip so a fresh estimator is persisted/restored faithfully.
     state = initial_state(enable_wind=False)
+    assert len(state.theta) == 2 and state.has_gain is False
     restored = _roundtrip(state, enable_wind=False)
     assert restored is not None
+    assert restored.has_gain is False
     _assert_states_equal(state, restored)
 
 
@@ -158,6 +162,83 @@ def test_no_wind_state_rejected_by_wind_estimator():
     assert deserialize_state(payload, enable_wind=True) is None
 
 
+# --- lazy gain dimension: has_gain flag + same-length disambiguation ----------
+
+
+def test_roundtrip_post_expansion_preserves_has_gain():
+    # A matured no-wind state has had the gain dimension added ([env, solar,
+    # gain], has_gain True); the flag and the 3-dim state must round-trip.
+    state = _matured_state(enable_wind=False)
+    assert len(state.theta) == 3 and state.has_gain is True
+    payload = serialize_state(state)
+    assert payload["has_gain"] is True
+    restored = _roundtrip(state, enable_wind=False)
+    assert restored is not None
+    assert restored.has_gain is True
+    _assert_states_equal(state, restored)
+
+
+def test_has_gain_disambiguates_same_length_states():
+    # The crux: two DIFFERENT length-3 layouts exist. Length alone cannot tell
+    # them apart; enable_wind + has_gain together must.
+    wind_no_gain = initial_state(enable_wind=True)      # [env, solar, wind]
+    assert len(wind_no_gain.theta) == 3 and wind_no_gain.has_gain is False
+    gain_no_wind = _matured_state(enable_wind=False)    # [env, solar, gain]
+    assert len(gain_no_wind.theta) == 3 and gain_no_wind.has_gain is True
+
+    p_wind = json.loads(json.dumps(serialize_state(wind_no_gain)))
+    p_gain = json.loads(json.dumps(serialize_state(gain_no_wind)))
+    # Both are length 3 but carry different has_gain flags.
+    assert p_wind["n_params"] == p_gain["n_params"] == 3
+    assert p_wind["has_gain"] is False and p_gain["has_gain"] is True
+
+    # Each loads only into the estimator config it actually belongs to...
+    assert deserialize_state(p_wind, enable_wind=True) is not None
+    assert deserialize_state(p_gain, enable_wind=False) is not None
+    # ...and is rejected by the other, despite the identical length.
+    assert deserialize_state(p_wind, enable_wind=False) is None
+    assert deserialize_state(p_gain, enable_wind=True) is None
+
+
+def test_missing_has_gain_key_discarded():
+    # A payload lacking the has_gain flag (e.g. a pre-v2 store that somehow
+    # matched schema_version) cannot be disambiguated and must be discarded.
+    payload = serialize_state(_matured_state(enable_wind=False))
+    del payload["has_gain"]
+    assert deserialize_state(payload, enable_wind=False) is None
+
+
+def test_non_bool_has_gain_discarded():
+    payload = serialize_state(_matured_state(enable_wind=False))
+    payload["has_gain"] = "yes"
+    assert deserialize_state(payload, enable_wind=False) is None
+
+
+def test_pre_v2_payload_discarded():
+    # A legacy v1 payload (old parameter order [env, gain, solar], schema v1,
+    # no has_gain) must be discarded so the estimator cold-starts cleanly rather
+    # than misinterpreting the old ordering.
+    legacy = {
+        "schema_version": 1,
+        "model_version": rc_model.MODEL_VERSION,
+        "n_params": 3,
+        "theta": [0.033, -0.1, 0.2],   # old order: env, gain, solar
+        "p_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        "accepted_samples": 100,
+        "rejected_samples": 0,
+        "clip_events": 0,
+        "resid_var": 0.01,
+        "have_prev": True,
+        "prev_indoor_temp_c": 21.0,
+        "prev_outdoor_temp_c": 3.0,
+        "prev_u_c": -1.0,
+        "prev_solar": 0.3,
+        "prev_wind_speed_ms": 4.0,
+        "prev_predicted_next_indoor_c": 21.0,
+    }
+    assert deserialize_state(legacy, enable_wind=False) is None
+
+
 # --- version / schema gating -------------------------------------------------
 
 
@@ -189,14 +270,16 @@ def test_missing_key_discarded():
 
 
 def test_wrong_theta_length_discarded():
-    payload = serialize_state(initial_state(enable_wind=False))
-    # n_params still says 3 but theta has 2 entries -> shape check must catch it.
+    # A matured no-wind state is 3-dim ([env, solar, gain]); n_params says 3 but
+    # theta is truncated to 2 entries -> the shape check must catch it.
+    payload = serialize_state(_matured_state(enable_wind=False))
+    assert payload["n_params"] == 3
     payload["theta"] = payload["theta"][:2]
     assert deserialize_state(payload, enable_wind=False) is None
 
 
 def test_ragged_p_matrix_discarded():
-    payload = serialize_state(initial_state(enable_wind=False))
+    payload = serialize_state(_matured_state(enable_wind=False))
     payload["p_matrix"][0] = payload["p_matrix"][0][:2]  # ragged row
     assert deserialize_state(payload, enable_wind=False) is None
 

@@ -114,6 +114,10 @@ with a status of `not_trustworthy`, unless the RC estimate is both mature and
 physically plausible:
   * confidence >= min_confidence and accepted_samples >= min_accepted_samples,
   * theta_env > 0 (a real, positive envelope time constant),
+  * the heat-pump gain dimension has actually been added (`gain_modeled`): until
+    a real compensation delta has excited the pump, gain is not part of the
+    model at all, which is reported as a distinct "not yet excited" reason
+    rather than being conflated with a fitted-but-implausible gain,
   * theta_gain <= -min_gain_magnitude (heat-pump gain clearly negative, i.e. the
     sign that means "colder reading -> more heat"; a near-zero or wrong-sign
     gain means we cannot tell how the pump responds, so any plan is guesswork),
@@ -169,6 +173,11 @@ class MPCModelParams:
     confidence: float = 0.0
     accepted_samples: int = 0
     params_pinned: bool = False
+    # Whether the RC estimator has added its heat-pump gain dimension yet. False
+    # until a real applied compensation delta has excited the pump channel (see
+    # rc_model.py). When False, `theta_gain` is a not-yet-modeled 0.0, NOT a
+    # learned value, and the trust gate reports that distinctly.
+    gain_modeled: bool = True
 
 
 @dataclass(frozen=True)
@@ -258,6 +267,8 @@ class MPCResult:
     theta_gain: float = 0.0
     theta_solar: float = 0.0
     theta_wind: float = 0.0
+    gain_modeled: bool = True       # echoes MPCModelParams.gain_modeled: False
+                                     # means theta_gain above is not-yet-modeled
     time_constant_h: float = 0.0
     confidence: float = 0.0
     accepted_samples: int = 0
@@ -486,6 +497,13 @@ def _untrustworthy_reason(params: MPCModelParams, config: MPCConfig) -> str | No
     None. Order chosen so the most fundamental problem is reported first."""
     if params.theta_env <= 0:
         return f"envelope parameter non-physical (theta_env={params.theta_env:.4f} <= 0)"
+    if not params.gain_modeled:
+        return (
+            "heat pump has not yet been excited — no compensation delta has ever "
+            "been applied (activation switch off, or summer heating-cutoff engaged), "
+            "so the heat-pump gain is not part of the model yet and no plan can be "
+            "trusted"
+        )
     if params.theta_gain > -config.min_gain_magnitude:
         return (
             f"heat-pump gain not clearly negative (theta_gain={params.theta_gain:+.4f}; "
@@ -544,6 +562,7 @@ def plan(
             theta_gain=params.theta_gain,
             theta_solar=params.theta_solar,
             theta_wind=params.theta_wind,
+            gain_modeled=params.gain_modeled,
             time_constant_h=tau,
             confidence=params.confidence,
             accepted_samples=params.accepted_samples,
@@ -614,8 +633,9 @@ def plan(
         status = "ok"
 
     # --- reason string (explainability, echoing the RC params used) ----------
+    gain_str = f"{params.theta_gain:+.3f}" if params.gain_modeled else "not-yet-modeled"
     gain_echo = (
-        f"tau={tau:.1f}h, gain={params.theta_gain:+.3f}, solar={params.theta_solar:.3f}"
+        f"tau={tau:.1f}h, gain={gain_str}, solar={params.theta_solar:.3f}"
     )
     if params.enable_wind:
         gain_echo += f", wind={params.theta_wind:+.3f}"
@@ -655,6 +675,7 @@ def plan(
         theta_gain=params.theta_gain,
         theta_solar=params.theta_solar,
         theta_wind=params.theta_wind,
+        gain_modeled=params.gain_modeled,
         time_constant_h=tau,
         confidence=params.confidence,
         accepted_samples=params.accepted_samples,

@@ -517,6 +517,15 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         just can't learn anything about heat-pump gain without real
         excitation on that channel. The actual outdoor temperature is always
         the envelope driver, active or not.
+
+        Because `applied_delta_c` is already exactly zero whenever there is no
+        real excitation (switch off, or the summer heating-cutoff has made
+        compensated == raw even with the switch on), it is the correct signal
+        to drive the RC model's lazy gain-dimension expansion: rc_model only
+        adds the heat-pump gain dimension the first cycle a genuinely nonzero
+        applied delta reaches an accepted update, so an idle warm season never
+        winds up an unexcited gain dimension. No extra routing is needed here —
+        feeding the true applied delta (as we already do) is what triggers it.
         """
         try:
             now = time.monotonic()
@@ -627,14 +636,19 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         genuinely clipped down to its floor by real data would be
         indistinguishable from one still sitting untouched at its cold-start
         prior — inferring from the value alone would silently miss that real
-        clip event.
+        clip event. For the same reason the gain bound is only checked once the
+        gain dimension actually exists (`rc_result.gain_modeled`): before then
+        `theta_gain` is a not-yet-modeled 0.0, which is not a real clip event
+        and must not be treated as one (the MPC trust gate reports "not yet
+        excited" separately).
         """
         tol = 1e-6
-        checks = (
+        checks = [
             (rc_result.theta_env, THETA_ENV_MIN, THETA_ENV_MAX),
-            (rc_result.theta_gain, THETA_GAIN_MIN, THETA_GAIN_MAX),
             (rc_result.theta_solar, THETA_SOLAR_MIN, THETA_SOLAR_MAX),
-        )
+        ]
+        if rc_result.gain_modeled:
+            checks.append((rc_result.theta_gain, THETA_GAIN_MIN, THETA_GAIN_MAX))
         for value, lo, hi in checks:
             if abs(value - lo) <= tol or abs(value - hi) <= tol:
                 return True
@@ -658,6 +672,7 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             confidence=rc_result.confidence,
             accepted_samples=rc_result.accepted_samples,
             params_pinned=self._rc_params_pinned(rc_result, rc_config.enable_wind),
+            gain_modeled=rc_result.gain_modeled,
         )
 
     @staticmethod
@@ -889,6 +904,7 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 {
                     "rc_theta_env": self.rc_result.theta_env,
                     "rc_theta_gain": self.rc_result.theta_gain,
+                    "rc_gain_modeled": self.rc_result.gain_modeled,
                     "rc_theta_solar": self.rc_result.theta_solar,
                     "rc_theta_wind": self.rc_result.theta_wind,
                     "rc_confidence": self.rc_result.confidence,

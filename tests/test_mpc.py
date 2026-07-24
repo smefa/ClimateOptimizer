@@ -311,6 +311,40 @@ def test_immature_model_is_not_trustworthy_but_still_plans():
     assert "warming up" in result.reason or "confidence" in result.reason
 
 
+def test_gain_not_yet_modeled_is_reported_distinctly():
+    # Heat pump never excited: gain dimension not added yet. This must be
+    # flagged not_trustworthy with an "excited"/"applied" reason distinct from
+    # a fitted-but-implausible gain, and NOT be conflated with the gain-sign
+    # or magnitude failures. theta_gain here is the not-yet-modeled 0.0.
+    # Warm outdoor so a coasting (zero-heat) house stays inside the band and the
+    # plan is feasible -> the status is exactly not_trustworthy, isolating the
+    # gate reason under test from any infeasibility.
+    result = plan(
+        21.0,
+        make_params(theta_gain=0.0, gain_modeled=False),
+        make_forecasts(outdoor=21.0),
+        make_config(),
+    )
+    assert result.trustworthy is False
+    assert result.status == "not_trustworthy"
+    assert result.gain_modeled is False
+    reason = result.reason.lower()
+    assert "excited" in reason or "applied" in reason
+    # Distinct from the "not clearly negative / cannot tell how the pump
+    # responds" wording used for a fitted-but-implausible gain.
+    assert "cannot tell how the pump responds" not in reason
+    # Still produces an observable plan (advisory groundwork).
+    assert result.recommended_delta_c is not None
+
+
+def test_gain_modeled_true_by_default_still_trustworthy():
+    # Regression: existing callers/params default gain_modeled=True, so a mature
+    # plausible model stays trustworthy exactly as before.
+    result = plan(21.0, make_params(), make_forecasts(), make_config())
+    assert result.gain_modeled is True
+    assert result.trustworthy is True
+
+
 def test_wrong_sign_gain_is_not_trustworthy():
     # Positive gain is non-physical for this model (colder reading should add
     # heat). Must be flagged untrustworthy.

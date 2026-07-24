@@ -57,7 +57,7 @@ For houses expected to be genuinely wind-sensitive (old, leaky, exposed —
 the collinearity risk above is proportional to how *small* the true wind
 effect is, and a leaky house's true effect is large enough to be
 statistically distinguishable from the collinear envelope term), the caller
-may enable a 4th regressor via `RCModelConfig.enable_wind`:
+may enable a wind regressor via `RCModelConfig.enable_wind`:
 
     dT_in += theta_wind * (T_out - T_in) * (wind_speed / wind_reference_ms) * dt
 
@@ -76,17 +76,58 @@ regressor's typical range given realistic Nordic temperature/wind extremes,
 which would reintroduce a conditioning problem via magnitude imbalance
 instead of collinearity.
 
-When disabled (the default), the estimator is genuinely 3-dimensional, not a
-4-dimensional estimator with the wind term silently zeroed — carrying a
-permanently-unexcited 4th dimension would still slowly inflate its share of
-the shared covariance-windup budget every cycle purely from the forgetting
-factor, and over a long enough run that would eventually trip the trace cap
-and rescale the *entire* matrix, including the three real parameters. That
-would make "disabled" subtly different from the original 3-parameter
-behaviour over long runs, not identical. Sizing the estimator itself (state
+When disabled (the default), the estimator does not carry a wind dimension at
+all, not a wind term silently zeroed — carrying a permanently-unexcited
+dimension would still slowly inflate its share of the shared covariance-windup
+budget every cycle purely from the forgetting factor, and over a long enough
+run that would eventually trip the trace cap and rescale the *entire* matrix,
+including the real parameters. Sizing the estimator itself (state
 dimensionality tied to `enable_wind` at `initial_state()` time) avoids this
-entirely and guarantees bit-for-bit identical behaviour to the original
-3-parameter model when wind is off.
+entirely.
+
+Lazy heat-pump gain dimension (added only on real excitation)
+-------------------------------------------------------------
+The exact same covariance-windup argument applies to `theta_gain`. The gain
+regressor is the *applied* compensation delta u, which is zero for as long as
+the activation switch is off (learn mode publishes the raw outdoor
+temperature, so nothing is applied) OR the heuristic's summer heating-cutoff
+guardrail is engaged (compensated == raw, so the applied delta is zero even
+with the switch on). During such an idle stretch — potentially the whole
+warm half of the year — the gain dimension gets zero excitation, so nothing
+opposes the forgetting factor inflating its variance every accepted cycle
+(each of which IS still exciting envelope + solar from passive weather). Left
+in the state vector, that idle dimension would trip the trace cap after
+~1370 15-min cycles (~2 weeks) and then rescale the *entire* covariance
+matrix — corrupting confidence in the envelope/solar parameters that are
+being learned correctly the whole time.
+
+So the estimator does NOT carry a gain dimension at cold start either. It
+starts with only the dimensions actually excited by passive weather (env,
+solar, and wind if enabled). The first time a genuinely nonzero applied delta
+reaches an accepted update (see GAIN_EXCITATION_EPS — this is real excitation
+reaching the model, NOT merely `is_active` being true), the state is expanded
+by one dimension: `theta_gain` is appended LAST, preserving every existing
+parameter value and its covariance block exactly (a block-embedding), with a
+fresh wide prior variance on the new diagonal and zero cross-covariance to the
+existing dimensions (honest — no evidence yet about how gain correlates). This
+mirrors the wind on/off dimensionality split, but as a one-way, data-triggered
+*expansion* rather than a config-triggered reset. Once added, gain stays added
+permanently.
+
+Known residual limitation (deliberately out of scope): if excitation stops
+again for a long time after gain has been added (e.g. the switch goes back off
+for another summer), the now-present gain dimension can slowly wind up again in
+exactly the same way. Fixing that would require directional/selective
+forgetting in the core RLS update law — a materially more invasive change,
+left for future work.
+
+Because gain is appended LAST (not at a fixed positional index), adding it never
+disturbs the positions or covariance entries of env/solar/[wind]. The estimator
+layout is therefore one of four shapes: [env, solar], [env, solar, wind],
+[env, solar, gain], or [env, solar, wind, gain]. Note that two of these have
+the same length (3): length alone cannot distinguish "wind, no gain" from
+"gain, no wind", so both `enable_wind` and a persisted `has_gain` flag are
+needed to disambiguate (see rc_store.py).
 
 Estimation: Recursive Least Squares with a forgetting factor, plus guardrails
 (covariance-windup capping + symmetrisation + PD safeguards, physically
@@ -111,16 +152,34 @@ DEFAULT_WIND_REFERENCE_MS = 5.0   # moderate/typical wind; keeps the wind
 
 # Cold-start priors. A 30 h time constant is a plausible medium-mass house;
 # the gain/solar/wind coefficients start at zero and are driven purely by
-# data. Index order throughout this module: env, gain, solar, [wind].
+# data. There is no fixed positional index order any more: the estimator's
+# layout is assembled by name (see _layout) so the gain dimension can be
+# appended later without disturbing anything.
 INIT_TAU_H = 30.0
 INIT_THETA_ENV = 1.0 / INIT_TAU_H
 INIT_THETA_GAIN = 0.0
 INIT_THETA_SOLAR = 0.0
 INIT_THETA_WIND = 0.0
+
+# Per-parameter cold-start prior value, keyed by name.
+_INIT_THETA = {
+    "env": INIT_THETA_ENV,
+    "solar": INIT_THETA_SOLAR,
+    "wind": INIT_THETA_WIND,
+    "gain": INIT_THETA_GAIN,
+}
 # Wide initial covariance so early estimates are not overconfident. Each theta
 # is O(<=1) here, so a diagonal of 1.0 corresponds to a prior std of ~1, far
 # larger than the priors themselves -> deliberately uncertain at cold start.
-INIT_P_DIAG = (1.0, 1.0, 1.0, 1.0)
+# Same value for every dimension (this IS the value the gain dimension gets when
+# it is later added), keyed by name to match the by-name layout.
+INIT_P_DIAG_VALUE = 1.0
+_INIT_P = {
+    "env": INIT_P_DIAG_VALUE,
+    "solar": INIT_P_DIAG_VALUE,
+    "wind": INIT_P_DIAG_VALUE,
+    "gain": INIT_P_DIAG_VALUE,
+}
 
 # Physically sensible parameter bounds; clipping engages if the estimator
 # tries to wander outside them. tau in [1 h, 500 h] -> theta_env in [1/500, 1].
@@ -137,12 +196,22 @@ THETA_WIND_MAX = 0.5            # reverse it; upper bound is engineering
                                  # judgment (see module docstring), flagged
                                  # for revision once real data justifies it
 
-_THETA_BOUNDS = (
-    (THETA_ENV_MIN, THETA_ENV_MAX),
-    (THETA_GAIN_MIN, THETA_GAIN_MAX),
-    (THETA_SOLAR_MIN, THETA_SOLAR_MAX),
-    (THETA_WIND_MIN, THETA_WIND_MAX),
-)
+# Physical bounds keyed by name (used via the estimator's current layout).
+_THETA_BOUNDS = {
+    "env": (THETA_ENV_MIN, THETA_ENV_MAX),
+    "gain": (THETA_GAIN_MIN, THETA_GAIN_MAX),
+    "solar": (THETA_SOLAR_MIN, THETA_SOLAR_MAX),
+    "wind": (THETA_WIND_MIN, THETA_WIND_MAX),
+}
+
+# The heat-pump gain dimension is added only once a genuinely nonzero applied
+# compensation delta (the gain regressor's driver) reaches an accepted update —
+# NOT merely when the activation switch is on. The summer heating-cutoff can
+# still zero the applied delta with the switch on, and learn mode zeros it with
+# the switch off; both cases send exactly 0.0. This epsilon distinguishes "no
+# excitation at all" (exactly 0.0) from any real applied delta; it is
+# deliberately tiny so any real heat-pump action triggers the expansion.
+GAIN_EXCITATION_EPS = 1e-9
 
 # Covariance-windup guard: if excitation is poor the forgetting factor inflates
 # P without bound. Cap its trace and rescale if exceeded.
@@ -169,10 +238,51 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
+def _layout(enable_wind: bool, has_gain: bool) -> tuple[str, ...]:
+    """Ordered parameter names for the given estimator configuration.
+
+    env and solar are always present and keep fixed positions 0 and 1 so a
+    later gain expansion never disturbs them; wind (if enabled) sits at 2; the
+    heat-pump gain, when it has been added, is always appended LAST. Appending
+    gain at the end (rather than a fixed index) is what makes the one-way
+    expansion a clean block-embedding — every pre-existing parameter keeps its
+    index and its covariance entries.
+    """
+    names = ["env", "solar"]
+    if enable_wind:
+        names.append("wind")
+    if has_gain:
+        names.append("gain")
+    return tuple(names)
+
+
+def _regressors(
+    temp_gap: float,
+    u: float,
+    solar: float,
+    wind_norm: float,
+    dt_h: float,
+    layout: tuple[str, ...],
+) -> list[float]:
+    """Build the regressor vector phi for the given layout, in layout order.
+
+    `temp_gap` = T_out - T_in, `u` = applied compensation delta, `solar` in
+    [0,1], `wind_norm` = wind_speed / wind_reference. Only the terms named in
+    `layout` are emitted, so this serves every estimator shape without any
+    positional assumptions.
+    """
+    values = {
+        "env": temp_gap * dt_h,
+        "solar": solar * dt_h,
+        "wind": temp_gap * wind_norm * dt_h,
+        "gain": u * dt_h,
+    }
+    return [values[name] for name in layout]
+
+
 # --- tiny NxN linear algebra (stdlib only) -----------------------------------
-# N is 3 (env, gain, solar) or 4 (+ wind), taken from the length of the
-# vectors/matrices passed in — never hardcoded, so the same code serves both
-# estimator sizes without duplication.
+# N is 2..4, taken from the length of the vectors/matrices passed in — never
+# hardcoded, so the same code serves every estimator size without duplication.
 
 
 def _matvec(matrix: list[list[float]], vec: list[float]) -> list[float]:
@@ -200,11 +310,11 @@ class RCModelConfig:
     """Estimator tuning. Defaults are production-sane; overridable in tests.
 
     `enable_wind` must match whatever `initial_state(enable_wind=...)` was
-    constructed with — it determines the estimator's dimensionality (3 or
-    4), and `step()` assumes `state` and `config` agree. The coordinator
-    sources both from the same config-entry option, and options changes
-    trigger a full coordinator reload (fresh `initial_state()` call), so
-    this invariant holds in practice without needing a runtime check here.
+    constructed with — it determines whether the estimator carries a wind
+    dimension, and `step()` assumes `state` and `config` agree. The
+    coordinator sources both from the same config-entry option, and options
+    changes trigger a full coordinator reload (fresh `initial_state()` call),
+    so this invariant holds in practice without needing a runtime check here.
     """
 
     forgetting_factor: float = DEFAULT_FORGETTING_FACTOR
@@ -222,13 +332,22 @@ class RCModelState:
 
     Immutable: `step()` returns a fresh state, so there is no hidden mutable
     global state and the function is trivially unit-testable, exactly like
-    `heuristic.compute()`. `theta`/`p_matrix` are length 3 or 4 depending on
-    whether `initial_state()` was called with `enable_wind`.
+    `heuristic.compute()`. `theta`/`p_matrix` have length 2..4 depending on
+    `enable_wind` and whether the heat-pump gain dimension has been added yet
+    (`has_gain`); the ordered names for the current shape are
+    `_layout(enable_wind, has_gain)`.
+
+    `has_gain` records whether the lazily-added gain dimension is present. It
+    is False at cold start and flips to True (permanently) the first cycle a
+    genuinely nonzero applied compensation delta reaches an accepted update —
+    see step(). It is persisted so the same-length ambiguity between
+    [env, solar, wind] and [env, solar, gain] can be resolved on reload.
     """
 
     theta: tuple[float, ...]
     # Covariance P as a tuple-of-tuples (immutable); worked on as lists inside.
     p_matrix: tuple[tuple[float, ...], ...]
+    has_gain: bool
     accepted_samples: int
     rejected_samples: int
     clip_events: int
@@ -265,10 +384,12 @@ class RCModelResult:
     predicted_next_indoor_temp_c: float | None
     prediction_error_c: float | None
     theta_env: float
-    theta_gain: float
+    theta_gain: float               # 0.0 while `gain_modeled` is False (the
+                                     # heat-pump gain dimension has not been
+                                     # added yet — distinct from a learned 0.0)
     theta_solar: float
-    theta_wind: float               # 0.0 (pinned, never estimated) unless
-                                     # the wind term is enabled
+    theta_wind: float               # 0.0 (never estimated) unless wind enabled
+    gain_modeled: bool              # has the gain dimension been added yet?
     time_constant_h: float
     accepted_samples: int
     rejected_samples: int
@@ -284,20 +405,23 @@ class RCModelResult:
 def initial_state(enable_wind: bool = False) -> RCModelState:
     """Cold-start state: prior parameters + wide covariance, no history yet.
 
-    `enable_wind` fixes the estimator's dimensionality (3 or 4) for the
-    lifetime of this state — see the module docstring for why this is sized
-    up front rather than always carrying a 4th, possibly-unused dimension.
+    `enable_wind` fixes whether the estimator carries a wind dimension for the
+    lifetime of this state. The heat-pump gain dimension is NOT present at cold
+    start (`has_gain=False`); it is added lazily on the first real excitation —
+    see the module docstring for why this is done rather than always carrying a
+    possibly-unexcited gain dimension.
     """
-    theta = [INIT_THETA_ENV, INIT_THETA_GAIN, INIT_THETA_SOLAR]
-    if enable_wind:
-        theta.append(INIT_THETA_WIND)
+    layout = _layout(enable_wind, has_gain=False)
+    theta = [_INIT_THETA[name] for name in layout]
+    diag = [_INIT_P[name] for name in layout]
     n = len(theta)
     return RCModelState(
         theta=tuple(theta),
         p_matrix=tuple(
-            tuple(INIT_P_DIAG[i] if i == j else 0.0 for j in range(n))
+            tuple(diag[i] if i == j else 0.0 for j in range(n))
             for i in range(n)
         ),
+        has_gain=False,
         accepted_samples=0,
         rejected_samples=0,
         clip_events=0,
@@ -312,21 +436,40 @@ def initial_state(enable_wind: bool = False) -> RCModelState:
     )
 
 
+def _add_gain_dimension(
+    theta: list[float], p_matrix: list[list[float]]
+) -> tuple[list[float], list[list[float]]]:
+    """Block-embed a fresh heat-pump gain dimension, appended LAST.
+
+    Existing parameters keep their values, and their entire covariance block is
+    copied verbatim into the top-left of the new matrix; the new gain row/column
+    gets the wide gain prior variance on the diagonal and zero cross-covariance
+    to every existing dimension (honest: we have no evidence yet about how gain
+    correlates with envelope/solar/wind). One-way and permanent — see step().
+    """
+    n = len(theta)
+    new_theta = list(theta) + [_INIT_THETA["gain"]]
+    new_p = [[p_matrix[i][j] for j in range(n)] + [0.0] for i in range(n)]
+    new_p.append([0.0] * n + [_INIT_P["gain"]])
+    return new_theta, new_p
+
+
 def _confidence(accepted_samples: int, warmup: int) -> float:
     if warmup <= 0:
         return 1.0
     return _clamp(accepted_samples / warmup, 0.0, 1.0)
 
 
-def _clip_theta(theta: list[float]) -> tuple[list[float], bool]:
+def _clip_theta(
+    theta: list[float], layout: tuple[str, ...]
+) -> tuple[list[float], bool]:
     """Clip parameters to physical bounds. Returns (clipped, any_clip_hit).
 
-    Works for either estimator size: `_THETA_BOUNDS` has entries for all 4
-    possible dimensions (env, gain, solar, wind); only the first `len(theta)`
-    are used.
+    Bounds are looked up per parameter name via the current `layout`, so this
+    works for every estimator shape without positional assumptions.
     """
     n = len(theta)
-    clipped = [_clamp(theta[i], *_THETA_BOUNDS[i]) for i in range(n)]
+    clipped = [_clamp(theta[i], *_THETA_BOUNDS[layout[i]]) for i in range(n)]
     hit = any(clipped[i] != theta[i] for i in range(n))
     return clipped, hit
 
@@ -338,9 +481,10 @@ def _rls_update(
     y: float,
     forgetting: float,
     p_trace_max: float,
+    layout: tuple[str, ...],
 ) -> tuple[list[float], list[list[float]], float, bool]:
     """One numerically-guarded RLS step, generic over the estimator size N
-    (N = len(theta), 3 or 4).
+    (N = len(theta) = len(layout)).
 
     Returns (theta_new, p_new, a_priori_residual, clip_hit). Guards:
       * standard forgetting-factor RLS gain/covariance update,
@@ -379,7 +523,7 @@ def _rls_update(
     diag_ok = all(p_new[i][i] > 0 for i in range(n))
     if not _all_finite(flat) or not _all_finite(theta_new) or not diag_ok:
         p_new = [
-            [INIT_P_DIAG[i] if i == j else 0.0 for j in range(n)]
+            [_INIT_P[layout[i]] if i == j else 0.0 for j in range(n)]
             for i in range(n)
         ]
         if not _all_finite(theta_new):
@@ -391,7 +535,7 @@ def _rls_update(
         scale = p_trace_max / tr
         p_new = [[p_new[i][j] * scale for j in range(n)] for i in range(n)]
 
-    theta_new, clip_hit = _clip_theta(theta_new)
+    theta_new, clip_hit = _clip_theta(theta_new, layout)
     return theta_new, p_new, residual, clip_hit
 
 
@@ -408,18 +552,24 @@ def _result(
     clip_engaged: bool,
     reason: str,
 ) -> RCModelResult:
+    layout = _layout(config.enable_wind, state.has_gain)
+    idx = {name: i for i, name in enumerate(layout)}
     theta = state.theta
-    theta_env = theta[0]
+    theta_env = theta[idx["env"]]
     time_constant_h = 1.0 / theta_env if theta_env > 0 else float("inf")
-    theta_wind = theta[3] if len(theta) > 3 else 0.0
+    theta_solar = theta[idx["solar"]]
+    theta_wind = theta[idx["wind"]] if "wind" in idx else 0.0
+    gain_modeled = "gain" in idx
+    theta_gain = theta[idx["gain"]] if gain_modeled else 0.0
     p_list = [list(row) for row in state.p_matrix]
     return RCModelResult(
         predicted_next_indoor_temp_c=predicted_next,
         prediction_error_c=prediction_error,
         theta_env=theta_env,
-        theta_gain=theta[1],
-        theta_solar=theta[2],
+        theta_gain=theta_gain,
+        theta_solar=theta_solar,
         theta_wind=theta_wind,
+        gain_modeled=gain_modeled,
         time_constant_h=time_constant_h,
         accepted_samples=state.accepted_samples,
         rejected_samples=state.rejected_samples,
@@ -454,6 +604,11 @@ def step(
          samples only (so rejected outliers never inflate the scale).
     Rejected samples advance `prev` (so we do not keep re-measuring across a
     glitch) but never touch theta or P; they are counted and flagged.
+
+    The heat-pump gain dimension is added lazily: on an accepted cycle whose
+    gain regressor is genuinely excited (|prev applied delta| > excitation eps)
+    while it is not yet present, the state is block-embedded up by one dimension
+    before the RLS update (see _add_gain_dimension). See the module docstring.
     """
     indoor_ok = (
         inputs.indoor_data_available
@@ -569,22 +724,21 @@ def step(
             ),
         )
 
-    # Regressors are driven by the *previous* cycle's conditions over dt.
+    # Regressors are driven by the *previous* cycle's conditions over dt, in the
+    # current (pre-expansion) layout. The stage-2 gate below uses these; the
+    # a-priori residual is unchanged by a pending gain expansion because the
+    # fresh gain prior is exactly 0 (its regressor contributes 0 to the dot).
     wind_ref = config.wind_reference_ms if config.wind_reference_ms > 0 else (
         DEFAULT_WIND_REFERENCE_MS
     )
-    phi = [
-        (state.prev_outdoor_temp_c - state.prev_indoor_temp_c) * dt_h,
-        state.prev_u_c * dt_h,
-        state.prev_solar * dt_h,
-    ]
-    if config.enable_wind:
-        prev_wind = state.prev_wind_speed_ms if state.prev_wind_speed_ms is not None else 0.0
-        phi.append(
-            (state.prev_outdoor_temp_c - state.prev_indoor_temp_c)
-            * (prev_wind / wind_ref)
-            * dt_h
-        )
+    prev_gap = state.prev_outdoor_temp_c - state.prev_indoor_temp_c
+    prev_wind = (
+        state.prev_wind_speed_ms if state.prev_wind_speed_ms is not None else 0.0
+    )
+    layout = _layout(config.enable_wind, state.has_gain)
+    phi = _regressors(
+        prev_gap, state.prev_u_c, state.prev_solar, prev_wind / wind_ref, dt_h, layout
+    )
     theta_list = list(state.theta)
     a_priori_resid = y - _dot(theta_list, phi)
 
@@ -611,6 +765,25 @@ def step(
 
     # --- accept: run the guarded RLS update -----------------------------------
     p_list = [list(row) for row in state.p_matrix]
+    has_gain = state.has_gain
+
+    # Lazy gain-dimension expansion: only now (on an accepted cycle) and only
+    # when the gain regressor is genuinely excited. `is_active` alone is NOT
+    # enough — the coordinator sends exactly 0.0 in learn mode and under the
+    # summer heating-cutoff even with the switch on, so we key off the actual
+    # applied delta reaching the model.
+    if (
+        not has_gain
+        and math.isfinite(state.prev_u_c)
+        and abs(state.prev_u_c) > GAIN_EXCITATION_EPS
+    ):
+        theta_list, p_list = _add_gain_dimension(theta_list, p_list)
+        has_gain = True
+        layout = _layout(config.enable_wind, has_gain)
+        phi = _regressors(
+            prev_gap, state.prev_u_c, state.prev_solar, prev_wind / wind_ref, dt_h, layout
+        )
+
     theta_new, p_new, residual, clip_hit = _rls_update(
         theta_list,
         p_list,
@@ -618,6 +791,7 @@ def step(
         y,
         config.forgetting_factor,
         config.p_trace_max,
+        layout,
     )
 
     # Track residual scale (EWMA over accepted samples only).
@@ -629,22 +803,21 @@ def step(
 
     # Predict next indoor temp from current conditions and the updated params,
     # using this cycle's dt as the best available estimate of the next interval.
-    phi_now = [
-        (inputs.outdoor_temp_c - inputs.indoor_temp_c) * dt_h,
-        inputs.compensation_delta_c * dt_h,
-        inputs.solar_effect * dt_h,
-    ]
-    if config.enable_wind:
-        phi_now.append(
-            (inputs.outdoor_temp_c - inputs.indoor_temp_c)
-            * (inputs.wind_speed_ms / wind_ref)
-            * dt_h
-        )
+    gap_now = inputs.outdoor_temp_c - inputs.indoor_temp_c
+    phi_now = _regressors(
+        gap_now,
+        inputs.compensation_delta_c,
+        inputs.solar_effect,
+        inputs.wind_speed_ms / wind_ref,
+        dt_h,
+        layout,
+    )
     predicted_next = inputs.indoor_temp_c + _dot(theta_new, phi_now)
 
     new_state = RCModelState(
         theta=tuple(theta_new),
         p_matrix=_to_tuple_matrix(p_new),
+        has_gain=has_gain,
         accepted_samples=state.accepted_samples + 1,
         rejected_samples=state.rejected_samples,
         clip_events=state.clip_events + (1 if clip_hit else 0),
@@ -658,13 +831,17 @@ def step(
         prev_predicted_next_indoor_c=predicted_next,
     )
 
-    tau = 1.0 / theta_new[0] if theta_new[0] > 0 else float("inf")
+    idx = {name: i for i, name in enumerate(layout)}
+    tau = 1.0 / theta_new[idx["env"]] if theta_new[idx["env"]] > 0 else float("inf")
+    gain_txt = f"{theta_new[idx['gain']]:+.3f}" if "gain" in idx else "not-yet-modeled"
     reason = (
-        f"RC RLS: tau={tau:.1f}h, gain={theta_new[1]:+.3f}, "
-        f"solar={theta_new[2]:.3f}"
+        f"RC RLS: tau={tau:.1f}h, gain={gain_txt}, "
+        f"solar={theta_new[idx['solar']]:.3f}"
     )
     if config.enable_wind:
-        reason += f", wind={theta_new[3]:+.3f}"
+        reason += f", wind={theta_new[idx['wind']]:+.3f}"
+    if has_gain and not state.has_gain:
+        reason += "; gain dimension added (first heat-pump excitation)"
     reason += (
         f"; accepted (resid {residual:+.2f} degC); "
         f"{new_state.accepted_samples} accepted / {new_state.rejected_samples} "

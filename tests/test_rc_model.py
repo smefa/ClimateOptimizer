@@ -119,9 +119,13 @@ def test_parameters_converge_to_known_truth_with_noise():
     state, result = _run(cycles)
 
     assert result.accepted_samples > 500
-    assert math.isclose(state.theta[0], theta_true[0], rel_tol=0.20)
-    assert math.isclose(state.theta[1], theta_true[1], rel_tol=0.20)
-    assert math.isclose(state.theta[2], theta_true[2], rel_tol=0.20)
+    # Assert via the named result fields (ordering-independent): the synthetic
+    # drivers include nonzero compensation deltas, so the gain dimension gets
+    # added and all three parameters converge to truth.
+    assert result.gain_modeled is True
+    assert math.isclose(result.theta_env, theta_true[0], rel_tol=0.20)
+    assert math.isclose(result.theta_gain, theta_true[1], rel_tol=0.20)
+    assert math.isclose(result.theta_solar, theta_true[2], rel_tol=0.20)
     # Time constant should land near 20 h.
     assert 16.0 < result.time_constant_h < 25.0
     assert result.confidence == 1.0
@@ -205,9 +209,12 @@ def test_parameter_clipping_engages_and_holds_bounds():
         )
         indoor += 0.02  # steady rise despite cold outside and no heat proxy
 
-    assert rc_model.THETA_ENV_MIN <= state.theta[0] <= rc_model.THETA_ENV_MAX
-    assert rc_model.THETA_GAIN_MIN <= state.theta[1] <= rc_model.THETA_GAIN_MAX
-    assert rc_model.THETA_SOLAR_MIN <= state.theta[2] <= rc_model.THETA_SOLAR_MAX
+    # compensation_delta_c is 0.0 throughout, so the gain dimension is never
+    # excited and never added: env and solar are clipped to their bounds, and
+    # gain is honestly reported as not-yet-modeled rather than a clipped 0.0.
+    assert result.gain_modeled is False
+    assert rc_model.THETA_ENV_MIN <= result.theta_env <= rc_model.THETA_ENV_MAX
+    assert rc_model.THETA_SOLAR_MIN <= result.theta_solar <= rc_model.THETA_SOLAR_MAX
     assert state.clip_events > 0
     # All parameters remain finite.
     assert all(math.isfinite(v) for v in state.theta)
@@ -355,10 +362,21 @@ def _simulate_true_system_wind(theta_true, n_cycles, wind_fn, noise_std=0.0, see
     return cycles
 
 
-def test_wind_disabled_state_is_three_dimensional():
+def test_wind_disabled_cold_start_is_two_dimensional():
+    # Cold start with wind off no longer carries a gain dimension either: the
+    # estimator starts at [env, solar] and adds gain lazily on first excitation.
     state = initial_state()  # default enable_wind=False
+    assert len(state.theta) == 2
+    assert len(state.p_matrix) == 2
+    assert state.has_gain is False
+
+
+def test_wind_enabled_cold_start_is_three_dimensional_no_gain():
+    # Wind on, gain not yet added: [env, solar, wind].
+    state = initial_state(enable_wind=True)
     assert len(state.theta) == 3
     assert len(state.p_matrix) == 3
+    assert state.has_gain is False
 
 
 def test_wind_disabled_result_always_reports_zero_wind_gain():
@@ -390,9 +408,11 @@ def test_wind_param_converges_on_synthetic_windy_system():
     state, result = _run(cycles, config)
 
     assert result.accepted_samples > 700
+    # Wind on and gain excited -> layout [env, solar, wind, gain], length 4.
     assert len(state.theta) == 4
-    assert math.isclose(state.theta[0], theta_true[0], rel_tol=0.25)
-    assert math.isclose(state.theta[3], theta_true[3], rel_tol=0.35)
+    assert result.gain_modeled is True
+    assert math.isclose(result.theta_env, theta_true[0], rel_tol=0.25)
+    assert math.isclose(result.theta_wind, theta_true[3], rel_tol=0.35)
     assert result.theta_wind > 0.05  # clearly nonzero, not stuck at the prior
 
 
@@ -447,8 +467,10 @@ def test_wind_clip_nonnegative():
             config,
         )
         indoor += 0.02  # steady rise despite cold + high wind
-    assert rc_model.THETA_WIND_MIN <= state.theta[3] <= rc_model.THETA_WIND_MAX
-    assert math.isfinite(state.theta[3])
+    # No compensation delta here, so gain is never added; wind sits at index 2.
+    assert result.gain_modeled is False
+    assert rc_model.THETA_WIND_MIN <= result.theta_wind <= rc_model.THETA_WIND_MAX
+    assert math.isfinite(result.theta_wind)
 
 
 def test_wind_clip_upper_bound():
@@ -473,8 +495,9 @@ def test_wind_clip_upper_bound():
             config,
         )
         indoor -= 2.0  # implausibly steep drop, far beyond what env alone gives
-    assert state.theta[3] <= rc_model.THETA_WIND_MAX
-    assert math.isfinite(state.theta[3])
+    assert result.gain_modeled is False
+    assert result.theta_wind <= rc_model.THETA_WIND_MAX
+    assert math.isfinite(result.theta_wind)
 
 
 def test_wind_long_run_numerically_stable_with_storm_leverage():
@@ -554,3 +577,132 @@ def test_non_finite_input_rejected():
     )
     assert result.sample_accepted is False
     assert "Non-finite" in result.reason
+
+
+# --- lazy heat-pump gain dimension -------------------------------------------
+
+
+def _passive_cycles(n_cycles, seed=5):
+    """Cycles with ZERO compensation delta (no heat-pump excitation) but well-
+    excited envelope + solar, mimicking an idle/learn-mode or summer-cutoff
+    stretch. The gain dimension must never be added from these."""
+    rng = random.Random(seed)
+    indoor = 21.0
+    theta_env, theta_solar = 0.05, 0.40
+    cycles = []
+    for _k in range(n_cycles):
+        outdoor = rng.uniform(-10.0, 10.0)
+        solar = rng.uniform(0.0, 1.0)
+        d = theta_env * (outdoor - indoor) * DT_H + theta_solar * solar * DT_H
+        cycles.append(
+            dict(
+                indoor_temp_c=indoor,
+                outdoor_temp_c=outdoor,
+                compensation_delta_c=0.0,   # the crucial part: no excitation
+                solar_effect=solar,
+            )
+        )
+        indoor += d
+    return cycles
+
+
+def test_cold_start_reports_gain_not_modeled():
+    state = initial_state()
+    _new, result = step(state, make_inputs(), RCModelConfig())
+    assert result.gain_modeled is False
+    assert result.theta_gain == 0.0
+    assert len(state.theta) == 2
+
+
+def test_gain_not_added_without_excitation():
+    # A long passive stretch (u == 0 throughout) must NOT add the gain
+    # dimension, and must NOT wind up covariance: this is the regression test
+    # for the summer/switch-off windup bug.
+    cycles = _passive_cycles(2000, seed=9)
+    state, result = _run(cycles)
+    assert state.has_gain is False
+    assert result.gain_modeled is False
+    assert len(state.theta) == 2
+    # No unexcited dimension -> the trace never runs toward its cap.
+    assert result.cov_trace < 100.0
+    assert result.cov_trace <= rc_model.P_TRACE_MAX
+
+
+def test_add_gain_dimension_block_embeds_exactly():
+    # Unit test of the pure embedding helper: old values/covariance preserved,
+    # gain appended LAST with a fresh prior variance and zero cross-covariance.
+    theta = [0.05, 0.40, 0.20]                    # e.g. env, solar, wind
+    p = [
+        [1.1, 0.2, 0.3],
+        [0.2, 2.2, 0.4],
+        [0.3, 0.4, 3.3],
+    ]
+    new_theta, new_p = rc_model._add_gain_dimension(theta, p)
+    assert new_theta == [0.05, 0.40, 0.20, rc_model.INIT_THETA_GAIN]
+    # Top-left 3x3 block identical.
+    for i in range(3):
+        for j in range(3):
+            assert new_p[i][j] == p[i][j]
+    # New gain diagonal is the wide prior; cross-covariance all zero.
+    assert new_p[3][3] == rc_model._INIT_P["gain"]
+    for i in range(3):
+        assert new_p[i][3] == 0.0
+        assert new_p[3][i] == 0.0
+
+
+def test_gain_added_on_first_excitation_preserving_prior_learning():
+    config = RCModelConfig()
+    # Learn env/solar passively (no gain dimension). Kept below the warmup count
+    # so the adaptive sigma gate stays off and the excitation cycles below are
+    # accepted unconditionally — env/solar still move well off their priors
+    # (true env 0.05 > prior 0.0333; true solar 0.40 > prior 0.0), which is all
+    # this test needs to prove the expansion preserves rather than resets them.
+    state, _ = _run(_passive_cycles(15, seed=3))
+    assert state.has_gain is False and len(state.theta) == 2
+
+    # One cycle carrying a real applied delta -> stored as prev_u_c (no expansion
+    # yet: this step's own prev_u_c was still 0).
+    state, res_a = step(
+        state, make_inputs(indoor_temp_c=21.0, outdoor_temp_c=4.0, compensation_delta_c=-2.0), config
+    )
+    assert state.has_gain is False and len(state.theta) == 2
+    env_before = state.theta[0]
+    solar_before = state.theta[1]
+
+    # Next accepted cycle sees prev_u_c = -2 -> expands, embedding the prior.
+    state, res_b = step(
+        state, make_inputs(indoor_temp_c=21.05, outdoor_temp_c=4.0, compensation_delta_c=-2.0), config
+    )
+    assert state.has_gain is True
+    assert res_b.gain_modeled is True
+    assert len(state.theta) == 3            # [env, solar, gain], gain appended LAST
+    # The learned env/solar were NOT reset to their cold-start prior by the
+    # expansion. After the embedding + a single RLS step they stay FAR closer to
+    # their pre-expansion (learned) values than to the priors they would snap
+    # back to on a reset — the decisive evidence of block-embedding preservation.
+    assert abs(state.theta[0] - env_before) < abs(env_before - rc_model.INIT_THETA_ENV)
+    assert abs(state.theta[1] - solar_before) < abs(solar_before - rc_model.INIT_THETA_SOLAR)
+    # And solar had genuinely converged near its truth (0.40), so this is a real
+    # learned value being preserved, not a still-at-prior coincidence.
+    assert solar_before > 0.2
+    assert "gain dimension added" in res_b.reason
+
+
+def test_gain_stays_added_after_excitation_stops():
+    # Once added, gain is permanent even if excitation later disappears.
+    config = RCModelConfig()
+    state, _ = _run(_passive_cycles(15, seed=1))  # immature -> sigma gate off
+    # Excite a few times to add the dimension.
+    for _ in range(3):
+        state, _ = step(
+            state,
+            make_inputs(compensation_delta_c=-2.0, indoor_temp_c=21.0),
+            config,
+        )
+    assert state.has_gain is True and len(state.theta) == 3
+    # Now go passive again; the dimension must remain.
+    for c in _passive_cycles(30, seed=2):
+        state, result = step(state, make_inputs(**c), config)
+    assert state.has_gain is True
+    assert result.gain_modeled is True
+    assert len(state.theta) == 3

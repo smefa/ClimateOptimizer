@@ -22,12 +22,15 @@ Compatibility gates handled here (all cause `deserialize_state()` to return
   * `model_version` mismatch   — the RC model's algorithm version
     (`rc_model.MODEL_VERSION`); a different estimator formulation must not be
     fed old parameter/covariance vectors;
-  * dimensionality mismatch    — the estimator is genuinely 3- or 4-dimensional
-    depending on `enable_wind` (see rc_model's docstring). A persisted 4-dim
-    state must never be loaded into a 3-dim estimator (or vice versa): the RLS
-    matrices would be the wrong shape and either crash or silently corrupt the
-    fit. `enable_wind` is passed in explicitly and checked against the stored
-    parameter count;
+  * dimensionality mismatch    — the estimator has one of four shapes
+    ([env, solar] (+wind) (+gain)) depending on `enable_wind` and whether the
+    lazy gain dimension has been added (see rc_model's docstring). Loading a
+    state into an estimator of the wrong shape would give the RLS matrices the
+    wrong size and either crash or silently corrupt the fit. Crucially, TWO of
+    the four shapes have the same length (3), so length alone is ambiguous:
+    `enable_wind` (current config) is passed in explicitly and `has_gain` is
+    stored in the payload, and BOTH are checked so [env, solar, wind] can never
+    be mistaken for [env, solar, gain];
   * any structural corruption  — wrong types, wrong matrix shape, non-finite
     values, missing keys.
 """
@@ -59,7 +62,11 @@ STORAGE_VERSION = 1
 
 # Bump this whenever the serialized layout of RCModelState changes in a way
 # that older stored data could not be safely loaded into new code.
-STATE_SCHEMA_VERSION = 1
+#   v2: added the lazy heat-pump gain dimension. The parameter order changed
+#       (gain, when present, is now appended LAST rather than sitting at a fixed
+#       index) and a `has_gain` flag was added, so v1 payloads cannot be mapped
+#       onto the new layout and are discarded -> clean cold start.
+STATE_SCHEMA_VERSION = 2
 
 STORAGE_KEY_PREFIX = "climate_optimizer_rc_state"
 
@@ -78,12 +85,17 @@ def serialize_state(state: RCModelState) -> dict[str, Any]:
 
     Tuples become lists (JSON has no tuple); everything else is already a
     primitive. `n_params` is recorded so `deserialize_state()` can enforce the
-    3-vs-4-dimensional invariant without reconstructing anything first.
+    dimensionality invariant without reconstructing anything first. `has_gain`
+    is recorded alongside it because length alone is ambiguous: a length-3 state
+    can be either [env, solar, wind] (wind on, gain not yet added) or
+    [env, solar, gain] (wind off, gain added). Both `enable_wind` (config) and
+    `has_gain` (this flag) are needed to disambiguate — see deserialize_state.
     """
     return {
         "schema_version": STATE_SCHEMA_VERSION,
         "model_version": MODEL_VERSION,
         "n_params": len(state.theta),
+        "has_gain": state.has_gain,
         "theta": list(state.theta),
         "p_matrix": [list(row) for row in state.p_matrix],
         "accepted_samples": state.accepted_samples,
@@ -135,13 +147,26 @@ def deserialize_state(data: Any, *, enable_wind: bool) -> RCModelState | None:
         )
         return None
 
-    expected_n = 4 if enable_wind else 3
+    # `has_gain` is intrinsic to the saved state (a learned runtime property,
+    # not a config toggle); `enable_wind` is the CURRENT config. The expected
+    # dimensionality is env + solar (always 2) plus a wind slot iff the current
+    # config enables wind plus a gain slot iff the saved state had gain. This
+    # resolves the same-length ambiguity: flipping the wind config changes
+    # expected_n by 1 and cannot be masked by the (payload-fixed) has_gain flag,
+    # so a state saved under the other wind setting is always rejected.
+    has_gain = data.get("has_gain")
+    if not isinstance(has_gain, bool):
+        _LOGGER.debug("RC state discarded: has_gain missing or not a bool (%r)", has_gain)
+        return None
+    expected_n = 2 + (1 if enable_wind else 0) + (1 if has_gain else 0)
     if data.get("n_params") != expected_n:
         _LOGGER.debug(
-            "RC state discarded: n_params %r != expected %d (enable_wind=%s)",
+            "RC state discarded: n_params %r != expected %d "
+            "(enable_wind=%s, has_gain=%s)",
             data.get("n_params"),
             expected_n,
             enable_wind,
+            has_gain,
         )
         return None
 
@@ -202,6 +227,7 @@ def deserialize_state(data: Any, *, enable_wind: bool) -> RCModelState | None:
     return RCModelState(
         theta=theta,
         p_matrix=p_matrix,
+        has_gain=has_gain,
         accepted_samples=accepted_samples,
         rejected_samples=rejected_samples,
         clip_events=clip_events,
