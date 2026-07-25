@@ -81,7 +81,9 @@ learning progress every time). Its state is restored across restarts.
    generally more accurate than a weather service's estimate), a weather
    entity (used only for its wind/cloud forecast), an optional Nordpool price
    entity, and a starting target indoor temperature (adjustable afterward via
-   the `number.<name>_indoor_target_temperature` entity, not this dialog).
+   the `number.<name>_indoor_target_temperature` entity, not this dialog). An
+   optional heat-pump power sensor can be added later via **Configure** — see
+   "Local history logging" below.
 5. Tune coefficients, comfort bounds, and the price feature later via the
    integration's **Configure** (options) dialog — no reinstall needed.
 
@@ -298,6 +300,18 @@ backtest an MPC change later. With this on, real history survives and can be
 replayed offline through a candidate model change without waiting for new
 live data. The resolved file path is shown on `sensor.<name>_status`'s
 `data_log_path` attribute whenever logging is on.
+
+If an optional heat-pump power sensor is configured (Configure → "Heat pump
+power sensor"), each logged record also gets `power_w` (the raw reading,
+echoed live on `sensor.<name>_power_draw`) and a coarse `cycle_energy_kwh` /
+`cycle_cost` estimate (power held constant since the previous logged cycle,
+times the current price) — enough to compute a real cost trend offline,
+instead of MPC's relative proxy-unit "savings" figure. **Important:** on many
+installs the power sensor is shared with hot water production, so this figure
+is NOT attributable to space heating alone. It's still useful for comparing
+tuning changes (tier, wind term, k_price) against each other over matched
+time windows, since hot-water usage is independent of those settings and
+averages out — just don't read it as "the compensation saved €X".
 
 Whenever MPC actually runs a cycle, the record also embeds the exact
 multi-hour forecast it planned against (`mpc_forecast_price`,

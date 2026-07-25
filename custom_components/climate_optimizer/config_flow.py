@@ -22,9 +22,13 @@ from .const import (
     CONF_ENABLE_PRICE_COMPENSATION,
     CONF_ENABLE_WIND_RC,
     CONF_HEATING_CUTOFF_C,
+    CONF_COLD_TAPER_FULL_C,
+    CONF_COLD_TAPER_MIN_FACTOR,
+    CONF_COLD_TAPER_START_C,
     CONF_INDOOR_TARGET_TEMPERATURE,
     CONF_INDOOR_TEMP_SENSOR,
     CONF_K_INDOOR,
+    CONF_K_PRICE,
     CONF_K_SUN,
     CONF_K_WIND,
     CONF_MPC_HORIZON_HOURS,
@@ -32,6 +36,8 @@ from .const import (
     CONF_MPC_MIN_CONFIDENCE,
     CONF_NORDPOOL_PRICE_ENTITY,
     CONF_OUTDOOR_TEMP_SENSOR,
+    CONF_POWER_SENSOR,
+    CONF_PRECHARGE_MAX_BOOST_C,
     CONF_PRICE_MAX_DROP_C,
     CONF_PRICE_THRESHOLD_MAX,
     CONF_PRICE_THRESHOLD_START,
@@ -43,14 +49,19 @@ from .const import (
     DEFAULT_ENABLE_DATA_LOGGING,
     DEFAULT_ENABLE_PRICE_COMPENSATION,
     DEFAULT_ENABLE_WIND_RC,
+    DEFAULT_COLD_TAPER_FULL_C,
+    DEFAULT_COLD_TAPER_MIN_FACTOR,
+    DEFAULT_COLD_TAPER_START_C,
     DEFAULT_HEATING_CUTOFF_C,
     DEFAULT_INDOOR_TARGET_TEMPERATURE,
     DEFAULT_K_INDOOR,
+    DEFAULT_K_PRICE,
     DEFAULT_K_SUN,
     DEFAULT_K_WIND,
     DEFAULT_MPC_HORIZON_HOURS,
     DEFAULT_MPC_MAX_HEATING_DELTA_C,
     DEFAULT_MPC_MIN_CONFIDENCE,
+    DEFAULT_PRECHARGE_MAX_BOOST_C,
     DEFAULT_PRICE_MAX_DROP_C,
     DEFAULT_PRICE_THRESHOLD_MAX,
     DEFAULT_PRICE_THRESHOLD_START,
@@ -160,6 +171,14 @@ class ClimateOptimizerOptionsFlow(config_entries.OptionsFlow):
                     CONF_NORDPOOL_PRICE_ENTITY,
                     default=current.get(CONF_NORDPOOL_PRICE_ENTITY),
                 ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+                # Optional: enables real cost/energy figures in the local history
+                # log (see data_logger.py) and a diagnostic power echo sensor.
+                # Not restricted to device_class "power" since not every power
+                # integration sets it, same reasoning as the price entity above.
+                vol.Optional(
+                    CONF_POWER_SENSOR,
+                    default=current.get(CONF_POWER_SENSOR),
+                ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
                 vol.Required(
                     CONF_ENABLE_PRICE_COMPENSATION,
                     default=current.get(
@@ -227,6 +246,55 @@ class ClimateOptimizerOptionsFlow(config_entries.OptionsFlow):
                 ): selector.NumberSelector(
                     selector.NumberSelectorConfig(
                         min=0, max=10, step=0.1, unit_of_measurement="°C", mode="box"
+                    )
+                ),
+                # Price compensation v2. The active tier (Low/Mid/High) is a live
+                # entity (select.py), not a config option — it's flipped too
+                # often to justify an entry reload. These are the advanced
+                # tunables behind it: the dedicated braking gain and the
+                # deep-cold taper endpoints.
+                vol.Required(
+                    CONF_K_PRICE,
+                    default=current.get(CONF_K_PRICE, DEFAULT_K_PRICE),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=0, max=15, step=0.1, mode="box")
+                ),
+                vol.Required(
+                    CONF_COLD_TAPER_START_C,
+                    default=current.get(
+                        CONF_COLD_TAPER_START_C, DEFAULT_COLD_TAPER_START_C
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=-30, max=10, step=1, unit_of_measurement="°C", mode="box"
+                    )
+                ),
+                vol.Required(
+                    CONF_COLD_TAPER_FULL_C,
+                    default=current.get(
+                        CONF_COLD_TAPER_FULL_C, DEFAULT_COLD_TAPER_FULL_C
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=-40, max=5, step=1, unit_of_measurement="°C", mode="box"
+                    )
+                ),
+                vol.Required(
+                    CONF_COLD_TAPER_MIN_FACTOR,
+                    default=current.get(
+                        CONF_COLD_TAPER_MIN_FACTOR, DEFAULT_COLD_TAPER_MIN_FACTOR
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(min=0, max=1, step=0.05, mode="box")
+                ),
+                vol.Required(
+                    CONF_PRECHARGE_MAX_BOOST_C,
+                    default=current.get(
+                        CONF_PRECHARGE_MAX_BOOST_C, DEFAULT_PRECHARGE_MAX_BOOST_C
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=0, max=5, step=0.1, unit_of_measurement="°C", mode="box"
                     )
                 ),
                 vol.Required(

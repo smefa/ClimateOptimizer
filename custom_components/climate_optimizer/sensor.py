@@ -12,6 +12,7 @@ from homeassistant.components.sensor import (
 from homeassistant.const import (
     PERCENTAGE,
     EntityCategory,
+    UnitOfPower,
     UnitOfTemperature,
     UnitOfTime,
 )
@@ -42,6 +43,7 @@ async def async_setup_entry(
             IndoorTemperatureErrorSensor(coordinator, entry),
             PriceShiftAppliedSensor(coordinator, entry),
             StatusSensor(coordinator, entry),
+            PowerDrawSensor(coordinator, entry),
             # Phase 2 shadow-mode RC model diagnostics (informational only).
             RCThermalTimeConstantSensor(coordinator, entry),
             RCHeatPumpGainSensor(coordinator, entry),
@@ -162,6 +164,33 @@ class OutdoorTemperatureSensor(ClimateOptimizerEntity, SensorEntity):
     def native_value(self) -> float | None:
         result: HeuristicResult | None = self.coordinator.data
         return result.raw_outdoor_temp_c if result else None
+
+
+class PowerDrawSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic: echo of the optional heat-pump power sensor (if configured).
+
+    Purely informational — never fed into the heuristic/RC/MPC. On many
+    installs this circuit also serves hot water production, so this is NOT a
+    clean space-heating-only signal; see README's "Local history logging"
+    section for how it's used (a coarse per-cycle energy/cost estimate in the
+    opt-in local log). Unavailable when no power sensor is configured.
+    """
+
+    _attr_translation_key = "power_draw"
+    _attr_device_class = SensorDeviceClass.POWER
+    _attr_native_unit_of_measurement = UnitOfPower.WATT
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_power_draw"
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.last_power_w
 
 
 class IndoorTemperatureErrorSensor(ClimateOptimizerEntity, SensorEntity):

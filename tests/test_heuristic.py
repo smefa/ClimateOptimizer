@@ -11,6 +11,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 _HEURISTIC_PATH = (
     Path(__file__).parent.parent
     / "custom_components"
@@ -157,36 +159,45 @@ def test_price_below_threshold_has_no_effect():
     assert result.price_shift_applied_c == 0.0
 
 
-def test_price_between_thresholds_ramps_linearly():
-    # threshold_start=1.5, threshold_max=3.0, max_drop=1.0 -> at price 2.25
-    # (halfway) the shift should be half of max_drop.
+def test_price_between_thresholds_is_convex_not_linear():
+    # Mid tier gamma=2.0: at the ramp midpoint (price 2.25) the response is
+    # 0.5**2 = 0.25, NOT 0.5 — small excursions are deliberately damped so the
+    # controller only reacts hard to genuinely large price differences. Shift =
+    # 0.25 * max_sag(1.5) * taper(1.0 at +3°C outdoor) = 0.375.
     result = compute(
         make_inputs(current_price=2.25, price_data_available=True),
         make_params(enable_price_compensation=True),
     )
-    assert result.price_shift_applied_c == 0.5
-    assert result.effective_indoor_target_c == 20.5
+    assert result.price_response == pytest.approx(0.25)
+    assert result.price_shift_applied_c == pytest.approx(0.375)
+    assert result.effective_indoor_target_c == pytest.approx(20.625)
 
 
-def test_price_above_max_threshold_caps_at_max_drop():
+def test_price_above_max_threshold_caps_at_tier_max_sag():
+    # Mid tier: response saturates at 1.0, so shift = max_sag(1.5) * taper(1.0).
+    # The compensated bump uses k_price (5.0), decoupled from k_indoor, so a
+    # spike brakes far harder than the old +1.5°C: -5.0 * (19.5 - 21) = +7.5°C.
     result = compute(
         make_inputs(current_price=100.0, price_data_available=True),
         make_params(enable_price_compensation=True),
     )
-    assert result.price_shift_applied_c == 1.0
-    assert result.effective_indoor_target_c == 20.0
+    assert result.price_shift_applied_c == pytest.approx(1.5)
+    assert result.effective_indoor_target_c == pytest.approx(19.5)
+    assert result.price_adjustment_c == pytest.approx(7.5)
 
 
 def test_price_shift_never_exceeds_comfort_min():
+    # High tier sag 3.0 would push the target to 18.0; a comfort_min of 19.0
+    # clamps it there regardless.
     result = compute(
         make_inputs(current_price=100.0, price_data_available=True),
         make_params(
             enable_price_compensation=True,
-            price_max_drop_c=10.0,  # would push target to 11.0 without the clamp
-            comfort_min_c=18.0,
+            price_comfort_tier="high",
+            comfort_min_c=19.0,
         ),
     )
-    assert result.effective_indoor_target_c == 18.0
+    assert result.effective_indoor_target_c == 19.0
 
 
 def test_price_missing_data_soft_degrades_to_no_effect():
@@ -263,7 +274,283 @@ def test_degenerate_price_thresholds_do_not_crash():
             price_threshold_max=2.0,
         ),
     )
-    assert result.price_shift_applied_c == 1.0
+    # Hard step to full response → shift = mid-tier max_sag(1.5) * taper(1.0).
+    assert result.price_shift_applied_c == pytest.approx(1.5)
+
+
+def test_higher_tier_brakes_harder():
+    # Same full spike, three tiers: sag scales 0.5 / 1.5 / 3.0, and the
+    # compensated bump (k_price 5.0 × sag) scales with it.
+    shifts = {}
+    for tier in ("low", "mid", "high"):
+        result = compute(
+            make_inputs(current_price=100.0, price_data_available=True),
+            make_params(enable_price_compensation=True, price_comfort_tier=tier),
+        )
+        shifts[tier] = result.price_shift_applied_c
+    assert shifts["low"] == pytest.approx(0.5)
+    assert shifts["mid"] == pytest.approx(1.5)
+    assert shifts["high"] == pytest.approx(3.0)
+    assert shifts["low"] < shifts["mid"] < shifts["high"]
+
+
+def test_convex_curve_reacts_more_to_larger_price_differences():
+    # A price a quarter of the way up the band should produce far less than a
+    # quarter of the full response (convexity). Mid gamma=2.0: 0.25**2 = 0.0625.
+    span = 3.0 - 1.5
+    quarter_price = 1.5 + 0.25 * span
+    result = compute(
+        make_inputs(current_price=quarter_price, price_data_available=True),
+        make_params(enable_price_compensation=True),
+    )
+    assert result.price_response == pytest.approx(0.0625)
+    # Well under a linear quarter-response (which would be 0.25).
+    assert result.price_response < 0.25
+
+
+def test_cold_taper_reduces_braking_in_deep_cold():
+    # Mid tier, full spike. At -15°C outdoor the taper is
+    # 0.4 + 0.6 * ((-15 - -20) / (-10 - -20)) = 0.7, so shift = 1.5 * 0.7 = 1.05,
+    # vs the full 1.5 at a mild 0°C.
+    cold = compute(
+        make_inputs(
+            current_price=100.0, price_data_available=True, raw_outdoor_temp_c=-15.0
+        ),
+        make_params(enable_price_compensation=True),
+    )
+    mild = compute(
+        make_inputs(
+            current_price=100.0, price_data_available=True, raw_outdoor_temp_c=0.0
+        ),
+        make_params(enable_price_compensation=True),
+    )
+    assert cold.cold_taper_factor == pytest.approx(0.7)
+    assert cold.price_shift_applied_c == pytest.approx(1.05)
+    assert mild.cold_taper_factor == pytest.approx(1.0)
+    assert mild.price_shift_applied_c == pytest.approx(1.5)
+    assert cold.price_shift_applied_c < mild.price_shift_applied_c
+
+
+def test_cold_taper_factor_helper_boundaries():
+    # 1.0 at/above start, min_factor at/below full, linear between, and a
+    # degenerate (start<=full) config disables the taper.
+    assert heuristic.cold_taper_factor(-5.0, -10.0, -20.0, 0.4) == 1.0
+    assert heuristic.cold_taper_factor(-10.0, -10.0, -20.0, 0.4) == 1.0
+    assert heuristic.cold_taper_factor(-20.0, -10.0, -20.0, 0.4) == 0.4
+    assert heuristic.cold_taper_factor(-30.0, -10.0, -20.0, 0.4) == 0.4
+    assert heuristic.cold_taper_factor(-15.0, -10.0, -20.0, 0.4) == pytest.approx(0.7)
+    assert heuristic.cold_taper_factor(-15.0, -20.0, -10.0, 0.4) == 1.0  # degenerate
+
+
+def test_resolve_price_tier_defaults_to_mid_on_unknown():
+    assert heuristic.resolve_price_tier("bogus").max_sag_c == 1.5
+    assert heuristic.resolve_price_tier(None).max_sag_c == 1.5
+    assert heuristic.resolve_price_tier("HIGH").max_sag_c == 3.0  # case-insensitive
+
+
+def test_price_explainability_fields_populated():
+    result = compute(
+        make_inputs(current_price=100.0, price_data_available=True),
+        make_params(enable_price_compensation=True, price_comfort_tier="high"),
+    )
+    assert result.price_comfort_tier == "high"
+    assert result.allowed_sag_c == pytest.approx(3.0)
+    assert result.upcoming_spike_in_min is None  # Phase B not yet active
+    assert result.precharge_active is False
+
+
+def _spiky_day(peak_hours: float, peak_price: float = 10.0, base: float = 1.0):
+    """A 24 h hourly `base` forecast plus a single `peak` entry inserted at
+    exactly `peak_hours` from now (supports sub-hour offsets)."""
+    entries = [(float(h), base) for h in range(24)]
+    entries.append((float(peak_hours), peak_price))
+    return tuple(sorted(entries))
+
+
+def test_flat_day_forecast_suppresses_compensation_entirely():
+    # Even at a high absolute price, a forecast with no meaningful spread means
+    # "there are no bigger differences today" → leave it alone.
+    flat = tuple((float(h), 3.0) for h in range(24))
+    result = compute(
+        make_inputs(current_price=3.0, price_data_available=True, price_forecast=flat),
+        make_params(enable_price_compensation=True),
+    )
+    assert result.price_shift_applied_c == 0.0
+    assert result.price_response == 0.0
+
+
+def test_relative_band_engages_on_a_spiky_day():
+    # Current hour IS the spike; the day's distribution makes it full-authority.
+    forecast = _spiky_day(peak_hours=0.0)
+    result = compute(
+        make_inputs(
+            current_price=10.0, price_data_available=True, price_forecast=forecast
+        ),
+        make_params(enable_price_compensation=True),
+    )
+    assert result.price_response > 0.5
+    assert result.price_shift_applied_c > 0.0
+    assert result.upcoming_spike_in_min is None  # the spike is now, not ahead
+
+
+def test_lookahead_pre_brakes_before_an_upcoming_spike():
+    # Cheap right now, but a spike lands in 1 h — within the mid tier's 90 min
+    # lead window — so the controller pre-brakes and flags the spike timing.
+    forecast = _spiky_day(peak_hours=1.0)
+    result = compute(
+        make_inputs(
+            current_price=1.0, price_data_available=True, price_forecast=forecast
+        ),
+        make_params(enable_price_compensation=True),
+    )
+    assert result.price_shift_applied_c > 0.0
+    assert result.upcoming_spike_in_min == pytest.approx(60.0)
+    assert "pre-braking" in result.reason
+
+
+def test_lookahead_ignores_spikes_beyond_the_lead_window():
+    # Same spike but 5 h out — well past the mid tier's 90 min lead — so no
+    # pre-brake yet.
+    forecast = _spiky_day(peak_hours=5.0)
+    result = compute(
+        make_inputs(
+            current_price=1.0, price_data_available=True, price_forecast=forecast
+        ),
+        make_params(enable_price_compensation=True),
+    )
+    assert result.price_shift_applied_c == 0.0
+    assert result.upcoming_spike_in_min is None
+
+
+def test_pre_brake_ramps_up_as_spike_approaches():
+    # Closer spike → stronger pre-brake (proximity weighting).
+    near = compute(
+        make_inputs(
+            current_price=1.0, price_data_available=True, price_forecast=_spiky_day(0.5)
+        ),
+        make_params(enable_price_compensation=True),
+    )
+    far = compute(
+        make_inputs(
+            current_price=1.0, price_data_available=True, price_forecast=_spiky_day(1.0)
+        ),
+        make_params(enable_price_compensation=True),
+    )
+    assert near.price_shift_applied_c > far.price_shift_applied_c > 0.0
+
+
+def test_short_forecast_falls_back_to_absolute_thresholds():
+    # Fewer than the minimum points → ignore the distribution, use the user's
+    # absolute thresholds on the current price (Phase A behavior).
+    short = ((0.0, 5.0), (1.0, 5.0))
+    result = compute(
+        make_inputs(
+            current_price=100.0, price_data_available=True, price_forecast=short
+        ),
+        make_params(enable_price_compensation=True),
+    )
+    assert result.price_shift_applied_c == pytest.approx(1.5)  # mid tier full
+
+
+def test_price_band_thresholds_exposed_for_troubleshooting():
+    # A spiky day: the derived engage/full/median thresholds are reported so a
+    # "why did/didn't it act" question is answerable from the state alone.
+    forecast = _spiky_day(peak_hours=1.0)  # 24×1.0 base + one 10.0
+    result = compute(
+        make_inputs(
+            current_price=1.0, price_data_available=True, price_forecast=forecast
+        ),
+        make_params(enable_price_compensation=True),
+    )
+    assert result.price_median == pytest.approx(1.0)
+    assert result.price_band_full == pytest.approx(10.0)  # the day's peak
+    # engage = median + 0.25 * (peak - median) = 1.0 + 0.25 * 9 = 3.25
+    assert result.price_band_start == pytest.approx(3.25)
+    assert "band 3.25" in result.reason
+
+
+def test_flat_day_reports_band_and_no_action_reason():
+    flat = tuple((float(h), 3.0) for h in range(24))
+    result = compute(
+        make_inputs(current_price=3.0, price_data_available=True, price_forecast=flat),
+        make_params(enable_price_compensation=True),
+    )
+    assert result.price_shift_applied_c == 0.0
+    assert result.price_median == pytest.approx(3.0)
+    assert "flat day" in result.reason
+
+
+def test_absolute_fallback_band_has_no_median():
+    # No forecast → absolute thresholds are the band, and there's no day median.
+    result = compute(
+        make_inputs(current_price=100.0, price_data_available=True),
+        make_params(enable_price_compensation=True),
+    )
+    assert result.price_median is None
+    assert result.price_band_start == pytest.approx(1.5)
+    assert result.price_band_full == pytest.approx(3.0)
+
+
+def test_precharge_preheats_in_cheap_window_before_spike_on_high_tier():
+    # High tier, cheap right now (below the day's median), spike coming in 1 h:
+    # pre-heat by raising the target (negative shift → the compensated bump goes
+    # NEGATIVE, calling for more heat now to bank it).
+    forecast = _spiky_day(peak_hours=1.0)
+    result = compute(
+        make_inputs(
+            current_price=1.0, price_data_available=True, price_forecast=forecast
+        ),
+        make_params(enable_price_compensation=True, price_comfort_tier="high"),
+    )
+    assert result.precharge_active is True
+    assert result.price_shift_applied_c < 0.0  # target raised, not lowered
+    assert result.effective_indoor_target_c > result.indoor_target_c
+    assert result.price_adjustment_c < 0.0  # more heat now
+    assert "pre-charging" in result.reason
+
+
+def test_precharge_does_not_engage_on_mid_tier():
+    # Mid tier opts out of pre-charging: same setup pre-brakes instead.
+    forecast = _spiky_day(peak_hours=1.0)
+    result = compute(
+        make_inputs(
+            current_price=1.0, price_data_available=True, price_forecast=forecast
+        ),
+        make_params(enable_price_compensation=True, price_comfort_tier="mid"),
+    )
+    assert result.precharge_active is False
+    assert result.price_shift_applied_c > 0.0  # braking, not boosting
+
+
+def test_precharge_bounded_by_comfort_max():
+    forecast = _spiky_day(peak_hours=0.5)
+    result = compute(
+        make_inputs(
+            current_price=1.0, price_data_available=True, price_forecast=forecast
+        ),
+        make_params(
+            enable_price_compensation=True,
+            price_comfort_tier="high",
+            comfort_max_c=21.5,
+            precharge_max_boost_c=5.0,  # would blow past comfort_max without the clamp
+        ),
+    )
+    assert result.effective_indoor_target_c == 21.5
+
+
+def test_precharge_disabled_when_boost_is_zero():
+    forecast = _spiky_day(peak_hours=1.0)
+    result = compute(
+        make_inputs(
+            current_price=1.0, price_data_available=True, price_forecast=forecast
+        ),
+        make_params(
+            enable_price_compensation=True,
+            price_comfort_tier="high",
+            precharge_max_boost_c=0.0,
+        ),
+    )
+    assert result.precharge_active is False
 
 
 def test_heating_cutoff_engages_at_or_above_threshold():

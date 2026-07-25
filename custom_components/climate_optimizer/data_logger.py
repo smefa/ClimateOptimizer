@@ -15,9 +15,16 @@ data. Opt-in, off by default (see CONF_ENABLE_DATA_LOGGING) — purely local,
 nothing is transmitted anywhere.
 
 Scope note: this logs raw physical inputs and computed results per cycle,
-not full multi-hour forecast snapshots — faithfully replaying MPC's exact
-historical decisions would additionally need the forecast arrays it saw at
-the time, which is a bigger feature deliberately left for later.
+plus the multi-hour forecast arrays (price, outdoor temp, wind, solar) MPC
+planned against that cycle — needed to faithfully replay/backtest a past
+MPC decision later, since forecasts get revised over time and realised
+values aren't a substitute for what was actually known at the time.
+
+When an optional power sensor is configured, each record also gets a coarse
+per-cycle energy/cost estimate (see coordinator._cycle_energy_and_cost) —
+the only real (non-proxy-unit) savings signal in the project. On installs
+where that sensor is shared with hot water production it isn't attributable
+to space heating alone; see README.
 """
 
 from __future__ import annotations

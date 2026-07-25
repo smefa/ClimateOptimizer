@@ -12,15 +12,24 @@ import time
 from datetime import datetime, timedelta
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN, UnitOfSpeed, UnitOfTemperature
+from homeassistant.const import (
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+    UnitOfPower,
+    UnitOfSpeed,
+    UnitOfTemperature,
+)
 from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
-from homeassistant.util.unit_conversion import SpeedConverter, TemperatureConverter
+from homeassistant.util.unit_conversion import PowerConverter, SpeedConverter, TemperatureConverter
 
 from .const import (
     CONF_COMFORT_MAX_C,
+    CONF_COLD_TAPER_FULL_C,
+    CONF_COLD_TAPER_MIN_FACTOR,
+    CONF_COLD_TAPER_START_C,
     CONF_COMFORT_MIN_C,
     CONF_ENABLE_DATA_LOGGING,
     CONF_ENABLE_PRICE_COMPENSATION,
@@ -29,6 +38,7 @@ from .const import (
     CONF_INDOOR_TARGET_TEMPERATURE,
     CONF_INDOOR_TEMP_SENSOR,
     CONF_K_INDOOR,
+    CONF_K_PRICE,
     CONF_K_SUN,
     CONF_K_WIND,
     CONF_MPC_HORIZON_HOURS,
@@ -36,12 +46,18 @@ from .const import (
     CONF_MPC_MIN_CONFIDENCE,
     CONF_NORDPOOL_PRICE_ENTITY,
     CONF_OUTDOOR_TEMP_SENSOR,
+    CONF_POWER_SENSOR,
+    CONF_PRECHARGE_MAX_BOOST_C,
+    CONF_PRICE_COMFORT_TIER,
     CONF_PRICE_MAX_DROP_C,
     CONF_PRICE_THRESHOLD_MAX,
     CONF_PRICE_THRESHOLD_START,
     CONF_RC_WIND_REFERENCE_MS,
     CONF_UPDATE_INTERVAL_MINUTES,
     CONF_WEATHER_ENTITY,
+    DEFAULT_COLD_TAPER_FULL_C,
+    DEFAULT_COLD_TAPER_MIN_FACTOR,
+    DEFAULT_COLD_TAPER_START_C,
     DEFAULT_COMFORT_MAX_C,
     DEFAULT_COMFORT_MIN_C,
     DEFAULT_ENABLE_DATA_LOGGING,
@@ -50,11 +66,14 @@ from .const import (
     DEFAULT_HEATING_CUTOFF_C,
     DEFAULT_INDOOR_TARGET_TEMPERATURE,
     DEFAULT_K_INDOOR,
+    DEFAULT_K_PRICE,
     DEFAULT_K_SUN,
     DEFAULT_K_WIND,
     DEFAULT_MPC_HORIZON_HOURS,
     DEFAULT_MPC_MAX_HEATING_DELTA_C,
     DEFAULT_MPC_MIN_CONFIDENCE,
+    DEFAULT_PRECHARGE_MAX_BOOST_C,
+    DEFAULT_PRICE_COMFORT_TIER,
     DEFAULT_PRICE_MAX_DROP_C,
     DEFAULT_PRICE_THRESHOLD_MAX,
     DEFAULT_PRICE_THRESHOLD_START,
@@ -178,6 +197,21 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # logger, so a full multi-hour forecast can be replayed offline
         # later without bloating HA's recorder/entity state size.
         self.mpc_forecasts: MPCForecasts | None = None
+        # The exact price forecast (hours_from_now, price) the heuristic's price
+        # decision used this cycle — stashed so the data logger can replay why
+        # it braked / pre-charged later (forecasts get revised, so the realised
+        # prices are not a substitute for what was known at the time).
+        self._last_price_forecast: tuple[tuple[float, float], ...] | None = None
+
+        # --- Optional power draw (diagnostic echo + local-log cost figures) ---
+        # Purely informational: never read by the heuristic/RC/MPC. Latest
+        # reading is kept for sensor.py's echo sensor regardless of whether
+        # data logging is on; the monotonic timer is only advanced when a
+        # cycle is actually logged (see _cycle_energy_and_cost), since it's
+        # only used there.
+        self.last_power_w: float | None = None
+        self.last_power_data_available: bool = False
+        self._energy_last_monotonic: float | None = None
 
         # --- Activation switch (learn mode vs live) ---------------------------
         # Default OFF ("learn mode"): the compensated-temperature sensor
@@ -201,6 +235,17 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # takes over after that, same pattern as `is_active` above.
         self.indoor_target_c: float = _entry_value(
             entry, CONF_INDOOR_TARGET_TEMPERATURE, DEFAULT_INDOOR_TARGET_TEMPERATURE
+        )
+
+        # --- Price comfort tier (live, select.py) -----------------------------
+        # Same in-memory-plus-RestoreEntity pattern as indoor_target_c above:
+        # the tier is a comfort/savings knob people flip often (and via
+        # automations), so backing it with a config option — which would reload
+        # the entry and wipe RC learning on every change — is the wrong home.
+        # Seeded from the config entry for the first run; select.py restores it
+        # thereafter.
+        self.price_comfort_tier: str = _entry_value(
+            entry, CONF_PRICE_COMFORT_TIER, DEFAULT_PRICE_COMFORT_TIER
         )
 
     def watched_entity_ids(self) -> list[str]:
@@ -306,6 +351,20 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             ),
             heating_cutoff_c=_entry_value(
                 entry, CONF_HEATING_CUTOFF_C, DEFAULT_HEATING_CUTOFF_C
+            ),
+            price_comfort_tier=self.price_comfort_tier,
+            k_price=_entry_value(entry, CONF_K_PRICE, DEFAULT_K_PRICE),
+            cold_taper_start_c=_entry_value(
+                entry, CONF_COLD_TAPER_START_C, DEFAULT_COLD_TAPER_START_C
+            ),
+            cold_taper_full_c=_entry_value(
+                entry, CONF_COLD_TAPER_FULL_C, DEFAULT_COLD_TAPER_FULL_C
+            ),
+            cold_taper_min_factor=_entry_value(
+                entry, CONF_COLD_TAPER_MIN_FACTOR, DEFAULT_COLD_TAPER_MIN_FACTOR
+            ),
+            precharge_max_boost_c=_entry_value(
+                entry, CONF_PRECHARGE_MAX_BOOST_C, DEFAULT_PRECHARGE_MAX_BOOST_C
             ),
         )
 
@@ -462,6 +521,57 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             return None, False
         return value, True
 
+    def _read_power_w(self) -> tuple[float | None, bool]:
+        """Return (power_w, power_data_available) for the optional heat-pump
+        power sensor. Soft-degrades like the price entity: unconfigured or
+        unavailable just means no power/cost figure this cycle, nothing else
+        is affected."""
+        entity_id = _entry_value(self.entry, CONF_POWER_SENSOR, None)
+        if not entity_id:
+            return None, False
+        state = self.hass.states.get(entity_id)
+        if not _state_is_usable(state):
+            _LOGGER.warning(
+                "Power sensor %s is unavailable; power/cost logging will skip this cycle",
+                entity_id,
+            )
+            return None, False
+        value = _as_float(state)
+        if value is None:
+            _LOGGER.warning("Power sensor %s has no numeric state", entity_id)
+            return None, False
+        unit = state.attributes.get("unit_of_measurement", UnitOfPower.WATT)
+        try:
+            return PowerConverter.convert(value, unit, UnitOfPower.WATT), True
+        except Exception:  # noqa: BLE001 - unrecognized unit, treat as unavailable
+            _LOGGER.warning("Power sensor %s has an unrecognized unit %s", entity_id, unit)
+            return None, False
+
+    def _cycle_energy_and_cost(
+        self, power_ok: bool, current_price: float | None, price_ok: bool
+    ) -> tuple[float | None, float | None]:
+        """Coarse energy/cost estimate for one logged cycle: `last_power_w`
+        held constant (left-rectangle) over the time since the previous
+        *logged* cycle. Adequate for an offline cost trend, not billing-grade
+        metering. Returns (None, None) when the power sensor is unavailable
+        or this is the first logged cycle (no elapsed time to integrate over
+        yet — also naturally covers logging having just been re-enabled,
+        which resets `_energy_last_monotonic` via a full entry reload).
+
+        NOTE: on installs where the power sensor is shared with hot water
+        production, this energy/cost figure is NOT attributable to space
+        heating alone — see README.
+        """
+        now = time.monotonic()
+        last = self._energy_last_monotonic
+        self._energy_last_monotonic = now
+        if not power_ok or last is None:
+            return None, None
+        dt_h = (now - last) / 3600.0
+        energy_kwh = self.last_power_w / 1000.0 * dt_h
+        cost = energy_kwh * current_price if (price_ok and current_price is not None) else None
+        return energy_kwh, cost
+
     async def _async_update_data(self) -> HeuristicResult:
         raw_outdoor_temp_c = self._read_raw_outdoor_temp_c()
         indoor_temp_c, indoor_ok = self._read_indoor_temp_c()
@@ -473,6 +583,11 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         ) = await self._read_forecast()
         sun_elevation_deg = self._read_sun_elevation()
         current_price, price_ok = self._read_price()
+        price_forecast = self._price_forecast_offsets()
+        self._last_price_forecast = price_forecast
+        power_w, power_ok = self._read_power_w()
+        self.last_power_w = power_w
+        self.last_power_data_available = power_ok
 
         inputs = HeuristicInputs(
             indoor_temp_c=indoor_temp_c,
@@ -485,6 +600,7 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             cloud_data_available=cloud_ok,
             current_price=current_price,
             price_data_available=price_ok,
+            price_forecast=price_forecast,
         )
         result = compute(inputs, self._params())
 
@@ -728,6 +844,22 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         state = self.hass.states.get(entity_id)
         if not _state_is_usable(state):
             return [flat] * steps, 0
+        entries = self._read_price_entries()
+        if not entries:
+            return [flat] * steps, 0
+        return self._align_series(entries, dt_util.now(), steps, step_hours)
+
+    def _read_price_entries(self) -> list[tuple[datetime, float]]:
+        """Parse the Nordpool sensor's `raw_today` / `raw_tomorrow` attributes
+        into (local start datetime, price) entries, shared by the MPC sampler
+        and the heuristic's forecast offsets. Empty when no price entity is
+        configured, it's unavailable, or those attributes are absent."""
+        entity_id = _entry_value(self.entry, CONF_NORDPOOL_PRICE_ENTITY, None)
+        if not entity_id:
+            return []
+        state = self.hass.states.get(entity_id)
+        if not _state_is_usable(state):
+            return []
         entries: list[tuple[datetime, float]] = []
         for attr in ("raw_today", "raw_tomorrow"):
             raw = state.attributes.get(attr)
@@ -746,9 +878,21 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
                     entries.append((dt_util.as_local(start), float(value)))
                 except (TypeError, ValueError):
                     continue
+        return entries
+
+    def _price_forecast_offsets(self) -> tuple[tuple[float, float], ...] | None:
+        """The day-ahead price as (hours_from_now, price) pairs for the
+        heuristic's relative-to-day band and lookahead pre-braking. None when
+        unavailable, so the heuristic falls back to absolute-threshold,
+        current-price-only behavior."""
+        entries = self._read_price_entries()
         if not entries:
-            return [flat] * steps, 0
-        return self._align_series(entries, dt_util.now(), steps, step_hours)
+            return None
+        now = dt_util.now()
+        return tuple(
+            ((start - now).total_seconds() / 3600.0, price)
+            for start, price in sorted(entries, key=lambda e: e[0])
+        )
 
     async def _read_weather_forecast_arrays(
         self, steps: int, step_hours: float, fallback_outdoor_c: float
@@ -898,7 +1042,41 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             "compensated_outdoor_temp_c": result.compensated_outdoor_temp_c,
             "applied_delta_c": applied_delta_c,
             "heating_cutoff_engaged": result.heating_cutoff_engaged,
+            # Price-compensation v2 decision: enough to reconstruct offline why
+            # it braked / pre-charged (or didn't) on this cycle.
+            "price_comfort_tier": result.price_comfort_tier,
+            "price_response": result.price_response,
+            "price_shift_applied_c": result.price_shift_applied_c,
+            "effective_indoor_target_c": result.effective_indoor_target_c,
+            "price_adjustment_c": result.price_adjustment_c,
+            "cold_taper_factor": result.cold_taper_factor,
+            "allowed_sag_c": result.allowed_sag_c,
+            "upcoming_spike_in_min": result.upcoming_spike_in_min,
+            "precharge_active": result.precharge_active,
+            "price_band_start": result.price_band_start,
+            "price_band_full": result.price_band_full,
+            "price_median": result.price_median,
         }
+        cycle_energy_kwh, cycle_cost = self._cycle_energy_and_cost(
+            self.last_power_data_available, result.current_price, result.price_data_available
+        )
+        record.update(
+            {
+                # Raw instantaneous reading (may include hot water — see README)
+                # plus the coarse per-cycle energy/cost estimate derived from it.
+                "power_w": self.last_power_w,
+                "power_data_available": self.last_power_data_available,
+                "cycle_energy_kwh": cycle_energy_kwh,
+                "cycle_cost": cycle_cost,
+            }
+        )
+        if self._last_price_forecast is not None:
+            # The exact (hours_from_now, price) series the price decision above
+            # was computed against — the heuristic analogue of the MPC forecast
+            # snapshot below, needed to faithfully replay a past decision.
+            record["price_forecast"] = [
+                [round(h, 4), p] for h, p in self._last_price_forecast
+            ]
         if self.rc_result is not None:
             record.update(
                 {

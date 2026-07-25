@@ -39,6 +39,7 @@
         "data": {
           "weather_entity": "Weather entity",
           "nordpool_price_entity": "Nordpool price sensor (optional)",
+          "power_sensor": "Heat pump power sensor (optional, may include hot water)",
           "enable_price_compensation": "Lower target during expensive price periods",
           "k_indoor": "Indoor error coefficient (k_indoor)",
           "k_wind": "Wind coefficient (k_wind)",
@@ -48,7 +49,12 @@
           "heating_cutoff_c": "Heating cutoff temperature (compensation suppressed at/above this)",
           "price_threshold_start": "Price where reduction starts",
           "price_threshold_max": "Price where reduction is at its maximum",
-          "price_max_drop_c": "Maximum target drop from price",
+          "price_max_drop_c": "Maximum target drop from price (legacy; superseded by comfort tier)",
+          "k_price": "Price braking gain (k_price)",
+          "cold_taper_start_c": "Deep-cold taper: full braking at/above this outdoor temp",
+          "cold_taper_full_c": "Deep-cold taper: minimum braking at/below this outdoor temp",
+          "cold_taper_min_factor": "Deep-cold taper: braking fraction at the coldest end (0-1)",
+          "precharge_max_boost_c": "Max pre-heat boost before a spike (High tier only; 0 disables)",
           "update_interval_minutes": "Update interval (minutes)",
           "enable_wind_rc": "Model wind sensitivity in the thermal model (advanced, shadow-mode only)",
           "rc_wind_reference_ms": "Reference wind speed for the wind model",
@@ -76,6 +82,9 @@
       },
       "price_shift_applied": {
         "name": "Price shift applied"
+      },
+      "power_draw": {
+        "name": "Power draw"
       },
       "status": {
         "name": "Status",
@@ -132,6 +141,16 @@
     "number": {
       "indoor_target_temperature": {
         "name": "Indoor target temperature"
+      }
+    },
+    "select": {
+      "price_comfort_tier": {
+        "name": "Price comfort tier",
+        "state": {
+          "low": "Low (max comfort)",
+          "mid": "Mid (balanced)",
+          "high": "High (max saving)"
+        }
       }
     }
   }

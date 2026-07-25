@@ -13,6 +13,13 @@ CONF_INDOOR_TEMP_SENSOR = "indoor_temp_sensor"
 CONF_OUTDOOR_TEMP_SENSOR = "outdoor_temp_sensor"
 CONF_WEATHER_ENTITY = "weather_entity"
 CONF_NORDPOOL_PRICE_ENTITY = "nordpool_price_entity"
+# Optional: the heat pump's live electrical power draw. Purely for local
+# history logging / a diagnostic echo sensor — never an input to the
+# heuristic/RC/MPC (it's an effect of past decisions, not something a control
+# decision should react to). On many installs this circuit also serves hot
+# water production, so it is NOT a clean space-heating-only signal — see
+# README's "Local history logging" section.
+CONF_POWER_SENSOR = "power_sensor"
 CONF_INDOOR_TARGET_TEMPERATURE = "indoor_target_temperature"
 CONF_ENABLE_PRICE_COMPENSATION = "enable_price_compensation"
 CONF_K_INDOOR = "k_indoor"
@@ -23,6 +30,13 @@ CONF_COMFORT_MAX_C = "comfort_max_c"
 CONF_PRICE_THRESHOLD_START = "price_threshold_start"
 CONF_PRICE_THRESHOLD_MAX = "price_threshold_max"
 CONF_PRICE_MAX_DROP_C = "price_max_drop_c"
+# Price compensation v2
+CONF_PRICE_COMFORT_TIER = "price_comfort_tier"
+CONF_K_PRICE = "k_price"
+CONF_COLD_TAPER_START_C = "cold_taper_start_c"
+CONF_COLD_TAPER_FULL_C = "cold_taper_full_c"
+CONF_COLD_TAPER_MIN_FACTOR = "cold_taper_min_factor"
+CONF_PRECHARGE_MAX_BOOST_C = "precharge_max_boost_c"
 CONF_UPDATE_INTERVAL_MINUTES = "update_interval_minutes"
 CONF_HEATING_CUTOFF_C = "heating_cutoff_c"
 CONF_ENABLE_WIND_RC = "enable_wind_rc"
@@ -44,6 +58,18 @@ DEFAULT_COMFORT_MAX_C = 23.0
 DEFAULT_PRICE_THRESHOLD_START = 1.5
 DEFAULT_PRICE_THRESHOLD_MAX = 3.0
 DEFAULT_PRICE_MAX_DROP_C = 1.0
+# Price compensation v2. Tier "mid" is the balanced default. k_price is the
+# dedicated braking gain (decoupled from k_indoor) — deliberately large so a
+# spike produces a decisive compensated-outdoor bump. The cold taper scales
+# braking authority from full at -10°C down to 40% at -20°C.
+DEFAULT_PRICE_COMFORT_TIER = "mid"
+DEFAULT_K_PRICE = 5.0
+DEFAULT_COLD_TAPER_START_C = -10.0
+DEFAULT_COLD_TAPER_FULL_C = -20.0
+DEFAULT_COLD_TAPER_MIN_FACTOR = 0.4
+# Max pre-heat boost (°C) in the cheap window before a spike. Only the High
+# tier pre-charges; set to 0 to disable.
+DEFAULT_PRECHARGE_MAX_BOOST_C = 1.0
 DEFAULT_UPDATE_INTERVAL_MINUTES = 15
 DEFAULT_HEATING_CUTOFF_C = 18.0
 DEFAULT_ENABLE_WIND_RC = False
