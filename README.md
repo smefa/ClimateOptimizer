@@ -301,6 +301,12 @@ replayed offline through a candidate model change without waiting for new
 live data. The resolved file path is shown on `sensor.<name>_status`'s
 `data_log_path` attribute whenever logging is on.
 
+Once the active file reaches 10 MB it's rotated: gzipped to a timestamped
+sibling (`<entry_id>.<UTC timestamp>.jsonl.gz`) and a fresh `<entry_id>.jsonl`
+starts logging from empty. Rotated files are never deleted automatically —
+past data stays intact, just compressed; `zcat`/`gunzip` (or `gzip.open` in
+Python) reads them directly as JSONL.
+
 If an optional heat-pump power sensor is configured (Configure → "Heat pump
 power sensor"), each logged record also gets `power_w` (the raw reading,
 echoed live on `sensor.<name>_power_draw`) and a coarse `cycle_energy_kwh` /

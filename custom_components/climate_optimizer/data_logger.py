@@ -29,21 +29,50 @@ to space heating alone; see README.
 
 from __future__ import annotations
 
+import gzip
 import json
 import logging
+import shutil
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from homeassistant.core import HomeAssistant
+if TYPE_CHECKING:
+    # Only needed for type hints; kept out of the runtime import so this
+    # module stays loadable (and unit-testable) without homeassistant
+    # installed, same as rc_store.py/rc_model.py — safe because
+    # `from __future__ import annotations` never evaluates these at runtime.
+    from homeassistant.core import HomeAssistant
 
 _LOGGER = logging.getLogger(__name__)
 
 DATA_DIR_NAME = "climate_optimizer_data"
 
+# Rotate a log once it crosses this size, so a long-running install doesn't
+# accumulate one unbounded file. Gzip on rotation rather than shrinking the
+# original in place, since key names (repeated on every JSONL line) compress
+# extremely well and this keeps every past line intact and independently
+# replayable, just under a .gz extension.
+MAX_LOG_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def _rotate(path: Path) -> None:
+    """Gzip the current log to a timestamped sibling and remove the
+    original, so the next append starts a fresh file. The timestamp is UTC
+    and to-the-second, matching this project's other rename-safety
+    convention (see rc_store.py)."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    rotated = path.with_name(f"{path.stem}.{stamp}{path.suffix}.gz")
+    with path.open("rb") as src, gzip.open(rotated, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    path.unlink()
+
 
 def _append_line(path: Path, line: str) -> None:
     """Blocking file append — only ever call via the executor."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.stat().st_size >= MAX_LOG_BYTES:
+        _rotate(path)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(line)
         handle.write("\n")
