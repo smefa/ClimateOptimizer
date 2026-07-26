@@ -74,6 +74,13 @@ DEFAULT_UPDATE_INTERVAL_MINUTES = 15
 DEFAULT_HEATING_CUTOFF_C = 18.0
 DEFAULT_ENABLE_WIND_RC = False
 DEFAULT_RC_WIND_REFERENCE_MS = 5.0
+
+# Bundled demo Lovelace card (see www/climate-optimizer-card.js). The version
+# is appended as a cache-busting query string in add_extra_js_url() calls —
+# bump it whenever the JS file changes so browsers pick up the new file
+# instead of serving a stale cached copy.
+FRONTEND_CARD_URL = "/climate_optimizer/climate-optimizer-card.js"
+FRONTEND_JS_VERSION = "1"
 # MPC defaults. A 24 h horizon spans a full day-ahead price cycle (Nordpool
 # publishes tomorrow's prices ~13:00 local, so most of the day a 24 h horizon
 # is fully covered by real data). 8 degC of heating authority matches the

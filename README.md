@@ -87,6 +87,34 @@ learning progress every time). Its state is restored across restarts.
 5. Tune coefficients, comfort bounds, and the price feature later via the
    integration's **Configure** (options) dialog — no reinstall needed.
 
+## Dashboard: bundled feature-test card
+
+The integration ships a small custom Lovelace card,
+`custom_components/climate_optimizer/www/climate-optimizer-card.js`, and
+registers it as a frontend resource automatically on startup — there's nothing
+to add under Settings → Dashboards → Resources.
+
+It's a diagnostic/demo card, not a polished production widget: it exists to
+prove every sensor/number/switch/select a zone exposes is reachable from a
+dashboard, and to make the Phase 2/3 shadow-mode output (RC model params, the
+MPC plan and its predicted trajectory) inspectable at a glance without digging
+through entity attributes. Add it to a dashboard with:
+
+```yaml
+type: custom:climate-optimizer-card
+entity: sensor.<name>_status
+```
+
+Any single entity belonging to the zone works — the card discovers the rest of
+that zone's entities itself via the frontend entity registry, so it stays
+correct even if you rename entities, and shows a `Feature test: N/20 known
+ClimateOptimizer entities discovered` line as a self-check. All 20 entities
+exist regardless of configuration (e.g. the wind/power sensors just read
+unavailable or pinned when their optional source isn't set up), so this
+should normally read 20/20; a lower count means the card couldn't reach the
+frontend entity registry and fell back to showing just the one configured
+entity.
+
 ## How the value is computed (Phase 1: heuristic)
 
 ```

@@ -2,19 +2,44 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
+from homeassistant.components.frontend import add_extra_js_url
+from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant
 from homeassistant.helpers.event import async_track_state_change_event
 
+from .const import DOMAIN, FRONTEND_CARD_URL, FRONTEND_JS_VERSION
 from .coordinator import ClimateOptimizerCoordinator
 
 PLATFORMS = [Platform.NUMBER, Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
 
 type ClimateOptimizerConfigEntry = ConfigEntry[ClimateOptimizerCoordinator]
 
+_FRONTEND_REGISTERED = f"{DOMAIN}_frontend_registered"
+
+
+async def _async_register_frontend(hass: HomeAssistant) -> None:
+    """Serve the bundled demo Lovelace card and auto-add it as a resource.
+
+    Guarded by a hass.data flag rather than being tied to one config entry:
+    a second ClimateOptimizer zone would otherwise try to register the same
+    static path twice, which raises.
+    """
+    if hass.data.get(_FRONTEND_REGISTERED):
+        return
+    hass.data[_FRONTEND_REGISTERED] = True
+    www_path = Path(__file__).parent / "www" / "climate-optimizer-card.js"
+    await hass.http.async_register_static_paths(
+        [StaticPathConfig(FRONTEND_CARD_URL, str(www_path), cache_headers=True)]
+    )
+    add_extra_js_url(hass, f"{FRONTEND_CARD_URL}?v={FRONTEND_JS_VERSION}")
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ClimateOptimizerConfigEntry) -> bool:
+    await _async_register_frontend(hass)
     coordinator = ClimateOptimizerCoordinator(hass, entry)
     # Restore the RC shadow model's persisted estimator state (if any) BEFORE
     # the first refresh, so the first cycle already continues from prior

@@ -3,6 +3,7 @@
   "name": "ClimateOptimizer",
   "codeowners": ["@smefa"],
   "config_flow": true,
+  "dependencies": ["http", "frontend"],
   "documentation": "https://github.com/smefa/ClimateOptimizer",
   "integration_type": "service",
   "iot_class": "local_polling",
