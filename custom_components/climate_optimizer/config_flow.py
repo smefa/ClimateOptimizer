@@ -9,11 +9,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import aiohttp
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import selector
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     CONF_COMFORT_MAX_C,
@@ -35,7 +37,9 @@ from .const import (
     CONF_MPC_MAX_HEATING_DELTA_C,
     CONF_MPC_MIN_CONFIDENCE,
     CONF_NORDPOOL_PRICE_ENTITY,
+    CONF_OHMONWIFI_HOST,
     CONF_OUTDOOR_TEMP_SENSOR,
+    CONF_OUTPUT_NUMBER_ENTITY,
     CONF_POWER_SENSOR,
     CONF_PRECHARGE_MAX_BOOST_C,
     CONF_PRICE_MAX_DROP_C,
@@ -69,6 +73,31 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
 )
+
+
+# Timeout for validating an OhmOnWifi host at options-save time. Short but
+# a bit more generous than the coordinator's own per-cycle push timeout
+# (coordinator.OHMONWIFI_REQUEST_TIMEOUT_SECONDS), since this happens once,
+# interactively, while the user is watching the form.
+OHMONWIFI_VALIDATE_TIMEOUT_SECONDS = 5.0
+
+
+async def _async_ohmonwifi_reachable(hass: HomeAssistant, host: str) -> bool:
+    """Best-effort reachability check against an OhmOnWifi/Ohmigo device's
+    own `/info` endpoint (see the vendor's published API doc), used to
+    validate the optional direct-push host at options-save time so a typo'd
+    hostname/IP doesn't silently do nothing every cycle instead of erroring
+    where the user can see it."""
+    session = async_get_clientsession(hass)
+    try:
+        async with session.get(
+            f"http://{host}/info",
+            timeout=aiohttp.ClientTimeout(total=OHMONWIFI_VALIDATE_TIMEOUT_SECONDS),
+        ) as response:
+            response.raise_for_status()
+    except Exception:  # noqa: BLE001 - any failure just means "not reachable"
+        return False
+    return True
 
 
 def _user_data_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
@@ -153,14 +182,27 @@ class ClimateOptimizerOptionsFlow(config_entries.OptionsFlow):
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
+        errors: dict[str, str] = {}
+        current = {**self.config_entry.data, **self.config_entry.options}
         if user_input is not None:
-            return self.async_create_entry(data=user_input)
+            # Normalize a blank text field to None so an untouched/cleared
+            # host consistently reads as "not configured" (see
+            # coordinator.ohmonwifi_host's `or None`).
+            host = (user_input.get(CONF_OHMONWIFI_HOST) or "").strip()
+            user_input[CONF_OHMONWIFI_HOST] = host or None
+            if host and not await _async_ohmonwifi_reachable(self.hass, host):
+                errors[CONF_OHMONWIFI_HOST] = "cannot_connect"
+            else:
+                return self.async_create_entry(data=user_input)
+            # Re-show the form with what was just submitted (not the
+            # previously-saved options) so the failed field is easy to spot
+            # and everything else the user typed isn't lost.
+            current = user_input
 
         # Indoor target temperature is intentionally not here: it's a
         # number.* entity now (see number.py) so it can be adjusted live
         # from a dashboard/automation without triggering a full entry
         # reload. This flow only seeds its initial value at first setup.
-        current = {**self.config_entry.data, **self.config_entry.options}
         schema = vol.Schema(
             {
                 vol.Required(
@@ -179,6 +221,33 @@ class ClimateOptimizerOptionsFlow(config_entries.OptionsFlow):
                     CONF_POWER_SENSOR,
                     default=current.get(CONF_POWER_SENSOR),
                 ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+                # Optional: pushes the published compensated outdoor temperature
+                # into another integration's number entity every cycle (e.g. a
+                # heat pump's virtual/AUX outdoor-temperature input such as
+                # `number.nibe_ohmigo_temperature` with OhmOnWifi/OhmigoWifi).
+                # Off by default. Mirrors exactly what the main sensor publishes
+                # (raw while in learn mode, compensated once the activation
+                # switch is on) — see coordinator.py.
+                vol.Optional(
+                    CONF_OUTPUT_NUMBER_ENTITY,
+                    default=current.get(CONF_OUTPUT_NUMBER_ENTITY),
+                ): selector.EntitySelector(selector.EntitySelectorConfig(domain="number")),
+                # In addition to (not instead of) the number-entity push above:
+                # talk directly to an OhmOnWifi/Ohmigo device's own local HTTP
+                # API (http://<host>/AT/?T=<value>), no HA entity in between.
+                # Just a hostname or IP; deliberately left unset by default (not
+                # pre-filled with "ohmonwifi.local", which is only the device's
+                # own mDNS default, shown here as an example) so the feature
+                # stays off unless explicitly configured. If both this and the
+                # number entity are set, both get pushed to every cycle.
+                # Validated below (async_step_init) with a live reachability
+                # check against the device's own /info endpoint before saving.
+                vol.Optional(
+                    CONF_OHMONWIFI_HOST,
+                    default=current.get(CONF_OHMONWIFI_HOST),
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+                ),
                 vol.Required(
                     CONF_ENABLE_PRICE_COMPENSATION,
                     default=current.get(
@@ -372,4 +441,4 @@ class ClimateOptimizerOptionsFlow(config_entries.OptionsFlow):
                 ): selector.BooleanSelector(),
             }
         )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        return self.async_show_form(step_id="init", data_schema=schema, errors=errors)

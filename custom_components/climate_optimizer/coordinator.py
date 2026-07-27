@@ -11,6 +11,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 
+import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     STATE_UNAVAILABLE,
@@ -20,6 +21,7 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant, State
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -45,7 +47,9 @@ from .const import (
     CONF_MPC_MAX_HEATING_DELTA_C,
     CONF_MPC_MIN_CONFIDENCE,
     CONF_NORDPOOL_PRICE_ENTITY,
+    CONF_OHMONWIFI_HOST,
     CONF_OUTDOOR_TEMP_SENSOR,
+    CONF_OUTPUT_NUMBER_ENTITY,
     CONF_POWER_SENSOR,
     CONF_PRECHARGE_MAX_BOOST_C,
     CONF_PRICE_COMFORT_TIER,
@@ -122,6 +126,18 @@ _LOGGER = logging.getLogger(__name__)
 # that a watched source recovering (unavailable -> available) can trigger within
 # a few seconds into one write instead of several.
 RC_STATE_SAVE_DELAY_SECONDS = 30.0
+
+# Skip re-pushing to the optional output number entity / OhmOnWifi device when
+# the value hasn't meaningfully moved since the last successful push, so a
+# real hardware input (e.g. a Modbus-backed heat-pump register, or OhmOnWifi's
+# resistance output) isn't rewritten every cycle for sub-noise-floor changes.
+OUTPUT_NUMBER_WRITE_TOLERANCE_C = 0.05
+
+# Timeout for the optional direct OhmOnWifi local-API push. It's a plain HTTP
+# GET to a device on the local network (see /AT/?T=<value> in Ohmigo's API
+# doc), so a short timeout is appropriate — no point blocking a whole
+# coordinator cycle on a device that's gone unreachable.
+OHMONWIFI_REQUEST_TIMEOUT_SECONDS = 10.0
 
 
 def _entry_value(entry: ConfigEntry, key: str, default):
@@ -213,6 +229,15 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         self.last_power_data_available: bool = False
         self._energy_last_monotonic: float | None = None
 
+        # --- Optional output push (HA number entity, and/or OhmOnWifi direct,
+        # both independent and both pushed to every cycle if configured) ----
+        # Each channel tracks the last value it actually wrote, separately —
+        # so an unchanged value doesn't keep rewriting a real device register,
+        # and so one channel failing (e.g. OhmOnWifi unreachable) doesn't
+        # suppress a retry there just because the other channel succeeded.
+        self._last_ohmonwifi_value_c: float | None = None
+        self._last_output_number_entity_value_c: float | None = None
+
         # --- Activation switch (learn mode vs live) ---------------------------
         # Default OFF ("learn mode"): the compensated-temperature sensor
         # publishes the raw outdoor temperature until the user explicitly
@@ -274,6 +299,21 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         configured in the first place.
         """
         return bool(_entry_value(self.entry, CONF_NORDPOOL_PRICE_ENTITY, None))
+
+    @property
+    def output_number_entity_id(self) -> str | None:
+        """The optional `number.*` entity to push the published compensated
+        outdoor temperature into, or None if not configured."""
+        return _entry_value(self.entry, CONF_OUTPUT_NUMBER_ENTITY, None) or None
+
+    @property
+    def ohmonwifi_host(self) -> str | None:
+        """Optional hostname/IP of an OhmOnWifi/Ohmigo device to push the
+        published compensated outdoor temperature to directly over its own
+        local HTTP API, bypassing `output_number_entity_id` entirely. None if
+        not configured. Independent of `output_number_entity_id` — if both
+        are set, both are pushed to every cycle."""
+        return _entry_value(self.entry, CONF_OHMONWIFI_HOST, None) or None
 
     @property
     def data_logging_enabled(self) -> bool:
@@ -610,6 +650,13 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # Advisory mode: compute an MPC plan from the RC model's current
         # beliefs, again without ever affecting `result`.
         await self._update_mpc_shadow(result)
+
+        # Optional: push the same value the main sensor publishes to another
+        # integration's number entity (e.g. a heat pump's virtual outdoor-temp
+        # input). Unlike the RC/MPC updates above, this is a real side effect
+        # when configured — but it never affects `result` itself, and is a
+        # no-op when unconfigured (the default).
+        await self._async_push_output_number(result)
 
         # Opt-in: append this cycle to the local history log, again without
         # ever affecting `result` — see data_logger.py.
@@ -1010,6 +1057,103 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             _LOGGER.debug("MPC advisory plan: %s", self.mpc_result.reason)
         except Exception as err:  # noqa: BLE001 - advisory mode must never break output
             _LOGGER.warning("MPC advisory update failed (ignored): %s", err)
+
+    # --- Optional output push (HA number entity, or OhmOnWifi direct) --------
+
+    async def _async_push_output_number(self, result: HeuristicResult) -> None:
+        """Push the same value the main sensor publishes to whichever
+        external target(s) are configured, so the computed result can
+        actually drive a device instead of only being visible as a HA
+        sensor. The two channels are independent, not alternatives — if both
+        are set, both are pushed to every cycle:
+
+        - Direct: an OhmOnWifi/Ohmigo device's own local HTTP API
+          (`ohmonwifi_host`, e.g. "ohmonwifi.local") — no HA entity in between.
+        - Indirect: another integration's `number.*` entity
+          (`output_number_entity_id`, e.g. `number.nibe_ohmigo_temperature`
+          if OhmOnWifi is set up as a HA number instead).
+
+        Either way, this mirrors `CompensatedOutdoorTempSensor.native_value`
+        exactly (raw outdoor temp while in learn mode, compensated once the
+        activation switch is on), so flipping that switch behaves
+        consistently everywhere the result is exposed. Each channel skips
+        its own push when the value hasn't moved beyond
+        `OUTPUT_NUMBER_WRITE_TOLERANCE_C` since *that channel's* last
+        successful one, and each is strictly best-effort and independent of
+        the other: a failure on one (device/entity unreachable or gone,
+        wrong domain, outside a target's configured min/max) is logged and
+        swallowed, never affecting the other channel or the real output.
+        """
+        host = self.ohmonwifi_host
+        entity_id = self.output_number_entity_id
+        if not host and not entity_id:
+            return
+        value = (
+            result.raw_outdoor_temp_c
+            if not self.is_active
+            else result.compensated_outdoor_temp_c
+        )
+        if host:
+            await self._async_push_ohmonwifi(host, value)
+        if entity_id:
+            await self._async_push_output_number_entity(entity_id, value)
+
+    async def _async_push_ohmonwifi(self, host: str, value: float) -> None:
+        """GET `http://<host>/AT/?T=<value>` — OhmOnWifi's own local API call
+        to set its emulated resistance output to whatever its temperature/
+        resistance conversion table maps `value` to, i.e. makes the connected
+        heat pump see `value` as its outdoor temperature. Plain HTTP, no
+        authentication, per Ohmigo's published API doc. Best-effort: any
+        failure (device unreachable, DNS/mDNS resolution failure, timeout) is
+        logged and swallowed.
+        """
+        if (
+            self._last_ohmonwifi_value_c is not None
+            and abs(value - self._last_ohmonwifi_value_c) < OUTPUT_NUMBER_WRITE_TOLERANCE_C
+        ):
+            return
+        session = async_get_clientsession(self.hass)
+        url = f"http://{host}/AT/"
+        try:
+            async with session.get(
+                url,
+                params={"T": f"{value:.1f}"},
+                timeout=aiohttp.ClientTimeout(total=OHMONWIFI_REQUEST_TIMEOUT_SECONDS),
+            ) as response:
+                response.raise_for_status()
+            self._last_ohmonwifi_value_c = value
+        except Exception as err:  # noqa: BLE001 - best-effort push, never break output
+            _LOGGER.warning(
+                "Could not push compensated outdoor temperature to OhmOnWifi "
+                "device %s (ignored): %s",
+                host,
+                err,
+            )
+
+    async def _async_push_output_number_entity(self, entity_id: str, value: float) -> None:
+        """Push via a HA `number.set_value` service call. Best-effort: any
+        failure (entity gone, wrong domain, outside the target's min/max) is
+        logged and swallowed."""
+        if (
+            self._last_output_number_entity_value_c is not None
+            and abs(value - self._last_output_number_entity_value_c)
+            < OUTPUT_NUMBER_WRITE_TOLERANCE_C
+        ):
+            return
+        try:
+            await self.hass.services.async_call(
+                "number",
+                "set_value",
+                {"entity_id": entity_id, "value": value},
+                blocking=True,
+            )
+            self._last_output_number_entity_value_c = value
+        except Exception as err:  # noqa: BLE001 - best-effort push, never break output
+            _LOGGER.warning(
+                "Could not push compensated outdoor temperature to %s (ignored): %s",
+                entity_id,
+                err,
+            )
 
     # --- Opt-in local history logging (data_logger.py) -----------------------
 

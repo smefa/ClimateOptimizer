@@ -12,10 +12,19 @@ temperature** for a heat pump's weather-compensation curve, adjusted for:
 - Electricity price via Nordpool (optional — let indoor temperature drift down,
   within limits you set, during expensive price periods)
 
-ClimateOptimizer does **not** write to your heat pump directly. It publishes a
-sensor, `sensor.<name>_compensated_outdoor_temperature`, with the computed value
-and full attribute breakdown of *why* it's that value. You wire that sensor into
-your heat pump's own external-temperature input if possible or using special dedicated hardware like OhmOnWifi
+ClimateOptimizer publishes a sensor,
+`sensor.<name>_compensated_outdoor_temperature`, with the computed value and a
+full attribute breakdown of *why* it's that value. By default it does **not**
+write to your heat pump directly — you wire that sensor into your heat pump's
+own external-temperature input if possible, or using special dedicated
+hardware like OhmOnWifi/OhmigoWifi.
+
+Optionally, via **Configure**, you can also have it push the value itself
+every cycle — either to a `number.*` entity (e.g.
+`number.nibe_ohmigo_temperature`), or directly to an OhmOnWifi/Ohmigo
+device's own local API by hostname/IP, bypassing any HA entity entirely —
+instead of you having to wire it up with a separate automation. Both are off
+by default; see "Optional: push the value automatically" below.
 
 Everything is configured from the Home Assistant UI — no YAML.
 
@@ -69,6 +78,38 @@ when away) — without touching the options dialog. It's backed by an
 in-memory value rather than a config option, specifically so changing it
 doesn't trigger a full reload (which would otherwise reset the RC model's
 learning progress every time). Its state is restored across restarts.
+
+### Optional: push the value automatically
+
+Via **Configure**, there are two independent ways to have ClimateOptimizer
+push its value out itself instead of you wiring up a separate automation —
+independent meaning both can be set at once and both get pushed to every
+cycle, not an either/or choice. Both mirror exactly what the main sensor is
+currently publishing — the raw outdoor temperature while the activation
+switch is off/learn-mode, the compensated value once it's on — so this is
+never a second, independently-gated output. Each channel separately skips
+its own repeat push when its value hasn't moved by more than 0.05°C since
+the last one it sent, so a real device register isn't rewritten every cycle
+for no reason. A failed push on either channel is logged as a warning and
+otherwise ignored, independently of the other — neither ever affects
+`sensor.<name>_compensated_outdoor_temperature` itself.
+
+- **OhmOnWifi/Ohmigo direct** (`ohmonwifi_host`): set this to the device's
+  hostname or IP — e.g. its mDNS default `ohmonwifi.local`, or an IP if
+  you've renamed it or mDNS doesn't resolve reliably on your network — and
+  every cycle ClimateOptimizer calls the device's own local HTTP API
+  directly (`http://<host>/AT/?T=<value>`, per Ohmigo's published API doc),
+  with no Home Assistant entity in between. Unset (disabled) by default.
+  When you set this field, saving the options dialog does a one-time live
+  check against the device's `/info` endpoint and rejects the save with an
+  error if it can't reach it (typo'd address, device off, wrong network) —
+  it does not re-validate on every subsequent update cycle after that.
+- **Number entity** (`output_number_entity`): a `number.*` entity belonging
+  to another integration — for example `number.nibe_ohmigo_temperature` if
+  you've set up OhmOnWifi as a HA number entity yourself instead of using the
+  direct option above. Every cycle calls `number.set_value` on it. Unset
+  (disabled) by default. Not validated at save time (HA already guarantees
+  the entity exists, since it's picked from a live entity list).
 
 ## Installation
 

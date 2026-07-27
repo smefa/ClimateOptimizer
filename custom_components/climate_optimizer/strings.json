@@ -32,6 +32,9 @@
     }
   },
   "options": {
+    "error": {
+      "cannot_connect": "Could not reach the OhmOnWifi device at that hostname/IP. Check it's powered on, connected, and the address is correct."
+    },
     "step": {
       "init": {
         "title": "ClimateOptimizer options",
@@ -40,6 +43,8 @@
           "weather_entity": "Weather entity",
           "nordpool_price_entity": "Nordpool price sensor (optional)",
           "power_sensor": "Heat pump power sensor (optional, may include hot water)",
+          "output_number_entity": "Number entity to push the computed value into (optional, e.g. a heat pump's virtual outdoor-temp input)",
+          "ohmonwifi_host": "OhmOnWifi hostname or IP (optional, e.g. ohmonwifi.local) - talks to its API directly instead of a number entity",
           "enable_price_compensation": "Lower target during expensive price periods",
           "k_indoor": "Indoor error coefficient (k_indoor)",
           "k_wind": "Wind coefficient (k_wind)",
