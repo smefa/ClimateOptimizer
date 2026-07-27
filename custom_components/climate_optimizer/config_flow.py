@@ -14,6 +14,7 @@ import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.const import CONF_NAME
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -74,6 +75,14 @@ from .const import (
     DOMAIN,
 )
 
+
+# Options-flow section keys for the two optional "push the value out"
+# targets, purely a UI grouping concern (gives each its own header) — the
+# entry's stored options stay flat under CONF_OUTPUT_NUMBER_ENTITY /
+# CONF_OHMONWIFI_HOST regardless, so coordinator.py never needs to know
+# sections exist at all (see async_step_init, which flattens on submit).
+SECTION_OUTPUT_NUMBER = "output_number_push"
+SECTION_OHMONWIFI = "ohmonwifi_direct"
 
 # Timeout for validating an OhmOnWifi host at options-save time. Short but
 # a bit more generous than the coordinator's own per-cycle push timeout
@@ -185,13 +194,24 @@ class ClimateOptimizerOptionsFlow(config_entries.OptionsFlow):
         errors: dict[str, str] = {}
         current = {**self.config_entry.data, **self.config_entry.options}
         if user_input is not None:
+            # The two push-target fields are grouped into their own headed
+            # sections purely for the UI (see the schema below); flatten them
+            # straight back into plain top-level keys here so the entry's
+            # stored options — and coordinator.py/const.py, which only know
+            # CONF_OUTPUT_NUMBER_ENTITY/CONF_OHMONWIFI_HOST as flat keys —
+            # never need to know sections exist.
+            output_number_data = dict(user_input.pop(SECTION_OUTPUT_NUMBER, {}))
+            ohmonwifi_data = dict(user_input.pop(SECTION_OHMONWIFI, {}))
             # Normalize a blank text field to None so an untouched/cleared
             # host consistently reads as "not configured" (see
             # coordinator.ohmonwifi_host's `or None`).
-            host = (user_input.get(CONF_OHMONWIFI_HOST) or "").strip()
+            host = (ohmonwifi_data.get(CONF_OHMONWIFI_HOST) or "").strip()
+            user_input[CONF_OUTPUT_NUMBER_ENTITY] = output_number_data.get(
+                CONF_OUTPUT_NUMBER_ENTITY
+            )
             user_input[CONF_OHMONWIFI_HOST] = host or None
             if host and not await _async_ohmonwifi_reachable(self.hass, host):
-                errors[CONF_OHMONWIFI_HOST] = "cannot_connect"
+                errors["base"] = "cannot_connect"
             else:
                 return self.async_create_entry(data=user_input)
             # Re-show the form with what was just submitted (not the
@@ -221,32 +241,65 @@ class ClimateOptimizerOptionsFlow(config_entries.OptionsFlow):
                     CONF_POWER_SENSOR,
                     default=current.get(CONF_POWER_SENSOR),
                 ): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
-                # Optional: pushes the published compensated outdoor temperature
-                # into another integration's number entity every cycle (e.g. a
-                # heat pump's virtual/AUX outdoor-temperature input such as
-                # `number.nibe_ohmigo_temperature` with OhmOnWifi/OhmigoWifi).
-                # Off by default. Mirrors exactly what the main sensor publishes
-                # (raw while in learn mode, compensated once the activation
-                # switch is on) — see coordinator.py.
-                vol.Optional(
-                    CONF_OUTPUT_NUMBER_ENTITY,
-                    default=current.get(CONF_OUTPUT_NUMBER_ENTITY),
-                ): selector.EntitySelector(selector.EntitySelectorConfig(domain="number")),
-                # In addition to (not instead of) the number-entity push above:
-                # talk directly to an OhmOnWifi/Ohmigo device's own local HTTP
-                # API (http://<host>/AT/?T=<value>), no HA entity in between.
-                # Just a hostname or IP; deliberately left unset by default (not
-                # pre-filled with "ohmonwifi.local", which is only the device's
-                # own mDNS default, shown here as an example) so the feature
-                # stays off unless explicitly configured. If both this and the
-                # number entity are set, both get pushed to every cycle.
-                # Validated below (async_step_init) with a live reachability
-                # check against the device's own /info endpoint before saving.
-                vol.Optional(
-                    CONF_OHMONWIFI_HOST,
-                    default=current.get(CONF_OHMONWIFI_HOST),
-                ): selector.TextSelector(
-                    selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+                # Two headed, always-expanded sections for the optional "push
+                # the value out" targets (see README's "Optional: push the
+                # value automatically"). Both are independent, not
+                # alternatives — set one, both, or neither. Stored back as
+                # plain top-level options (see async_step_init above); the
+                # section grouping is a UI-only concern.
+                vol.Required(SECTION_OUTPUT_NUMBER): section(
+                    vol.Schema(
+                        {
+                            # Pushes the published compensated outdoor
+                            # temperature into another integration's number
+                            # entity every cycle (e.g. a heat pump's
+                            # virtual/AUX outdoor-temperature input such as
+                            # `number.nibe_ohmigo_temperature` with
+                            # OhmOnWifi/OhmigoWifi set up as a HA entity).
+                            # Off by default. Mirrors exactly what the main
+                            # sensor publishes (raw while in learn mode,
+                            # compensated once the activation switch is on)
+                            # — see coordinator.py.
+                            vol.Optional(
+                                CONF_OUTPUT_NUMBER_ENTITY,
+                                default=current.get(CONF_OUTPUT_NUMBER_ENTITY),
+                            ): selector.EntitySelector(
+                                selector.EntitySelectorConfig(domain="number")
+                            ),
+                        }
+                    ),
+                    {"collapsed": False},
+                ),
+                vol.Required(SECTION_OHMONWIFI): section(
+                    vol.Schema(
+                        {
+                            # In addition to (not instead of) the section
+                            # above: talks directly to an OhmOnWifi/Ohmigo
+                            # device's own local HTTP API
+                            # (http://<host>/AT/?T=<value>, per its published
+                            # API doc), no HA entity in between. Unset
+                            # (disabled) by default like every other optional
+                            # field here — "ohmonwifi.local" (the device's own
+                            # mDNS default hostname for a stock, unrenamed
+                            # device) is mentioned as an example in the
+                            # section description/field label, not pre-filled.
+                            # Validated above (async_step_init) with a live
+                            # reachability check against the device's own
+                            # /info endpoint before the save is accepted.
+                            vol.Optional(
+                                CONF_OHMONWIFI_HOST,
+                                default=current.get(CONF_OHMONWIFI_HOST),
+                            ): vol.Any(
+                                None,
+                                selector.TextSelector(
+                                    selector.TextSelectorConfig(
+                                        type=selector.TextSelectorType.TEXT
+                                    )
+                                ),
+                            ),
+                        }
+                    ),
+                    {"collapsed": False},
                 ),
                 vol.Required(
                     CONF_ENABLE_PRICE_COMPENSATION,

@@ -28,11 +28,9 @@ CONF_POWER_SENSOR = "power_sensor"
 CONF_OUTPUT_NUMBER_ENTITY = "output_number_entity"
 # Optional alternative to the above: talk to an OhmOnWifi/Ohmigo device's own
 # local HTTP API directly (http://<host>/AT/?T=<value>), bypassing Home
-# Assistant's number entity entirely. Just a hostname or IP — the device's
-# default mDNS name is "ohmonwifi.local" (shown as an example in the UI, not
-# pre-filled, so the feature stays off unless the user actually sets it).
-# Independent of CONF_OUTPUT_NUMBER_ENTITY — if both are set, both are pushed
-# to every cycle.
+# Assistant's number entity entirely. Just a hostname or IP. Independent of
+# CONF_OUTPUT_NUMBER_ENTITY — if both are set, both are pushed to every
+# cycle.
 CONF_OHMONWIFI_HOST = "ohmonwifi_host"
 CONF_INDOOR_TARGET_TEMPERATURE = "indoor_target_temperature"
 CONF_ENABLE_PRICE_COMPENSATION = "enable_price_compensation"

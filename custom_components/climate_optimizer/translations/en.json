@@ -43,8 +43,6 @@
           "weather_entity": "Weather entity",
           "nordpool_price_entity": "Nordpool price sensor (optional)",
           "power_sensor": "Heat pump power sensor (optional, may include hot water)",
-          "output_number_entity": "Number entity to push the computed value into (optional, e.g. a heat pump's virtual outdoor-temp input)",
-          "ohmonwifi_host": "OhmOnWifi hostname or IP (optional, e.g. ohmonwifi.local) - talks to its API directly instead of a number entity",
           "enable_price_compensation": "Lower target during expensive price periods",
           "k_indoor": "Indoor error coefficient (k_indoor)",
           "k_wind": "Wind coefficient (k_wind)",
@@ -67,6 +65,22 @@
           "mpc_max_heating_delta_c": "MPC max heating authority (compensation delta)",
           "mpc_min_confidence": "MPC minimum RC-model confidence to be trustworthy",
           "enable_data_logging": "Log data locally for offline model testing (advanced)"
+        },
+        "sections": {
+          "output_number_push": {
+            "name": "Push to a number entity",
+            "description": "Push the published compensated outdoor temperature into another integration's number entity every cycle, e.g. `number.nibe_ohmigo_temperature` if OhmOnWifi/OhmigoWifi is set up as a HA entity. Mirrors exactly what the main sensor publishes (raw outdoor temp while the activation switch is off/learn-mode, compensated once it's on). Off by default, and independent of the OhmOnWifi direct option below - set one, both, or neither.",
+            "data": {
+              "output_number_entity": "Number entity"
+            }
+          },
+          "ohmonwifi_direct": {
+            "name": "OhmOnWifi direct API",
+            "description": "Push the published compensated outdoor temperature straight to an OhmOnWifi/Ohmigo device's own local HTTP API (http://<host>/AT/?T=<value>, per its published API doc), with no Home Assistant entity in between. Off by default. Saving is validated against the device's own /info endpoint; the save is rejected if it can't be reached.",
+            "data": {
+              "ohmonwifi_host": "Hostname or IP (optional, e.g. ohmonwifi.local - the device's own mDNS default for a stock, unrenamed device)"
+            }
+          }
         }
       }
     }
