@@ -76,7 +76,7 @@
           },
           "ohmonwifi_direct": {
             "name": "OhmOnWifi direct API",
-            "description": "Push the published compensated outdoor temperature straight to an OhmOnWifi/Ohmigo device's own local HTTP API (http://<host>/AT/?T=<value>, per its published API doc), with no Home Assistant entity in between. Off by default. Saving is validated against the device's own /info endpoint; the save is rejected if it can't be reached.",
+            "description": "Push the published compensated outdoor temperature straight to an OhmOnWifi/Ohmigo device's own local HTTP API (its /AT/?T=... endpoint, per its published API doc), with no Home Assistant entity in between. Off by default. Saving is validated against the device's own /info endpoint; the save is rejected if it can't be reached.",
             "data": {
               "ohmonwifi_host": "Hostname or IP (optional, e.g. ohmonwifi.local - the device's own mDNS default for a stock, unrenamed device)"
             }
