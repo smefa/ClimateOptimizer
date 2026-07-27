@@ -68,17 +68,17 @@
         },
         "sections": {
           "output_number_push": {
-            "name": "Push to a number entity",
-            "description": "Push the published compensated outdoor temperature into another integration's number entity every cycle, e.g. `number.nibe_ohmigo_temperature` if OhmOnWifi/OhmigoWifi is set up as a HA entity. Mirrors exactly what the main sensor publishes (raw outdoor temp while the activation switch is off/learn-mode, compensated once it's on). Off by default, and independent of the OhmOnWifi direct option below - set one, both, or neither.",
+            "name": "Update a number entity",
+            "description": "Sets the published compensated outdoor temperature into a number entity, e.g. `number.ohmigo_temperature` if OhmOnWifi/OhmigoWifi is set up as a MQTT entity. Mirrors what the main sensor publishes (real outdoor temp while the activation switch is off/learn-mode, compensated once it's on). Off by default.",
             "data": {
               "output_number_entity": "Number entity"
             }
           },
           "ohmonwifi_direct": {
             "name": "OhmOnWifi direct API",
-            "description": "Push the published compensated outdoor temperature straight to an OhmOnWifi/Ohmigo device's own local HTTP API (its /AT/?T=... endpoint, per its published API doc), with no Home Assistant entity in between. Off by default. Saving is validated against the device's own /info endpoint; the save is rejected if it can't be reached.",
+            "description": "Push the compensated outdoor temperature straight to an OhmOnWifi/Ohmigo device's own local HTTP API. Off by default. The save is rejected if it can't be reached.",
             "data": {
-              "ohmonwifi_host": "Hostname or IP (optional, e.g. ohmonwifi.local - the device's own mDNS default for a stock, unrenamed device)"
+              "ohmonwifi_host": "Hostname or IP (optional, e.g. ohmonwifi.local - the device's own mDNS default name)"
             }
           }
         }
