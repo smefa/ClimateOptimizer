@@ -41,8 +41,20 @@ RCModelConfig = rc_model.RCModelConfig
 RCModelInputs = rc_model.RCModelInputs
 RCModelState = rc_model.RCModelState
 
-serialize_state = rc_store.serialize_state
-deserialize_state = rc_store.deserialize_state
+# Thin wrappers defaulting `enable_solar=True`, which is the configuration the
+# bulk of these tests exercise (they are about the wind and gain dimensions).
+# The solar dimension gets its own dedicated tests further down, which pass the
+# flag explicitly.
+def serialize_state(state, *, enable_solar: bool = True, enable_wind: bool = False):
+    return rc_store.serialize_state(
+        state, enable_solar=enable_solar, enable_wind=enable_wind
+    )
+
+
+def deserialize_state(data, *, enable_solar: bool = True, enable_wind: bool = False):
+    return rc_store.deserialize_state(
+        data, enable_solar=enable_solar, enable_wind=enable_wind
+    )
 
 DT = 900.0  # 15 min, seconds
 
@@ -87,7 +99,7 @@ def _matured_state(enable_wind: bool, n_cycles: int = 8) -> RCModelState:
 def _roundtrip(state: RCModelState, *, enable_wind: bool) -> RCModelState | None:
     """serialize -> JSON text -> parse -> deserialize, mimicking what the HA
     Store actually does on disk (and proving the payload is JSON-safe)."""
-    payload = json.loads(json.dumps(serialize_state(state)))
+    payload = json.loads(json.dumps(serialize_state(state, enable_wind=enable_wind)))
     return deserialize_state(payload, enable_wind=enable_wind)
 
 
@@ -152,7 +164,7 @@ def test_serialized_payload_is_json_and_versioned():
 
 def test_wind_state_rejected_by_no_wind_estimator():
     state = _matured_state(enable_wind=True)  # 4-dim
-    payload = json.loads(json.dumps(serialize_state(state)))
+    payload = json.loads(json.dumps(serialize_state(state, enable_wind=True)))
     assert deserialize_state(payload, enable_wind=False) is None
 
 
@@ -186,7 +198,7 @@ def test_has_gain_disambiguates_same_length_states():
     gain_no_wind = _matured_state(enable_wind=False)    # [env, solar, gain]
     assert len(gain_no_wind.theta) == 3 and gain_no_wind.has_gain is True
 
-    p_wind = json.loads(json.dumps(serialize_state(wind_no_gain)))
+    p_wind = json.loads(json.dumps(serialize_state(wind_no_gain, enable_wind=True)))
     p_gain = json.loads(json.dumps(serialize_state(gain_no_wind)))
     # Both are length 3 but carry different has_gain flags.
     assert p_wind["n_params"] == p_gain["n_params"] == 3
@@ -330,3 +342,60 @@ def test_restored_state_resumes_estimation():
     assert math.isclose(
         direct_result.time_constant_h, resumed_result.time_constant_h, rel_tol=0.0
     )
+
+
+# --- solar optionality + the layout-flag aliasing guard ----------------------
+
+
+def test_solar_flags_round_trip():
+    state = initial_state(enable_solar=False, enable_wind=False)
+    assert len(state.theta) == 1
+    payload = json.loads(
+        json.dumps(serialize_state(state, enable_solar=False, enable_wind=False))
+    )
+    assert payload["enable_solar"] is False
+    restored = deserialize_state(payload, enable_solar=False, enable_wind=False)
+    assert restored is not None
+    _assert_states_equal(state, restored)
+
+
+def test_state_rejected_when_solar_setting_changed():
+    state = _matured_state(enable_wind=False)  # fit with solar ON
+    payload = json.loads(json.dumps(serialize_state(state, enable_wind=False)))
+    assert deserialize_state(payload, enable_solar=False, enable_wind=False) is None
+
+
+def test_same_length_layouts_are_not_aliased():
+    """The bug that forced storing the layout flags: [env, wind, gain] and
+    [env, solar, gain] are both length 3, so a parameter-count check alone lets
+    a state fit under one layout load into the other, silently reinterpreting
+    the learned wind coefficient as solar."""
+    # [env, wind, gain]: solar off, wind on, gain added by real excitation.
+    config = RCModelConfig(enable_solar=False, enable_wind=True)
+    state = initial_state(enable_solar=False, enable_wind=True)
+    for k in range(6):
+        state, _ = step(
+            state,
+            _make_inputs(indoor_temp_c=21.0 + 0.03 * k, compensation_delta_c=-2.0),
+            config,
+        )
+    assert len(state.theta) == 3 and state.has_gain is True
+
+    payload = json.loads(
+        json.dumps(serialize_state(state, enable_solar=False, enable_wind=True))
+    )
+    # Loads into its own layout...
+    assert (
+        deserialize_state(payload, enable_solar=False, enable_wind=True) is not None
+    )
+    # ...and is rejected by the identically-sized [env, solar, gain] layout,
+    # which a pure n_params check would have accepted.
+    expected_n = 1 + 1 + 0 + 1  # env + solar + (no wind) + gain == 3
+    assert payload["n_params"] == expected_n
+    assert deserialize_state(payload, enable_solar=True, enable_wind=False) is None
+
+
+def test_missing_layout_flags_discarded():
+    payload = serialize_state(_matured_state(enable_wind=False))
+    del payload["enable_solar"]
+    assert deserialize_state(payload, enable_solar=True, enable_wind=False) is None

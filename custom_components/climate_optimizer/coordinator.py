@@ -35,8 +35,11 @@ from .const import (
     CONF_COMFORT_MIN_C,
     CONF_ENABLE_DATA_LOGGING,
     CONF_ENABLE_PRICE_COMPENSATION,
+    CONF_ENABLE_SOLAR_INPUT,
+    CONF_ENABLE_WIND_INPUT,
     CONF_ENABLE_WIND_RC,
     CONF_HEATING_CUTOFF_C,
+    CONF_HEATING_TYPE,
     CONF_INDOOR_TARGET_TEMPERATURE,
     CONF_INDOOR_TEMP_SENSOR,
     CONF_K_INDOOR,
@@ -57,6 +60,7 @@ from .const import (
     CONF_PRICE_THRESHOLD_MAX,
     CONF_PRICE_THRESHOLD_START,
     CONF_RC_WIND_REFERENCE_MS,
+    CONF_TUNING_MODE,
     CONF_UPDATE_INTERVAL_MINUTES,
     CONF_WEATHER_ENTITY,
     DEFAULT_COLD_TAPER_FULL_C,
@@ -66,8 +70,11 @@ from .const import (
     DEFAULT_COMFORT_MIN_C,
     DEFAULT_ENABLE_DATA_LOGGING,
     DEFAULT_ENABLE_PRICE_COMPENSATION,
+    DEFAULT_ENABLE_SOLAR_INPUT,
+    DEFAULT_ENABLE_WIND_INPUT,
     DEFAULT_ENABLE_WIND_RC,
     DEFAULT_HEATING_CUTOFF_C,
+    DEFAULT_HEATING_TYPE,
     DEFAULT_INDOOR_TARGET_TEMPERATURE,
     DEFAULT_K_INDOOR,
     DEFAULT_K_PRICE,
@@ -82,11 +89,27 @@ from .const import (
     DEFAULT_PRICE_THRESHOLD_MAX,
     DEFAULT_PRICE_THRESHOLD_START,
     DEFAULT_RC_WIND_REFERENCE_MS,
+    DEFAULT_TUNING_MODE,
     DEFAULT_UPDATE_INTERVAL_MINUTES,
     DOMAIN,
 )
+from .autotune import (
+    TUNING_MODE_AUTO,
+    TUNING_MODES,
+    AutotuneInputs,
+    AutotuneResult,
+    derive as autotune_derive,
+    log_fields as autotune_log_fields,
+)
 from .data_logger import async_log_record, log_file_path
-from .heuristic import HeuristicInputs, HeuristicParams, HeuristicResult, compute
+from .heuristic import (
+    HeuristicInputs,
+    HeuristicParams,
+    HeuristicResult,
+    cold_taper_factor,
+    compute,
+    resolve_price_tier,
+)
 from .mpc import (
     MPCConfig,
     MPCForecasts,
@@ -106,6 +129,7 @@ from .rc_model import (
     RCModelConfig,
     RCModelInputs,
     RCModelResult,
+    RCModelState,
     initial_state as rc_initial_state,
     step as rc_step,
 )
@@ -182,7 +206,10 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # see rc_model.py's module docstring for why this can't just be
         # toggled live without recreating the state. Options changes already
         # trigger a full coordinator reload, so this stays in sync.
-        self._rc_state = rc_initial_state(enable_wind=self._rc_config().enable_wind)
+        _rc_cfg = self._rc_config()
+        self._rc_state = rc_initial_state(
+            enable_solar=_rc_cfg.enable_solar, enable_wind=_rc_cfg.enable_wind
+        )
         self.rc_result: RCModelResult | None = None
         self._rc_last_monotonic: float | None = None
         # Persistence for the RC estimator state across HA restarts/reloads.
@@ -273,6 +300,20 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             entry, CONF_PRICE_COMFORT_TIER, DEFAULT_PRICE_COMFORT_TIER
         )
 
+        # --- Tuning mode (live, select.py) ------------------------------------
+        # Manual = the configured k_* coefficients; Auto = coefficients derived
+        # from the learned RC model (see autotune.py). Same
+        # option-seeds-an-entity pattern as the tier above: the whole point of
+        # the switch is easy A/B comparison, and routing every flip through a
+        # config option would reload the entry mid-experiment.
+        self.tuning_mode: str = _entry_value(
+            entry, CONF_TUNING_MODE, DEFAULT_TUNING_MODE
+        )
+        # Latest derivation, recomputed every cycle in BOTH modes so the
+        # derived-vs-manual comparison is always available on the diagnostic
+        # sensors regardless of which set is actually driving the output.
+        self.autotune_result: AutotuneResult | None = None
+
     def watched_entity_ids(self) -> list[str]:
         """Source entities whose state changes should trigger an immediate
         refresh, instead of waiting for the next polled interval.
@@ -330,16 +371,64 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             return None
         return str(log_file_path(self.hass, self.entry.entry_id))
 
+    @property
+    def rc_estimator_state(self) -> RCModelState:
+        """Read-only view of the raw RLS estimator state, for diagnostics.
+
+        Exposed because the covariance matrix appears on no sensor and is the
+        artefact that distinguishes "still converging" from "covariance has
+        wound up and the fit has stopped responding". Callers must treat it as
+        immutable — `RCModelState` is a frozen dataclass, and `step()` returns a
+        fresh one rather than mutating.
+        """
+        return self._rc_state
+
+    @property
+    def solar_input_enabled(self) -> bool:
+        return bool(
+            _entry_value(self.entry, CONF_ENABLE_SOLAR_INPUT, DEFAULT_ENABLE_SOLAR_INPUT)
+        )
+
+    @property
+    def wind_input_enabled(self) -> bool:
+        return bool(
+            _entry_value(self.entry, CONF_ENABLE_WIND_INPUT, DEFAULT_ENABLE_WIND_INPUT)
+        )
+
+    @property
+    def weather_needed(self) -> bool:
+        """Whether the optional weather entity is worth reading at all.
+
+        Its only two consumers are the wind and cloud/sun terms, so with both
+        inputs switched off there is nothing to fetch and the per-cycle
+        forecast service calls (and their "unavailable" warnings) are skipped
+        entirely."""
+        return self.solar_input_enabled or self.wind_input_enabled
+
     def _rc_config(self) -> RCModelConfig:
-        """RC shadow-model estimator tuning, currently just the optional
-        wind term. `enable_wind` here must match whatever `_rc_state` was
+        """RC shadow-model estimator tuning: which optional dimensions the
+        estimator carries, and the wind normalisation reference.
+
+        `enable_solar`/`enable_wind` here must match whatever `_rc_state` was
         constructed with (see __init__) — both read the same config-entry
-        option, and an options change reloads the whole entry, so they can't
+        options, and an options change reloads the whole entry, so they can't
         drift apart within one coordinator's lifetime.
+
+        The RC wind dimension requires BOTH the user-facing wind input and the
+        advanced `enable_wind_rc` flag. They are not redundant: the first says
+        "wind is available and worth compensating for", the second opts into the
+        statistically riskier business of *estimating* a wind coefficient, which
+        rc_model.py documents as fragile for typical houses because the wind
+        regressor is collinear with the envelope term. Solar has no such hazard
+        and so needs no second flag.
         """
         entry = self.entry
         return RCModelConfig(
-            enable_wind=_entry_value(entry, CONF_ENABLE_WIND_RC, DEFAULT_ENABLE_WIND_RC),
+            enable_solar=self.solar_input_enabled,
+            enable_wind=(
+                self.wind_input_enabled
+                and _entry_value(entry, CONF_ENABLE_WIND_RC, DEFAULT_ENABLE_WIND_RC)
+            ),
             wind_reference_ms=_entry_value(
                 entry, CONF_RC_WIND_REFERENCE_MS, DEFAULT_RC_WIND_REFERENCE_MS
             ),
@@ -368,16 +457,56 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             indoor_target_c=params.indoor_target_c,
         )
 
-    def _params(self) -> HeuristicParams:
+    def manual_k_values(self) -> tuple[float, float, float, float]:
+        """The hand-configured (k_indoor, k_wind, k_sun, k_price).
+
+        These stay meaningful in Auto mode: they are the values the derivation
+        blends *out of* as evidence accumulates, and the values it falls back to
+        whenever the model fails a trust gate.
+        """
         entry = self.entry
+        return (
+            _entry_value(entry, CONF_K_INDOOR, DEFAULT_K_INDOOR),
+            _entry_value(entry, CONF_K_WIND, DEFAULT_K_WIND),
+            _entry_value(entry, CONF_K_SUN, DEFAULT_K_SUN),
+            _entry_value(entry, CONF_K_PRICE, DEFAULT_K_PRICE),
+        )
+
+    def _params(self) -> HeuristicParams:
+        """Build this cycle's heuristic parameters.
+
+        In Auto mode the four k_* coefficients and the cold taper come from
+        `self.autotune_result` (computed earlier this cycle in
+        `_async_update_data`) instead of the config entry. Everything else —
+        comfort bounds, target, cutoff, price thresholds — is user preference
+        and is never derived.
+
+        `autotune.derive` guarantees its `*_effective` fields equal the manual
+        values whenever the model is not trustworthy, so this branch does not
+        need its own fallback logic: reading the effective values unconditionally
+        in Auto mode is already safe.
+        """
+        entry = self.entry
+        k_indoor, k_wind, k_sun, k_price = self.manual_k_values()
+        cold_taper_override: float | None = None
+        tuned = self.autotune_result
+        if self.tuning_mode == TUNING_MODE_AUTO and tuned is not None:
+            k_indoor = tuned.k_indoor_effective
+            k_wind = tuned.k_wind_effective
+            k_sun = tuned.k_sun_effective
+            k_price = tuned.k_price_effective
+            cold_taper_override = tuned.cold_taper_effective
         return HeuristicParams(
             indoor_target_c=self.indoor_target_c,
             enable_price_compensation=_entry_value(
                 entry, CONF_ENABLE_PRICE_COMPENSATION, DEFAULT_ENABLE_PRICE_COMPENSATION
             ),
-            k_indoor=_entry_value(entry, CONF_K_INDOOR, DEFAULT_K_INDOOR),
-            k_wind=_entry_value(entry, CONF_K_WIND, DEFAULT_K_WIND),
-            k_sun=_entry_value(entry, CONF_K_SUN, DEFAULT_K_SUN),
+            k_indoor=k_indoor,
+            k_wind=k_wind,
+            k_sun=k_sun,
+            enable_solar_input=self.solar_input_enabled,
+            enable_wind_input=self.wind_input_enabled,
+            cold_taper_override=cold_taper_override,
             comfort_min_c=_entry_value(entry, CONF_COMFORT_MIN_C, DEFAULT_COMFORT_MIN_C),
             comfort_max_c=_entry_value(entry, CONF_COMFORT_MAX_C, DEFAULT_COMFORT_MAX_C),
             price_threshold_start=_entry_value(
@@ -393,7 +522,7 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 entry, CONF_HEATING_CUTOFF_C, DEFAULT_HEATING_CUTOFF_C
             ),
             price_comfort_tier=self.price_comfort_tier,
-            k_price=_entry_value(entry, CONF_K_PRICE, DEFAULT_K_PRICE),
+            k_price=k_price,
             cold_taper_start_c=_entry_value(
                 entry, CONF_COLD_TAPER_START_C, DEFAULT_COLD_TAPER_START_C
             ),
@@ -407,6 +536,90 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 entry, CONF_PRECHARGE_MAX_BOOST_C, DEFAULT_PRECHARGE_MAX_BOOST_C
             ),
         )
+
+    def _update_autotune(
+        self, indoor_temp_c: float | None, raw_outdoor_temp_c: float
+    ) -> None:
+        """Re-derive the controller coefficients from the RC model's current
+        beliefs, storing the result on `self.autotune_result`.
+
+        Runs in BOTH tuning modes — the derived values are diagnostic output in
+        Manual mode and control input in Auto mode, and publishing them either
+        way is what lets a user watch derived-vs-manual for a season before
+        committing. Must be called BEFORE `_params()` is used for this cycle.
+
+        Reads the PREVIOUS cycle's `rc_result` rather than this one's, because
+        the RC estimator is stepped after the heuristic has run (it needs the
+        applied compensation delta as its control regressor). The resulting one
+        cycle of staleness is immaterial against time constants measured in
+        hours, and it avoids an ordering cycle between the two models.
+
+        Wrapped in the same never-break-the-output contract as the RC and MPC
+        updates: on any failure the result is left as-is and the heuristic falls
+        back to whatever it had, which in the worst case is the manual
+        coefficients.
+        """
+        try:
+            rc_result = self.rc_result
+            if rc_result is None:
+                self.autotune_result = None
+                return
+            rc_config = self._rc_config()
+            manual_k_indoor, manual_k_wind, manual_k_sun, manual_k_price = (
+                self.manual_k_values()
+            )
+            tier = resolve_price_tier(self.price_comfort_tier)
+            # The manual taper this cycle, both as the blend's starting point
+            # and as the fallback when the derivation can't run.
+            manual_taper = cold_taper_factor(
+                raw_outdoor_temp_c,
+                _entry_value(
+                    self.entry, CONF_COLD_TAPER_START_C, DEFAULT_COLD_TAPER_START_C
+                ),
+                _entry_value(
+                    self.entry, CONF_COLD_TAPER_FULL_C, DEFAULT_COLD_TAPER_FULL_C
+                ),
+                _entry_value(
+                    self.entry,
+                    CONF_COLD_TAPER_MIN_FACTOR,
+                    DEFAULT_COLD_TAPER_MIN_FACTOR,
+                ),
+            )
+            self.autotune_result = autotune_derive(
+                AutotuneInputs(
+                    theta_env=rc_result.theta_env,
+                    theta_gain=rc_result.theta_gain,
+                    theta_solar=rc_result.theta_solar,
+                    theta_wind=rc_result.theta_wind,
+                    gain_modeled=rc_result.gain_modeled,
+                    params_pinned=self._rc_params_pinned(
+                        rc_result, rc_config.enable_wind, rc_config.enable_solar
+                    ),
+                    accepted_samples=rc_result.accepted_samples,
+                    indoor_temp_c=indoor_temp_c,
+                    outdoor_temp_c=raw_outdoor_temp_c,
+                    heating_type=_entry_value(
+                        self.entry, CONF_HEATING_TYPE, DEFAULT_HEATING_TYPE
+                    ),
+                    wind_reference_ms=rc_config.wind_reference_ms,
+                    max_heating_delta_c=_entry_value(
+                        self.entry,
+                        CONF_MPC_MAX_HEATING_DELTA_C,
+                        DEFAULT_MPC_MAX_HEATING_DELTA_C,
+                    ),
+                    tier_max_sag_c=tier.max_sag_c,
+                    enable_solar=self.solar_input_enabled,
+                    enable_wind=rc_config.enable_wind,
+                    manual_k_indoor=manual_k_indoor,
+                    manual_k_wind=manual_k_wind,
+                    manual_k_sun=manual_k_sun,
+                    manual_k_price=manual_k_price,
+                    manual_cold_taper_factor=manual_taper,
+                )
+            )
+            _LOGGER.debug("Auto-tune: %s", self.autotune_result.reason)
+        except Exception as err:  # noqa: BLE001 - never break output over tuning
+            _LOGGER.warning("Auto-tune derivation failed (ignored): %s", err)
 
     def _read_indoor_temp_c(self) -> tuple[float | None, bool]:
         """Return (indoor_temp_c, indoor_data_available).
@@ -465,7 +678,20 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         entity itself being unavailable — soft-degrades rather than failing
         the whole update.
         """
+        if not self.weather_needed:
+            # Both weather-derived inputs are switched off, so there is nothing
+            # here to fetch. Returning the same soft-degraded tuple an
+            # unavailable entity produces keeps every downstream consumer on one
+            # code path; the heuristic zeroes both terms via its own
+            # enable_*_input flags regardless of these values.
+            return 0.0, False, None, False
+
         weather_entity_id = _entry_value(self.entry, CONF_WEATHER_ENTITY, None)
+        if not weather_entity_id:
+            _LOGGER.debug(
+                "No weather entity configured; wind/sun terms contribute 0 this cycle"
+            )
+            return 0.0, False, None, False
         weather_state = self.hass.states.get(weather_entity_id)
         if not _state_is_usable(weather_state):
             _LOGGER.warning(
@@ -515,13 +741,16 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
 
         wind_data_available = wind_speed_ms is not None
         cloud_data_available = cloud_coverage_pct is not None
-        if not wind_data_available:
+        # Only warn about a field the user actually asked to use — a missing
+        # wind forecast is not a problem worth logging every cycle when the wind
+        # term is switched off.
+        if not wind_data_available and self.wind_input_enabled:
             _LOGGER.warning(
                 "Could not retrieve a wind forecast for %s; wind adjustment "
                 "will contribute 0 this cycle",
                 weather_entity_id,
             )
-        if not cloud_data_available:
+        if not cloud_data_available and self.solar_input_enabled:
             _LOGGER.warning(
                 "Could not retrieve a cloud/sun forecast for %s; solar term "
                 "will assume clear sky this cycle",
@@ -629,6 +858,10 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         self.last_power_w = power_w
         self.last_power_data_available = power_ok
 
+        # Re-derive the coefficients from the RC model before building params,
+        # since `_params()` reads the result in Auto mode.
+        self._update_autotune(indoor_temp_c, raw_outdoor_temp_c)
+
         inputs = HeuristicInputs(
             indoor_temp_c=indoor_temp_c,
             indoor_data_available=indoor_ok,
@@ -732,7 +965,12 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
     def _serialize_rc_state(self) -> dict:
         """Data callback for `Store.async_delay_save`: serialize the current
         RC estimator state. Called at write time, not schedule time."""
-        return rc_serialize_state(self._rc_state)
+        rc_config = self._rc_config()
+        return rc_serialize_state(
+            self._rc_state,
+            enable_solar=rc_config.enable_solar,
+            enable_wind=rc_config.enable_wind,
+        )
 
     async def async_load_rc_state(self) -> None:
         """Load persisted RC estimator state, if any, into `_rc_state`.
@@ -752,8 +990,11 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         if data is None:
             _LOGGER.debug("No persisted RC shadow state; starting from cold-start prior")
             return
+        rc_config = self._rc_config()
         restored = rc_deserialize_state(
-            data, enable_wind=self._rc_config().enable_wind
+            data,
+            enable_solar=rc_config.enable_solar,
+            enable_wind=rc_config.enable_wind,
         )
         if restored is None:
             _LOGGER.warning(
@@ -780,36 +1021,41 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
         check discards the mismatched state and cold-starts, which is correct.
         Strictly additive: any failure is caught and logged."""
         try:
-            await self._rc_store.async_save(rc_serialize_state(self._rc_state))
+            await self._rc_store.async_save(self._serialize_rc_state())
         except Exception as err:  # noqa: BLE001 - never break unload over shadow state
             _LOGGER.warning("Could not persist RC shadow state on unload (ignored): %s", err)
 
     # --- Phase 3 MPC (shadow/advisory) ---------------------------------------
 
     @staticmethod
-    def _rc_params_pinned(rc_result: RCModelResult, enable_wind: bool) -> bool:
+    def _rc_params_pinned(
+        rc_result: RCModelResult, enable_wind: bool, enable_solar: bool = True
+    ) -> bool:
         """Whether any RC parameter currently sits at (within a tiny tolerance
         of) one of its physical clip bounds — a sign the estimator hit a
         guardrail rather than converging, which the MPC trust gate treats as
         "not plausible yet". Checked here (not in the pure mpc module) so mpc.py
         need not know rc_model's bound constants.
 
-        `enable_wind` is passed explicitly rather than inferred from
-        `theta_wind != 0.0`: THETA_WIND_MIN is also 0.0, so a wind term
-        genuinely clipped down to its floor by real data would be
+        `enable_wind`/`enable_solar` are passed explicitly rather than inferred
+        from `theta_* != 0.0`: THETA_WIND_MIN and THETA_SOLAR_MIN are both 0.0,
+        so a term genuinely clipped down to its floor by real data would be
         indistinguishable from one still sitting untouched at its cold-start
         prior — inferring from the value alone would silently miss that real
-        clip event. For the same reason the gain bound is only checked once the
-        gain dimension actually exists (`rc_result.gain_modeled`): before then
-        `theta_gain` is a not-yet-modeled 0.0, which is not a real clip event
-        and must not be treated as one (the MPC trust gate reports "not yet
-        excited" separately).
+        clip event. The flags also matter in the opposite direction: a disabled
+        dimension is not estimated at all and `RCModelResult` reports a
+        hardcoded 0.0 for it, which would otherwise read as permanently pinned
+        at its lower bound and wedge every trust gate shut. For the same reason
+        the gain bound is only checked once the gain dimension actually exists
+        (`rc_result.gain_modeled`): before then `theta_gain` is a
+        not-yet-modeled 0.0, which is not a real clip event and must not be
+        treated as one (the MPC trust gate reports "not yet excited"
+        separately).
         """
         tol = 1e-6
-        checks = [
-            (rc_result.theta_env, THETA_ENV_MIN, THETA_ENV_MAX),
-            (rc_result.theta_solar, THETA_SOLAR_MIN, THETA_SOLAR_MAX),
-        ]
+        checks = [(rc_result.theta_env, THETA_ENV_MIN, THETA_ENV_MAX)]
+        if enable_solar:
+            checks.append((rc_result.theta_solar, THETA_SOLAR_MIN, THETA_SOLAR_MAX))
         if rc_result.gain_modeled:
             checks.append((rc_result.theta_gain, THETA_GAIN_MIN, THETA_GAIN_MAX))
         for value, lo, hi in checks:
@@ -834,7 +1080,9 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             wind_reference_ms=rc_config.wind_reference_ms,
             confidence=rc_result.confidence,
             accepted_samples=rc_result.accepted_samples,
-            params_pinned=self._rc_params_pinned(rc_result, rc_config.enable_wind),
+            params_pinned=self._rc_params_pinned(
+                rc_result, rc_config.enable_wind, rc_config.enable_solar
+            ),
             gain_modeled=rc_result.gain_modeled,
         )
 
@@ -1221,6 +1469,16 @@ class ClimateOptimizerCoordinator(DataUpdateCoordinator[HeuristicResult]):
             record["price_forecast"] = [
                 [round(h, 4), p] for h, p in self._last_price_forecast
             ]
+        # Auto-tuning: what Manual would have used, what the model proposed, and
+        # what was actually in force. The third is the one nothing else can
+        # recover — in Auto mode the effective coefficients move every cycle and
+        # are not inferable from the stored config, so without this an offline
+        # replay cannot reconstruct what the controller was doing.
+        record.update(
+            autotune_log_fields(
+                self.autotune_result, self.tuning_mode, self.manual_k_values()
+            )
+        )
         if self.rc_result is not None:
             record.update(
                 {

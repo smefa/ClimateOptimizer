@@ -122,11 +122,12 @@ forgetting in the core RLS update law — a materially more invasive change,
 left for future work.
 
 Because gain is appended LAST (not at a fixed positional index), adding it never
-disturbs the positions or covariance entries of env/solar/[wind]. The estimator
-layout is therefore one of four shapes: [env, solar], [env, solar, wind],
-[env, solar, gain], or [env, solar, wind, gain]. Note that two of these have
-the same length (3): length alone cannot distinguish "wind, no gain" from
-"gain, no wind", so both `enable_wind` and a persisted `has_gain` flag are
+disturbs the positions or covariance entries of env/[solar]/[wind]. With solar
+and wind each independently optional (both are user-facing inputs that can be
+switched off) and gain lazily added, the estimator layout is one of eight
+shapes, from [env] alone up to [env, solar, wind, gain]. Several of these share
+a length, so length alone is never enough to identify a layout: `enable_solar`
+and `enable_wind` (current config) plus a persisted `has_gain` flag are all
 needed to disambiguate (see rc_store.py).
 
 Estimation: Recursive Least Squares with a forgetting factor, plus guardrails
@@ -238,17 +239,26 @@ def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
-def _layout(enable_wind: bool, has_gain: bool) -> tuple[str, ...]:
+def _layout(enable_solar: bool, enable_wind: bool, has_gain: bool) -> tuple[str, ...]:
     """Ordered parameter names for the given estimator configuration.
 
-    env and solar are always present and keep fixed positions 0 and 1 so a
-    later gain expansion never disturbs them; wind (if enabled) sits at 2; the
-    heat-pump gain, when it has been added, is always appended LAST. Appending
-    gain at the end (rather than a fixed index) is what makes the one-way
-    expansion a clean block-embedding — every pre-existing parameter keeps its
-    index and its covariance entries.
+    env is always present and always at position 0; solar and wind follow if
+    enabled; the heat-pump gain, when it has been added, is always appended
+    LAST. Appending gain at the end (rather than a fixed index) is what makes
+    the one-way expansion a clean block-embedding — every pre-existing parameter
+    keeps its index and its covariance entries.
+
+    Solar is optional for exactly the reason wind is (see the module docstring's
+    argument about unexcited dimensions inflating their share of the covariance
+    budget every cycle): a user who has switched the solar input off is telling
+    us the term will never be excited, and carrying it anyway would eventually
+    trip the trace cap and rescale the parameters that ARE being learned. Both
+    flags are config, fixed for the lifetime of a state; only `has_gain` is a
+    learned runtime property.
     """
-    names = ["env", "solar"]
+    names = ["env"]
+    if enable_solar:
+        names.append("solar")
     if enable_wind:
         names.append("wind")
     if has_gain:
@@ -309,12 +319,13 @@ def _all_finite(values) -> bool:
 class RCModelConfig:
     """Estimator tuning. Defaults are production-sane; overridable in tests.
 
-    `enable_wind` must match whatever `initial_state(enable_wind=...)` was
-    constructed with — it determines whether the estimator carries a wind
-    dimension, and `step()` assumes `state` and `config` agree. The
-    coordinator sources both from the same config-entry option, and options
-    changes trigger a full coordinator reload (fresh `initial_state()` call),
-    so this invariant holds in practice without needing a runtime check here.
+    `enable_solar`/`enable_wind` must match whatever
+    `initial_state(enable_solar=..., enable_wind=...)` was constructed with —
+    together they determine which dimensions the estimator carries, and
+    `step()` assumes `state` and `config` agree. The coordinator sources both
+    from the same config-entry options, and options changes trigger a full
+    coordinator reload (fresh `initial_state()` call), so this invariant holds
+    in practice without needing a runtime check here.
     """
 
     forgetting_factor: float = DEFAULT_FORGETTING_FACTOR
@@ -322,6 +333,7 @@ class RCModelConfig:
     abs_max_indoor_step_c: float = ABS_MAX_INDOOR_STEP_C
     warmup_samples: int = WARMUP_SAMPLES
     p_trace_max: float = P_TRACE_MAX
+    enable_solar: bool = True
     enable_wind: bool = False
     wind_reference_ms: float = DEFAULT_WIND_REFERENCE_MS
 
@@ -332,10 +344,10 @@ class RCModelState:
 
     Immutable: `step()` returns a fresh state, so there is no hidden mutable
     global state and the function is trivially unit-testable, exactly like
-    `heuristic.compute()`. `theta`/`p_matrix` have length 2..4 depending on
-    `enable_wind` and whether the heat-pump gain dimension has been added yet
-    (`has_gain`); the ordered names for the current shape are
-    `_layout(enable_wind, has_gain)`.
+    `heuristic.compute()`. `theta`/`p_matrix` have length 1..4 depending on
+    `enable_solar`/`enable_wind` and whether the heat-pump gain dimension has
+    been added yet (`has_gain`); the ordered names for the current shape are
+    `_layout(enable_solar, enable_wind, has_gain)`.
 
     `has_gain` records whether the lazily-added gain dimension is present. It
     is False at cold start and flips to True (permanently) the first cycle a
@@ -387,7 +399,7 @@ class RCModelResult:
     theta_gain: float               # 0.0 while `gain_modeled` is False (the
                                      # heat-pump gain dimension has not been
                                      # added yet — distinct from a learned 0.0)
-    theta_solar: float
+    theta_solar: float              # 0.0 (never estimated) unless solar enabled
     theta_wind: float               # 0.0 (never estimated) unless wind enabled
     gain_modeled: bool              # has the gain dimension been added yet?
     time_constant_h: float
@@ -402,16 +414,18 @@ class RCModelResult:
     model_version: str = MODEL_VERSION
 
 
-def initial_state(enable_wind: bool = False) -> RCModelState:
+def initial_state(
+    enable_solar: bool = True, enable_wind: bool = False
+) -> RCModelState:
     """Cold-start state: prior parameters + wide covariance, no history yet.
 
-    `enable_wind` fixes whether the estimator carries a wind dimension for the
-    lifetime of this state. The heat-pump gain dimension is NOT present at cold
-    start (`has_gain=False`); it is added lazily on the first real excitation —
-    see the module docstring for why this is done rather than always carrying a
-    possibly-unexcited gain dimension.
+    `enable_solar`/`enable_wind` fix which optional dimensions the estimator
+    carries for the lifetime of this state. The heat-pump gain dimension is NOT
+    present at cold start (`has_gain=False`); it is added lazily on the first
+    real excitation — see the module docstring for why this is done rather than
+    always carrying a possibly-unexcited gain dimension.
     """
-    layout = _layout(enable_wind, has_gain=False)
+    layout = _layout(enable_solar, enable_wind, has_gain=False)
     theta = [_INIT_THETA[name] for name in layout]
     diag = [_INIT_P[name] for name in layout]
     n = len(theta)
@@ -552,12 +566,12 @@ def _result(
     clip_engaged: bool,
     reason: str,
 ) -> RCModelResult:
-    layout = _layout(config.enable_wind, state.has_gain)
+    layout = _layout(config.enable_solar, config.enable_wind, state.has_gain)
     idx = {name: i for i, name in enumerate(layout)}
     theta = state.theta
     theta_env = theta[idx["env"]]
     time_constant_h = 1.0 / theta_env if theta_env > 0 else float("inf")
-    theta_solar = theta[idx["solar"]]
+    theta_solar = theta[idx["solar"]] if "solar" in idx else 0.0
     theta_wind = theta[idx["wind"]] if "wind" in idx else 0.0
     gain_modeled = "gain" in idx
     theta_gain = theta[idx["gain"]] if gain_modeled else 0.0
@@ -735,7 +749,7 @@ def step(
     prev_wind = (
         state.prev_wind_speed_ms if state.prev_wind_speed_ms is not None else 0.0
     )
-    layout = _layout(config.enable_wind, state.has_gain)
+    layout = _layout(config.enable_solar, config.enable_wind, state.has_gain)
     phi = _regressors(
         prev_gap, state.prev_u_c, state.prev_solar, prev_wind / wind_ref, dt_h, layout
     )
@@ -779,7 +793,7 @@ def step(
     ):
         theta_list, p_list = _add_gain_dimension(theta_list, p_list)
         has_gain = True
-        layout = _layout(config.enable_wind, has_gain)
+        layout = _layout(config.enable_solar, config.enable_wind, has_gain)
         phi = _regressors(
             prev_gap, state.prev_u_c, state.prev_solar, prev_wind / wind_ref, dt_h, layout
         )
@@ -834,10 +848,9 @@ def step(
     idx = {name: i for i, name in enumerate(layout)}
     tau = 1.0 / theta_new[idx["env"]] if theta_new[idx["env"]] > 0 else float("inf")
     gain_txt = f"{theta_new[idx['gain']]:+.3f}" if "gain" in idx else "not-yet-modeled"
-    reason = (
-        f"RC RLS: tau={tau:.1f}h, gain={gain_txt}, "
-        f"solar={theta_new[idx['solar']]:.3f}"
-    )
+    reason = f"RC RLS: tau={tau:.1f}h, gain={gain_txt}"
+    if config.enable_solar:
+        reason += f", solar={theta_new[idx['solar']]:.3f}"
     if config.enable_wind:
         reason += f", wind={theta_new[idx['wind']]:+.3f}"
     if has_gain and not state.has_gain:

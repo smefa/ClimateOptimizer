@@ -3,14 +3,18 @@
     "step": {
       "user": {
         "title": "Set up ClimateOptimizer",
-        "description": "Pick the sensors this zone should use. All coefficients and comfort bounds can be tuned later via Configure.",
+        "description": "Pick the sensors this zone should use. Everything else can be tuned later via Configure.",
         "data": {
           "name": "Name",
           "indoor_temp_sensor": "Indoor temperature sensor",
           "outdoor_temp_sensor": "Outdoor temperature sensor",
-          "weather_entity": "Weather entity",
+          "weather_entity": "Weather entity (optional, for wind and sun)",
           "nordpool_price_entity": "Nordpool price sensor (optional)",
-          "indoor_target_temperature": "Indoor target temperature"
+          "indoor_target_temperature": "Indoor target temperature",
+          "heating_type": "Heating system"
+        },
+        "data_description": {
+          "heating_type": "How fast your heating can respond. Underfloor heating is buried in a slab and takes hours; radiators react much faster. Used to keep self-tuning from correcting faster than your system can physically deliver."
         }
       },
       "reconfigure": {
@@ -20,9 +24,10 @@
           "name": "Name",
           "indoor_temp_sensor": "Indoor temperature sensor",
           "outdoor_temp_sensor": "Outdoor temperature sensor",
-          "weather_entity": "Weather entity",
+          "weather_entity": "Weather entity (optional, for wind and sun)",
           "nordpool_price_entity": "Nordpool price sensor (optional)",
-          "indoor_target_temperature": "Indoor target temperature"
+          "indoor_target_temperature": "Indoor target temperature",
+          "heating_type": "Heating system"
         }
       }
     },
@@ -38,34 +43,86 @@
     "step": {
       "init": {
         "title": "ClimateOptimizer options",
-        "description": "Tune how the compensated outdoor temperature is computed. Changes apply immediately.",
+        "description": "Pick a section to edit. Each page saves on its own.",
+        "menu_options": {
+          "sensors": "Sensors and inputs",
+          "comfort": "Comfort",
+          "tuning": "Tuning",
+          "price": "Price and savings",
+          "output": "Output push",
+          "advanced": "Advanced"
+        }
+      },
+      "sensors": {
+        "title": "Sensors and inputs",
+        "description": "Which entities to read, and which weather-derived inputs to use at all. Switching an input off removes it from the thermal model too, not just from the calculation.",
         "data": {
-          "weather_entity": "Weather entity",
+          "weather_entity": "Weather entity (optional)",
           "nordpool_price_entity": "Nordpool price sensor (optional)",
           "power_sensor": "Heat pump power sensor (optional, may include hot water)",
-          "enable_price_compensation": "Lower target during expensive price periods",
-          "k_indoor": "Indoor error coefficient (k_indoor)",
-          "k_wind": "Wind coefficient (k_wind)",
-          "k_sun": "Sun coefficient (k_sun)",
+          "enable_solar_input": "Use sun / cloud cover",
+          "enable_wind_input": "Use wind speed",
+          "update_interval_minutes": "Update interval (minutes)"
+        },
+        "data_description": {
+          "weather_entity": "Only used for wind and sun. Leave empty if both inputs below are off.",
+          "enable_solar_input": "Backs the heating off when the sun is warming the house.",
+          "enable_wind_input": "Compensates for extra heat loss on windy days."
+        }
+      },
+      "comfort": {
+        "title": "Comfort",
+        "description": "Your preferences. Nothing here is ever auto-tuned — no measurement of the house can tell us what temperature you want. The target temperature itself is a separate entity so automations can move it.",
+        "data": {
           "comfort_min_c": "Comfort minimum temperature",
           "comfort_max_c": "Comfort maximum temperature",
-          "heating_cutoff_c": "Heating cutoff temperature (compensation suppressed at/above this)",
-          "price_threshold_start": "Price where reduction starts",
-          "price_threshold_max": "Price where reduction is at its maximum",
-          "price_max_drop_c": "Maximum target drop from price (legacy; superseded by comfort tier)",
+          "heating_cutoff_c": "Summer cutoff (compensation off at/above this outdoor temperature)"
+        }
+      },
+      "tuning": {
+        "title": "Tuning",
+        "description": "Manual uses the coefficients below. Auto derives them from your house's measured thermal behaviour instead, easing across as the model gathers evidence and falling back to these values whenever it isn't confident. The derived numbers are published on the auto-tune sensor in both modes, so you can compare before committing. To switch modes later, use the tuning-mode entity rather than this page.",
+        "data": {
+          "tuning_mode": "Tuning mode (initial value only)",
+          "heating_type": "Heating system",
+          "k_indoor": "Indoor error coefficient (k_indoor)",
+          "k_wind": "Wind coefficient (k_wind)",
+          "k_sun": "Sun coefficient (k_sun)"
+        },
+        "data_description": {
+          "heating_type": "Keeps self-tuning from correcting faster than your emitters can physically respond.",
+          "k_indoor": "Starting point in Auto mode, and the fallback whenever the model isn't trusted."
+        }
+      },
+      "price": {
+        "title": "Price and savings",
+        "description": "How hard to trade comfort for cheaper energy. The Low/Mid/High tier is a separate entity so it can be automated. With a day-ahead forecast the price band is taken from the day's own spread and the two thresholds below are only a fallback. In Auto mode the deep-cold taper is replaced by a recovery-feasibility calculation from the thermal model.",
+        "data": {
+          "enable_price_compensation": "Lower target during expensive price periods",
           "k_price": "Price braking gain (k_price)",
+          "precharge_max_boost_c": "Max pre-heat boost before a spike (High tier only; 0 disables)",
+          "price_threshold_start": "Price where reduction starts (fallback)",
+          "price_threshold_max": "Price where reduction is at its maximum (fallback)",
           "cold_taper_start_c": "Deep-cold taper: full braking at/above this outdoor temp",
           "cold_taper_full_c": "Deep-cold taper: minimum braking at/below this outdoor temp",
-          "cold_taper_min_factor": "Deep-cold taper: braking fraction at the coldest end (0-1)",
-          "precharge_max_boost_c": "Max pre-heat boost before a spike (High tier only; 0 disables)",
-          "update_interval_minutes": "Update interval (minutes)",
-          "enable_wind_rc": "Model wind sensitivity in the thermal model (advanced, shadow-mode only)",
+          "cold_taper_min_factor": "Deep-cold taper: braking fraction at the coldest end (0-1)"
+        }
+      },
+      "advanced": {
+        "title": "Advanced",
+        "description": "Experimental model settings. The MPC planner is advisory only and never affects the published temperature.",
+        "data": {
+          "enable_wind_rc": "Estimate wind sensitivity in the thermal model (only for leaky, exposed houses)",
           "rc_wind_reference_ms": "Reference wind speed for the wind model",
-          "mpc_horizon_hours": "MPC planning horizon (advanced, advisory-only)",
+          "mpc_horizon_hours": "MPC planning horizon (advisory-only)",
           "mpc_max_heating_delta_c": "MPC max heating authority (compensation delta)",
           "mpc_min_confidence": "MPC minimum RC-model confidence to be trustworthy",
-          "enable_data_logging": "Log data locally for offline model testing (advanced)"
-        },
+          "enable_data_logging": "Log data locally for offline model testing"
+        }
+      },
+      "output": {
+        "title": "Output push",
+        "description": "Optional ways to send the compensated temperature to your heat pump. Both are independent — set one, both, or neither.",
         "sections": {
           "output_number_push": {
             "name": "Update a number entity",
@@ -131,6 +188,12 @@
       "rc_prediction_error": {
         "name": "RC model prediction error"
       },
+      "autotune_blend": {
+        "name": "Auto-tune blend"
+      },
+      "autotune_effective_k_indoor": {
+        "name": "Auto-tune effective k_indoor"
+      },
       "mpc_recommended_delta": {
         "name": "MPC recommended compensation delta"
       },
@@ -170,6 +233,27 @@
           "mid": "Mid (balanced)",
           "high": "High (max saving)"
         }
+      },
+      "tuning_mode": {
+        "name": "Tuning mode",
+        "state": {
+          "manual": "Manual (configured coefficients)",
+          "auto": "Auto (learned from the house)"
+        }
+      }
+    }
+  },
+  "selector": {
+    "heating_type": {
+      "options": {
+        "underfloor": "Underfloor heating",
+        "radiators": "Radiators"
+      }
+    },
+    "tuning_mode": {
+      "options": {
+        "manual": "Manual (configured coefficients)",
+        "auto": "Auto (learned from the house)"
       }
     }
   }

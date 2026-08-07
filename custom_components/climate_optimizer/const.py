@@ -53,6 +53,25 @@ CONF_UPDATE_INTERVAL_MINUTES = "update_interval_minutes"
 CONF_HEATING_CUTOFF_C = "heating_cutoff_c"
 CONF_ENABLE_WIND_RC = "enable_wind_rc"
 CONF_RC_WIND_REFERENCE_MS = "rc_wind_reference_ms"
+# --- Auto-tuning (autotune.py) ---------------------------------------------
+# Whether the controller's coefficients are typed in by hand or derived from
+# the learned RC model. Seeds the live `select.*_tuning_mode` entity at first
+# run only; the select is the live source of truth thereafter (same
+# option-seeds-entity pattern as the price comfort tier and indoor target).
+CONF_TUNING_MODE = "tuning_mode"
+# The heating system's emitter type. Its only job is to floor the derived
+# closed-loop time constant, since the 1R1C model carries no transport delay
+# and would otherwise propose a response faster than the emitters can deliver
+# (see autotune.py). Set once at install; not something that changes.
+CONF_HEATING_TYPE = "heating_type"
+# Master toggles for the two optional weather-derived inputs. Each gates BOTH
+# the heuristic's adjustment term AND the corresponding RC estimator dimension
+# — a term the user has switched off should not keep occupying a dimension of
+# the covariance budget (see rc_model.py on why unexcited dimensions are
+# actively harmful, not merely wasteful). With solar off the weather entity is
+# only needed for wind, and vice versa; with both off it isn't needed at all.
+CONF_ENABLE_SOLAR_INPUT = "enable_solar_input"
+CONF_ENABLE_WIND_INPUT = "enable_wind_input"
 # Phase 3 MPC (shadow/advisory only) options
 CONF_MPC_HORIZON_HOURS = "mpc_horizon_hours"
 CONF_MPC_MAX_HEATING_DELTA_C = "mpc_max_heating_delta_c"
@@ -86,6 +105,20 @@ DEFAULT_UPDATE_INTERVAL_MINUTES = 15
 DEFAULT_HEATING_CUTOFF_C = 18.0
 DEFAULT_ENABLE_WIND_RC = False
 DEFAULT_RC_WIND_REFERENCE_MS = 5.0
+# Auto-tuning defaults. Auto is the default because self-tuning is the point of
+# the project, and it is safe to default to: autotune.py holds the derived
+# coefficients at the manual values until the model has both cleared its hard
+# trust gates and accumulated ~5 days of accepted samples, ramping in
+# proportionally rather than switching over. A fresh install therefore behaves
+# exactly like Manual mode on day one and diverges only as evidence arrives.
+# The manual k_* values below are still what Auto starts from, so they remain
+# worth setting sensibly.
+DEFAULT_TUNING_MODE = "auto"
+DEFAULT_HEATING_TYPE = "radiators"
+# Both weather-derived inputs default ON, matching the behaviour before they
+# became optional (k_wind 0.3 / k_sun 3.0 were always applied).
+DEFAULT_ENABLE_SOLAR_INPUT = True
+DEFAULT_ENABLE_WIND_INPUT = True
 
 # Bundled demo Lovelace card (see www/climate-optimizer-card.js). The version
 # is appended as a cache-busting query string in add_extra_js_url() calls —

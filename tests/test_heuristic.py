@@ -604,3 +604,93 @@ def test_heating_cutoff_still_reports_real_solar_effect():
     assert result.sun_adjustment_c == 0.0  # not acted on, but not hidden either
     assert result.wind_data_available is True
     assert result.cloud_data_available is True
+
+
+# --- optional weather-derived inputs -----------------------------------------
+
+
+def test_disabled_wind_input_contributes_nothing():
+    params = make_params(enable_wind_input=False, k_wind=0.5)
+    result = compute(make_inputs(wind_speed_ms=10.0), params)
+    assert result.wind_adjustment_c == 0.0
+    assert result.compensated_outdoor_temp_c == 3.0
+    # The reading itself is still reported — the term is off, the data isn't
+    # being hidden.
+    assert result.wind_speed_ms == 10.0
+    assert "wind input disabled" in result.reason
+
+
+def test_disabled_solar_input_contributes_nothing():
+    params = make_params(enable_solar_input=False, k_sun=3.0)
+    result = compute(
+        make_inputs(sun_elevation_deg=90.0, cloud_coverage_pct=0.0), params
+    )
+    assert result.sun_adjustment_c == 0.0
+    # solar_effect stays a reported physical fact, as the RC model relies on.
+    assert result.solar_effect == 1.0
+    assert "solar input disabled" in result.reason
+
+
+def test_disabled_input_differs_from_unavailable_in_the_reason():
+    off = compute(make_inputs(), make_params(enable_wind_input=False))
+    missing = compute(make_inputs(wind_data_available=False), make_params())
+    assert "disabled" in off.reason
+    assert "unavailable" in missing.reason
+
+
+def test_both_inputs_disabled_leaves_only_indoor_error():
+    params = make_params(
+        enable_solar_input=False, enable_wind_input=False, k_indoor=2.0
+    )
+    result = compute(
+        make_inputs(
+            indoor_temp_c=20.0, wind_speed_ms=8.0, sun_elevation_deg=45.0
+        ),
+        params,
+    )
+    # -k_indoor * (21 - 20) = -2.0 on top of raw 3.0
+    assert result.compensated_outdoor_temp_c == 1.0
+
+
+# --- auto-tuned cold-taper override -------------------------------------------
+
+
+def test_cold_taper_override_replaces_the_outdoor_taper():
+    forecast = tuple((float(h), 1.0 if h else 5.0) for h in range(8))
+    base = dict(
+        enable_price_compensation=True,
+        price_comfort_tier="mid",
+        k_price=5.0,
+        # Manual taper endpoints that would give full authority at -5 degC.
+        cold_taper_start_c=-10.0,
+        cold_taper_full_c=-20.0,
+    )
+    inputs = make_inputs(
+        raw_outdoor_temp_c=-5.0,
+        current_price=5.0,
+        price_data_available=True,
+        price_forecast=forecast,
+    )
+    manual = compute(inputs, make_params(**base))
+    assert manual.cold_taper_factor == 1.0
+
+    # The override says this house can only recover a quarter of the sag.
+    tuned = compute(inputs, make_params(**base, cold_taper_override=0.25))
+    assert tuned.cold_taper_factor == 0.25
+    assert tuned.price_shift_applied_c < manual.price_shift_applied_c
+    assert "recovery-taper" in tuned.reason
+
+
+def test_cold_taper_override_is_clamped():
+    params = make_params(cold_taper_override=7.5)
+    assert compute(make_inputs(), params).cold_taper_factor == 1.0
+    params = make_params(cold_taper_override=-3.0)
+    assert compute(make_inputs(), params).cold_taper_factor == 0.0
+
+
+def test_no_override_keeps_the_configured_taper():
+    params = make_params(
+        cold_taper_start_c=-10.0, cold_taper_full_c=-20.0, cold_taper_min_factor=0.4
+    )
+    result = compute(make_inputs(raw_outdoor_temp_c=-20.0), params)
+    assert result.cold_taper_factor == 0.4

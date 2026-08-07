@@ -706,3 +706,60 @@ def test_gain_stays_added_after_excitation_stops():
     assert state.has_gain is True
     assert result.gain_modeled is True
     assert len(state.theta) == 3
+
+
+# --- optional solar dimension -------------------------------------------------
+
+
+def test_solar_disabled_drops_the_dimension_entirely():
+    """A term the user switched off must not merely be zeroed — it must not
+    occupy a dimension at all, or the forgetting factor inflates its share of
+    the covariance budget every cycle with nothing ever exciting it (the same
+    argument rc_model already makes for wind and the lazy gain)."""
+    state = initial_state(enable_solar=False, enable_wind=False)
+    assert len(state.theta) == 1  # [env] only
+    config = RCModelConfig(enable_solar=False, enable_wind=False)
+    # No applied compensation delta, so the lazy gain dimension stays unadded
+    # too and the estimator is at its minimum width.
+    state, result = step(state, make_inputs(compensation_delta_c=0.0), config)
+    state, result = step(
+        state, make_inputs(indoor_temp_c=21.1, compensation_delta_c=0.0), config
+    )
+    assert result.theta_solar == 0.0
+    assert result.gain_modeled is False
+    assert len(state.theta) == 1
+
+
+def test_solar_disabled_still_learns_the_envelope_and_gain():
+    config = RCModelConfig(enable_solar=False, enable_wind=False)
+    state = initial_state(enable_solar=False, enable_wind=False)
+    indoor = 21.0
+    for k in range(12):
+        indoor += 0.02 * ((k % 3) - 1)
+        state, result = step(
+            state,
+            make_inputs(
+                indoor_temp_c=indoor,
+                outdoor_temp_c=2.0 + 0.4 * k,
+                compensation_delta_c=-1.5,
+            ),
+            config,
+        )
+    assert result.gain_modeled is True
+    assert len(state.theta) == 2  # [env, gain]
+    assert result.theta_solar == 0.0
+    assert result.theta_env > 0.0
+
+
+def test_all_optional_dimensions_enabled_is_four_wide():
+    config = RCModelConfig(enable_solar=True, enable_wind=True)
+    state = initial_state(enable_solar=True, enable_wind=True)
+    assert len(state.theta) == 3  # [env, solar, wind], gain not yet added
+    for k in range(6):
+        state, result = step(
+            state,
+            make_inputs(indoor_temp_c=21.0 + 0.03 * k, compensation_delta_c=-2.0),
+            config,
+        )
+    assert len(state.theta) == 4  # gain appended last
+    assert result.gain_modeled is True

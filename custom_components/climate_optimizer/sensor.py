@@ -22,6 +22,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from . import ClimateOptimizerConfigEntry
+from .autotune import TUNING_MODE_AUTO, AutotuneResult
 from .const import DOMAIN
 from .coordinator import ClimateOptimizerCoordinator
 from .heuristic import HeuristicResult
@@ -51,6 +52,10 @@ async def async_setup_entry(
             RCWindGainSensor(coordinator, entry),
             RCModelConfidenceSensor(coordinator, entry),
             RCPredictionErrorSensor(coordinator, entry),
+            # Auto-tuning: derived coefficients, published in BOTH tuning modes
+            # so derived-vs-manual can be compared before committing.
+            AutotuneBlendSensor(coordinator, entry),
+            AutotuneEffectiveKIndoorSensor(coordinator, entry),
             # Phase 3 shadow/advisory-mode MPC diagnostics (informational only).
             MPCRecommendedDeltaSensor(coordinator, entry),
             MPCStatusSensor(coordinator, entry),
@@ -301,6 +306,105 @@ class StatusSensor(ClimateOptimizerEntity, SensorEntity):
             if self.coordinator.price_configured:
                 attrs["price_ok"] = result.price_data_available
         return attrs
+
+
+class AutotuneBlendSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic: how far the controller has moved from the hand-configured
+    coefficients toward the ones derived from the learned house model.
+
+    The state is the blend weight as a percentage — 0% means "running purely on
+    the configured k_* values", 100% means "running purely on derived ones".
+    The attributes carry the full side-by-side: every manual value, its derived
+    counterpart, and the value actually in force this cycle.
+
+    Published in BOTH tuning modes on purpose. In Manual mode the derived
+    figures are advisory — the point is to be able to watch them track your
+    house for a season and see whether they look sane before flipping
+    `select.*_tuning_mode` to Auto. In Auto mode the `*_effective` values are
+    what heuristic.compute() actually received.
+
+    Note that `blend_weight` is the *readiness* of the derivation, not the
+    active mode: in Manual mode it can sit at 100% while none of the derived
+    values are being used. `tuning_mode` is the attribute that says which set
+    is driving the output.
+    """
+
+    _attr_translation_key = "autotune_blend"
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_autotune_blend"
+
+    @property
+    def native_value(self) -> float | None:
+        result: AutotuneResult | None = self.coordinator.autotune_result
+        if result is None:
+            return None
+        return round(result.blend_weight * 100.0, 1)
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        coordinator = self.coordinator
+        manual_k_indoor, manual_k_wind, manual_k_sun, manual_k_price = (
+            coordinator.manual_k_values()
+        )
+        attrs: dict = {
+            "tuning_mode": coordinator.tuning_mode,
+            "k_indoor_manual": manual_k_indoor,
+            "k_wind_manual": manual_k_wind,
+            "k_sun_manual": manual_k_sun,
+            "k_price_manual": manual_k_price,
+        }
+        result: AutotuneResult | None = coordinator.autotune_result
+        if result is None:
+            # Before the RC model has produced anything there is nothing to
+            # derive from; say so explicitly rather than leaving the comparison
+            # attributes silently absent.
+            attrs["usable"] = False
+            attrs["reason"] = "No RC model result yet"
+            return attrs
+        attrs.update(asdict(result))
+        return attrs
+
+
+class AutotuneEffectiveKIndoorSensor(ClimateOptimizerEntity, SensorEntity):
+    """Diagnostic: the indoor-error coefficient actually driving the controller.
+
+    A first-class sensor rather than just another attribute on the blend sensor
+    because this is the number you graph. It is the loop gain — if auto-tuning
+    ever misbehaves, it shows up here as drift or oscillation long before it
+    shows up as a comfort complaint, and it is exactly the quantity expected to
+    move across a season on a non-linear heat curve (it is inversely
+    proportional to the estimated heat-pump gain).
+
+    Reports the effective value in both modes, so the trace is continuous across
+    a switch between Manual and Auto instead of going unavailable.
+    """
+
+    _attr_translation_key = "autotune_effective_k_indoor"
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_suggested_display_precision = 2
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_autotune_effective_k_indoor"
+
+    @property
+    def native_value(self) -> float | None:
+        coordinator = self.coordinator
+        result: AutotuneResult | None = coordinator.autotune_result
+        manual_k_indoor = coordinator.manual_k_values()[0]
+        if result is None or coordinator.tuning_mode != TUNING_MODE_AUTO:
+            return round(manual_k_indoor, 4)
+        return round(result.k_indoor_effective, 4)
 
 
 class RCThermalTimeConstantSensor(ClimateOptimizerEntity, SensorEntity):

@@ -169,10 +169,136 @@ compensated_outdoor_temp = raw_outdoor_temp
 ```
 
 All coefficients, comfort min/max bounds, and price thresholds are adjustable
-in the options flow. The sensor's attributes include a per-term breakdown and a
-plain-language `reason` string so the output is always explainable.
+in the options flow, which is organised as a menu of focused pages (Sensors and
+inputs / Comfort / Tuning / Price and savings / Output push / Advanced). Each
+page saves independently. The sensor's attributes include a per-term breakdown
+and a plain-language `reason` string so the output is always explainable.
 
 This is intentionally a simple, transparent heuristic, not a black-box model.
+
+### Optional inputs: sun and wind
+
+Both weather-derived terms can be switched off individually on the **Sensors and
+inputs** page. Switching one off is not the same as setting its coefficient to
+zero: the term is removed from the thermal model as well, so the estimator stops
+carrying a dimension it will never see excitation on (which, left in place,
+slowly inflates its share of the covariance budget — see the RC model section).
+
+The weather entity is only consumed by these two terms, so it is optional; with
+both inputs off, none is needed and the per-cycle forecast calls are skipped
+entirely.
+
+## Auto-tuning (deriving the coefficients from your house)
+
+`k_indoor`, `k_wind`, `k_sun` and `k_price` are expressed in "compensated-outdoor
+°C per unit of input" — a unit that is specific to one house, and in fact to one
+*outdoor temperature*, because a heat pump's weather curve is not linear. One
+degree of spoofing buys a different amount of heat at −15 °C than at +5 °C (the
+curve steepens in cold while the compressor simultaneously nears its capacity
+limit). No single hand-typed constant can be right across a season.
+
+The RC model already estimates the plant, so these can be derived instead of
+asked for. Set the **Tuning mode** entity to `auto` and the controller inverts
+the model's own control channel:
+
+| coefficient | derived as | reasoning |
+| --- | --- | --- |
+| `k_indoor` | `1 / (tau_cl · \|theta_gain\|)` | close an indoor error with time constant `tau_cl` |
+| `k_sun` | `theta_solar / \|theta_gain\|` | back off by exactly the measured solar gain |
+| `k_wind` | `theta_wind · \|T_out−T_in\| / (wind_ref · \|theta_gain\|)` | offset the measured wind loss |
+| `k_price` | `3.3 / (tau_cl · \|theta_gain\|)` | same law, with deliberately asymmetric braking authority |
+
+Non-linearity is then handled for free: every coefficient is divided by the
+*currently estimated* `theta_gain`, so when the curve steepens and the gain
+grows, the coefficients shrink by the same factor.
+
+`tau_cl` (how fast errors should close) is itself derived, not asked for:
+`tau_cl = clamp(tau_open / 3, emitter_floor, 24 h)`, where `tau_open = 1/theta_env`
+is already the best-estimated parameter in the model. The speedup ratio of 3 is
+dimensionless, which is what makes it legitimate to hardcode where `k_indoor`
+was not. The **heating system** question (underfloor vs. radiators) sets the
+`emitter_floor` — the 1R1C model has no transport delay, so this is the one place
+the physical lag of the emitters enters the calculation.
+
+The deep-cold price taper is also replaced. Rather than three hand-drawn outdoor
+thresholds, Auto mode asks whether the sag is *recoverable*: at full heating
+authority the net recovery rate is `|theta_gain|·u_max + theta_env·(T_out−T_in)`,
+and the envelope term eats into it the colder it gets. The taper shape therefore
+falls out of this house's own physics.
+
+### Safety: a ramp, not a switch
+
+Every formula above divides by `theta_gain`, so a bad estimate does not merely
+detune the loop. Three hard gates and one soft ramp guard it. The derived values
+fall back to your configured ones whenever the heat pump has not yet been
+excited (no compensation delta has ever been applied, so there is no gain to
+invert), `|theta_gain|` is below its floor, or any RC parameter is pinned at a
+clip bound. Even once all three pass, the derived values are blended in
+proportionally to accumulated evidence over ~5 days of accepted samples.
+
+This is why Auto is the default: at zero evidence it is *exactly* Manual mode,
+and it diverges only as the model earns it.
+
+### Comparing before committing
+
+The derivation runs in **both** modes. `sensor.*_auto_tune_blend` reports the
+blend weight as a percentage, and its attributes carry the full side-by-side —
+every manual value, its derived counterpart, and the value actually in force.
+In Manual mode those derived figures are purely advisory, so you can watch them
+track your house for a season and decide whether they look sane before flipping
+the switch.
+
+Note that the blend weight is the *readiness* of the derivation, not the active
+mode: in Manual mode it can sit at 100% while none of the derived values are
+being used. The `tuning_mode` attribute is what says which set is driving the
+output.
+
+### Troubleshooting and logging
+
+Three layers, answering different questions:
+
+**Live sensors** — `sensor.*_auto_tune_blend` carries the full side-by-side in
+its attributes, and `sensor.*_auto_tune_effective_k_indoor` is a first-class
+sensor so the loop gain can be graphed directly. That second one is the number
+to watch: it's inversely proportional to the estimated heat-pump gain, so it's
+exactly what moves across a season on a non-linear curve, and misbehaving
+auto-tuning shows up there as drift or oscillation long before it shows up as a
+comfort complaint. It reports the effective value in both modes, so the trace
+stays continuous when you flip between Manual and Auto.
+
+**Download diagnostics** (the button on the integration's entry page) — a
+complete cross-sectional snapshot: config actually in force, live runtime values
+that aren't config (activation switch, tuning mode, target, tier), all four
+models' latest results, the resolved auto-tune constants, and the **raw RLS
+covariance matrix**. That last one appears on no sensor and is what
+distinguishes "still converging" from "covariance has wound up and the fit has
+stopped responding". The output-push targets are redacted; source entity ids are
+not, since they're often the actual problem.
+
+**JSONL history log** (opt-in, Advanced page) — every cycle records the manual,
+derived, *and* effective coefficients. The effective ones matter most: in Auto
+mode they move every cycle and are not inferable from the stored config, so
+without them an offline replay can't reconstruct what the controller was doing.
+When the derivation is blocked, the reason is recorded too (only then — logging
+the full reason string every cycle would dominate the file for something
+reconstructible from the numbers).
+
+That third layer is what answers the question this feature exists for: pair
+`rc_theta_gain` against `raw_outdoor_temp_c` over a season and you can see
+directly whether your heat curve's non-linearity is real and how large it is,
+rather than assuming it.
+
+Set the `custom_components.climate_optimizer` logger to `debug` for a
+per-cycle `reason` line from each model.
+
+### What is never auto-tuned
+
+Comfort min/max, the target temperature, the summer cutoff and the price tier.
+No measurement of a building can tell you what its occupant prefers. The COP
+half of the cold taper is also deliberately not modelled: heat bought back at
+−15 °C genuinely costs more per kWh, but the only power signal available is
+contaminated by hot-water production (see the logging section), so rather than
+invent a COP curve the derived taper covers recovery feasibility only.
 
 ### Heating cutoff (summer guardrail)
 
@@ -240,19 +366,26 @@ restarts were at all common. Persistence is strictly additive and defensive:
 an empty, corrupt, version-mismatched, or wrong-dimensionality store is
 silently discarded in favour of a clean cold start, and any storage error is
 logged and swallowed — it can never break or delay the real published output.
-The stored state records both whether the wind term is enabled and whether the
-gain dimension has been added, so the two same-length shapes it can take
-(envelope + solar + wind, versus envelope + solar + gain) are never confused on
-reload. Note that toggling the optional wind term (below) still resets learning
-on purpose, because it changes the estimator's shape and the old saved state no
-longer matches; states saved by versions before the lazy-gain change are also
-discarded and cold-started, by design.
+The stored state records the exact layout it was fit under — whether the solar
+and wind dimensions were present, and whether the gain dimension had been added
+— rather than trying to infer the layout from the parameter count. Counting is
+not sound here: with both optional dimensions available, several different
+layouts share a length (envelope + wind + gain and envelope + solar + gain are
+both three wide), so a count check alone would let a state load into the wrong
+layout and silently reinterpret a learned wind coefficient as solar. Note that
+toggling either optional input resets learning on purpose, because it changes the
+estimator's shape and the old saved state no longer matches; states saved by
+versions before the lazy-gain change are also discarded and cold-started, by
+design.
 
 #### Optional wind term (advanced, off by default)
 
 For houses expected to be genuinely wind-sensitive — old, leaky, exposed —
-enable `enable_wind_rc` in options to add a 4th estimated parameter,
-`sensor.<name>_rc_model_wind_gain`. It's off by default because for a
+enable `enable_wind_rc` on the Advanced page to add an estimated wind parameter,
+`sensor.<name>_rc_model_wind_gain`. This is separate from, and gated behind, the
+wind input toggle on the Sensors page: that one says "wind is available and worth
+compensating for", this one opts into the statistically riskier business of
+*estimating* a wind coefficient. It's off by default because for a
 typical well-sealed house, wind speed is highly correlated with outdoor
 temperature in normal weather data, and a small true wind effect can't be
 reliably told apart from that correlation — enabling it just adds estimation

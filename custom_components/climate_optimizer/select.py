@@ -1,4 +1,5 @@
-"""Select platform for ClimateOptimizer: the live price comfort tier."""
+"""Select platform for ClimateOptimizer: the live price comfort tier and the
+manual/auto tuning-mode switch."""
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import ClimateOptimizerConfigEntry
+from .autotune import TUNING_MODE_MANUAL, TUNING_MODES
 from .coordinator import ClimateOptimizerCoordinator
 from .heuristic import PRICE_TIER_MID, PRICE_TIERS
 from .sensor import ClimateOptimizerEntity
@@ -18,7 +20,12 @@ async def async_setup_entry(
     entry: ClimateOptimizerConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    async_add_entities([PriceComfortTierSelect(entry.runtime_data, entry)])
+    async_add_entities(
+        [
+            PriceComfortTierSelect(entry.runtime_data, entry),
+            TuningModeSelect(entry.runtime_data, entry),
+        ]
+    )
 
 
 class PriceComfortTierSelect(ClimateOptimizerEntity, SelectEntity, RestoreEntity):
@@ -67,4 +74,53 @@ class PriceComfortTierSelect(ClimateOptimizerEntity, SelectEntity, RestoreEntity
         self.coordinator.price_comfort_tier = option
         self.async_write_ha_state()
         # Reflect the new tier promptly rather than waiting for the next cycle.
+        await self.coordinator.async_request_refresh()
+
+
+class TuningModeSelect(ClimateOptimizerEntity, SelectEntity, RestoreEntity):
+    """Whether the controller runs on hand-configured coefficients or on ones
+    derived from the learned RC model (see autotune.py).
+
+    Manual reads k_indoor/k_wind/k_sun/k_price and the three cold-taper values
+    straight from the options; Auto replaces all of them with values derived
+    from the house's own estimated thermal parameters. The derivation runs and
+    is published on the auto-tune diagnostic sensor in BOTH modes, so this
+    switch can be flipped after watching derived-vs-manual rather than on faith.
+
+    Live rather than a config option for the same reason as the price tier: an
+    options change reloads the entry, and A/B comparison is the entire point of
+    having the switch. State is restored across restarts via RestoreEntity, and
+    seeded from CONF_TUNING_MODE on the very first run.
+    """
+
+    _attr_translation_key = "tuning_mode"
+    _attr_options = list(TUNING_MODES)
+
+    def __init__(
+        self, coordinator: ClimateOptimizerCoordinator, entry: ClimateOptimizerConfigEntry
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_tuning_mode"
+
+    @property
+    def current_option(self) -> str:
+        return self.coordinator.tuning_mode
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last_state = await self.async_get_last_state()
+        if last_state is not None and last_state.state in TUNING_MODES:
+            self.coordinator.tuning_mode = last_state.state
+
+    async def async_select_option(self, option: str) -> None:
+        # Anything unrecognized falls back to Manual, never Auto: an unknown
+        # value must not silently hand control to the derived coefficients.
+        if option not in TUNING_MODES:
+            option = TUNING_MODE_MANUAL
+        self.coordinator.tuning_mode = option
+        self.async_write_ha_state()
         await self.coordinator.async_request_refresh()

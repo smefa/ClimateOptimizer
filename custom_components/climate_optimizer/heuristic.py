@@ -234,6 +234,19 @@ class HeuristicParams:
     # coming spike (Phase C). Only the High tier pre-charges; set to 0 to
     # disable entirely. Bounded downstream by comfort_max.
     precharge_max_boost_c: float = 1.0
+    # --- Optional weather-derived inputs -------------------------------------
+    # Each switches off its adjustment term entirely (contributing exactly 0,
+    # like an unavailable sensor does) rather than relying on the user zeroing
+    # the corresponding k_*. Defaulted True/True so existing constructions and
+    # tests that omit them keep the previous always-on behaviour.
+    enable_solar_input: bool = True
+    enable_wind_input: bool = True
+    # --- Auto-tuning override (autotune.py) ----------------------------------
+    # When set, replaces the outdoor-temperature cold taper computed from the
+    # three `cold_taper_*` values above with a recovery-feasibility factor
+    # derived from the learned RC model. None means "use the configured taper",
+    # which is what Manual mode and every existing caller get.
+    cold_taper_override: float | None = None
 
 
 @dataclass(frozen=True)
@@ -342,8 +355,12 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         )
     else:
         indoor_adjustment_c = 0.0
-    wind_adjustment_c = -params.k_wind * inputs.wind_speed_ms
-    sun_adjustment_c = params.k_sun * solar_effect
+    # A disabled input contributes exactly 0, identically to an unavailable
+    # sensor — the term is off, not merely small.
+    wind_adjustment_c = (
+        -params.k_wind * inputs.wind_speed_ms if params.enable_wind_input else 0.0
+    )
+    sun_adjustment_c = params.k_sun * solar_effect if params.enable_solar_input else 0.0
 
     current_price = (
         inputs.current_price
@@ -360,12 +377,19 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
     #    is `k_price * price_shift_c` — decoupled from k_indoor so braking
     #    authority can be tuned independently and much harder.
     tier = resolve_price_tier(params.price_comfort_tier)
-    taper = cold_taper_factor(
-        inputs.raw_outdoor_temp_c,
-        params.cold_taper_start_c,
-        params.cold_taper_full_c,
-        params.cold_taper_min_factor,
-    )
+    if params.cold_taper_override is not None:
+        # Auto-tuned: a recovery-feasibility factor derived from the learned RC
+        # model (see autotune.derived_cold_taper), which reproduces the taper's
+        # intent — "don't spend comfort you can't buy back" — from this house's
+        # own physics rather than from three hand-drawn outdoor thresholds.
+        taper = _clamp(params.cold_taper_override, 0.0, 1.0)
+    else:
+        taper = cold_taper_factor(
+            inputs.raw_outdoor_temp_c,
+            params.cold_taper_start_c,
+            params.cold_taper_full_c,
+            params.cold_taper_min_factor,
+        )
     price_response = 0.0
     price_shift_c = 0.0
     upcoming_spike_in_min: float | None = None
@@ -441,11 +465,15 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         )
     else:
         reason = "Indoor sensor unavailable, compensation skipped for this term; "
-    if inputs.wind_data_available:
+    if not params.enable_wind_input:
+        reason += "wind input disabled; "
+    elif inputs.wind_data_available:
         reason += f"wind {inputs.wind_speed_ms:.1f} m/s → {wind_adjustment_c:+.1f}°C; "
     else:
         reason += "wind forecast unavailable, treated as calm; "
-    if inputs.cloud_data_available:
+    if not params.enable_solar_input:
+        reason += "solar input disabled"
+    elif inputs.cloud_data_available:
         reason += f"sun {solar_effect * 100:.0f}% → {sun_adjustment_c:+.1f}°C"
     else:
         reason += f"cloud/sun forecast unavailable, assumed clear sky → {sun_adjustment_c:+.1f}°C"
@@ -458,7 +486,11 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         if price_flat_day:
             reason += ", flat day → no price action"
         if taper < 1.0:
-            reason += f", cold-taper ×{taper:.2f}"
+            taper_source = (
+                "recovery-taper" if params.cold_taper_override is not None
+                else "cold-taper"
+            )
+            reason += f", {taper_source} ×{taper:.2f}"
         if precharge_active:
             reason += (
                 f", pre-charging (cheap) ahead of spike in {upcoming_spike_in_min:.0f} min"
