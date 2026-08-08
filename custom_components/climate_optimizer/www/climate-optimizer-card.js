@@ -8,6 +8,11 @@
 // automatically via the frontend entity registry (falling back to entity_id
 // suffix matching if the registry lookup isn't available).
 //
+// Layout mirrors the "Shared: / Heuristic: / Learned:" entity-name prefixes
+// (see sensor.py): the two models are kept in separate, labelled sections so
+// it is never ambiguous which one a number came from, and the section notes
+// say which one is actually in the control path.
+//
 // Plain custom element (no Lit/build step) so it ships as a single static
 // file with zero bundling, matching how HACS-distributed cards are normally
 // authored.
@@ -16,6 +21,12 @@ const FIELDS = [
   // Ordered longest-suffix-first: matching is "does entity_id end with this",
   // so a more specific suffix (e.g. compensated_outdoor_temperature) must be
   // tried before a shorter one it also happens to end with (outdoor_temperature).
+  //
+  // Suffixes deliberately exclude the name prefix. Existing installs keep the
+  // entity_ids they were first registered with, so on those the id has no
+  // prefix at all, while a fresh install gets e.g.
+  // sensor.<zone>_learned_rc_model_heat_pump_gain. Names were only ever
+  // prefixed, never reworded, so an endsWith match still covers both.
   { key: "compensated_outdoor_temperature", suffix: "compensated_outdoor_temperature", label: "Compensated outdoor temp", kind: "temp", hero: true },
   { key: "indoor_temperature_error", suffix: "indoor_temperature_error", label: "Indoor temp error", kind: "temp" },
   { key: "indoor_temperature", suffix: "indoor_temperature", label: "Indoor temp", kind: "temp" },
@@ -29,6 +40,9 @@ const FIELDS = [
   { key: "rc_wind_gain", suffix: "rc_model_wind_gain", label: "RC wind gain", kind: "coeff" },
   { key: "rc_model_confidence", suffix: "rc_model_confidence", label: "RC confidence", kind: "percent" },
   { key: "rc_prediction_error", suffix: "rc_model_prediction_error", label: "RC prediction error", kind: "temp" },
+  { key: "autotune_blend", suffix: "auto_tune_blend", label: "Auto-tune blend", kind: "percent" },
+  { key: "autotune_effective_k_indoor", suffix: "auto_tune_effective_k_indoor", label: "Effective k_indoor", kind: "coeff" },
+  { key: "tuning_mode", suffix: "tuning_mode", label: "Tuning mode", kind: "tier" },
   { key: "mpc_recommended_delta", suffix: "mpc_recommended_compensation_delta", label: "MPC recommended delta", kind: "temp" },
   { key: "mpc_status", suffix: "mpc_status", label: "MPC status", kind: "mpc_status" },
   { key: "mpc_projected_savings", suffix: "mpc_projected_savings", label: "MPC projected savings", kind: "coeff" },
@@ -37,6 +51,19 @@ const FIELDS = [
   { key: "indoor_target_temperature", suffix: "indoor_target_temperature", label: "Indoor target", kind: "temp" },
   { key: "price_comfort_tier", suffix: "price_comfort_tier", label: "Price comfort tier", kind: "tier" },
 ].sort((a, b) => b.suffix.length - a.suffix.length);
+
+// The heuristic's own per-term breakdown lives only in the main sensor's
+// attributes, never on a sensor of its own. Surfaced here so the "Heuristic"
+// section shows what that model is actually doing rather than a single tile —
+// otherwise the card would attribute almost everything to the learned model
+// purely because that side happens to have more entities.
+const HEURISTIC_TERMS = [
+  { attr: "indoor_adjustment_c", label: "Indoor term" },
+  { attr: "wind_adjustment_c", label: "Wind term" },
+  { attr: "sun_adjustment_c", label: "Sun term" },
+  { attr: "price_adjustment_c", label: "Price term" },
+  { attr: "total_adjustment_c", label: "Total adjustment" },
+];
 
 const STATUS_COLOR = {
   ok: "var(--success-color, #4caf50)",
@@ -137,10 +164,14 @@ class ClimateOptimizerCard extends HTMLElement {
     this._hass = hass;
     if (!this._config) return;
     const ids = this._discoverEntityIds(hass);
+    // last_updated, not last_changed: several tiles (the heuristic's per-term
+    // breakdown, the MPC trajectory) are read from attributes, which move
+    // without the state string changing. Re-rendering once per coordinator
+    // cycle is cheap; showing a stale breakdown is not.
     const sig = ids
       .map((id) => {
         const s = hass.states[id];
-        return s ? `${id}:${s.state}:${s.last_changed}` : `${id}:x`;
+        return s ? `${id}:${s.state}:${s.last_updated}` : `${id}:x`;
       })
       .join("|");
     if (sig === this._lastSig) return;
@@ -210,19 +241,31 @@ class ClimateOptimizerCard extends HTMLElement {
 
           <div class="hero">
             <span class="hero-value">${heroValue}<span class="hero-unit">°C</span></span>
-            <span class="hero-label">compensated outdoor temperature</span>
+            <span class="hero-label">compensated outdoor temperature — the only published output</span>
           </div>
 
+          <div class="section-title">Shared <span class="section-note">(inputs and health — same for both models)</span></div>
           <div class="stat-grid">
-            ${statRow(["indoor_temperature", "outdoor_temperature", "indoor_temperature_error", "price_shift_applied", "power_draw", "indoor_target_temperature"])}
+            ${statRow(["indoor_temperature", "outdoor_temperature", "indoor_temperature_error", "indoor_target_temperature", "power_draw"])}
           </div>
 
-          <div class="section-title">RC thermal model <span class="section-note">(Phase 2, shadow mode)</span></div>
+          <div class="section-title">Heuristic <span class="section-note">(Phase 1 — this is what drives the output)</span></div>
+          <div class="stat-grid">
+            ${statRow(["price_shift_applied"])}
+            ${this._heuristicTermTiles(hero)}
+          </div>
+
+          <div class="section-title">Learned · RC thermal model <span class="section-note">(Phase 2, shadow mode)</span></div>
           <div class="stat-grid">
             ${statRow(["rc_thermal_time_constant", "rc_model_confidence", "rc_heat_pump_gain", "rc_solar_gain", "rc_wind_gain", "rc_prediction_error"])}
           </div>
 
-          <div class="section-title">MPC planner <span class="section-note">(Phase 3, advisory only)</span></div>
+          <div class="section-title">Learned · auto-tune <span class="section-note">(Phase 4 — reaches the heuristic's coefficients, but only in Auto mode)</span></div>
+          <div class="stat-grid">
+            ${statRow(["tuning_mode", "autotune_blend", "autotune_effective_k_indoor"])}
+          </div>
+
+          <div class="section-title">Learned · MPC planner <span class="section-note">(Phase 3, advisory only)</span></div>
           <div class="stat-grid">
             ${statRow(["mpc_recommended_delta", "mpc_status", "mpc_projected_savings", "mpc_planned_next_temperature"])}
           </div>
@@ -254,6 +297,24 @@ class ClimateOptimizerCard extends HTMLElement {
       value = esc(raw);
     }
     return `<div class="stat"><span class="stat-label">${esc(field.label)}</span><span class="stat-value">${value}</span></div>`;
+  }
+
+  // Per-term breakdown of the heuristic's recommendation, read off the main
+  // sensor's attributes. These are always the *recommendation*: while the
+  // activation switch is off they are computed but not applied, so the tiles
+  // are marked as such rather than silently implying the house is being driven
+  // by them.
+  _heuristicTermTiles(hero) {
+    if (!hero) return "";
+    const attrs = hero.state.attributes || {};
+    const suffix = attrs.active === false ? " (rec.)" : "";
+    return HEURISTIC_TERMS
+      .filter(({ attr }) => Number.isFinite(Number(attrs[attr])))
+      .map(({ attr, label }) => (
+        `<div class="stat"><span class="stat-label">${esc(label + suffix)}</span>` +
+        `<span class="stat-value">${fmtNumber(Number(attrs[attr]), 2)} °C</span></div>`
+      ))
+      .join("");
   }
 
   _setContent(html) {

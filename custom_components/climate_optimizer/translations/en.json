@@ -148,57 +148,57 @@
         "name": "Compensated outdoor temperature"
       },
       "indoor_temperature": {
-        "name": "Indoor temperature"
+        "name": "Shared: indoor temperature"
       },
       "outdoor_temperature": {
-        "name": "Outdoor temperature"
+        "name": "Shared: outdoor temperature"
       },
       "indoor_temperature_error": {
-        "name": "Indoor temperature error"
-      },
-      "price_shift_applied": {
-        "name": "Price shift applied"
+        "name": "Shared: indoor temperature error"
       },
       "power_draw": {
-        "name": "Power draw"
+        "name": "Shared: power draw"
       },
       "status": {
-        "name": "Status",
+        "name": "Shared: status",
         "state": {
           "ok": "OK",
           "degraded": "Degraded",
           "error": "Error"
         }
       },
+      "price_shift_applied": {
+        "name": "Heuristic: price shift applied"
+      },
       "rc_thermal_time_constant": {
-        "name": "RC model thermal time constant"
+        "name": "Learned: RC model thermal time constant"
       },
       "rc_heat_pump_gain": {
-        "name": "RC model heat pump gain"
+        "name": "Learned: RC model heat pump gain"
       },
       "rc_solar_gain": {
-        "name": "RC model solar gain"
+        "name": "Learned: RC model solar gain"
       },
       "rc_wind_gain": {
-        "name": "RC model wind gain"
+        "name": "Learned: RC model wind gain"
       },
       "rc_model_confidence": {
-        "name": "RC model confidence"
+        "name": "Learned: RC model confidence"
       },
       "rc_prediction_error": {
-        "name": "RC model prediction error"
+        "name": "Learned: RC model prediction error"
       },
       "autotune_blend": {
-        "name": "Auto-tune blend"
+        "name": "Learned: auto-tune blend"
       },
       "autotune_effective_k_indoor": {
-        "name": "Auto-tune effective k_indoor"
+        "name": "Learned: auto-tune effective k_indoor"
       },
       "mpc_recommended_delta": {
-        "name": "MPC recommended compensation delta"
+        "name": "Learned: MPC recommended compensation delta"
       },
       "mpc_status": {
-        "name": "MPC status",
+        "name": "Learned: MPC status",
         "state": {
           "ok": "OK",
           "not_trustworthy": "Not yet trustworthy",
@@ -209,10 +209,10 @@
         }
       },
       "mpc_projected_savings": {
-        "name": "MPC projected savings"
+        "name": "Learned: MPC projected savings"
       },
       "mpc_planned_next_temperature": {
-        "name": "MPC planned next indoor temperature"
+        "name": "Learned: MPC planned next indoor temperature"
       }
     },
     "switch": {

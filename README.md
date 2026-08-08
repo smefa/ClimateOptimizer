@@ -30,7 +30,7 @@ Everything is configured from the Home Assistant UI — no YAML.
 
 ### Activation switch (learn mode by default)
 
-Each zone also gets a `switch.<name>_active` entity. **It defaults to off** —
+Each zone also gets a `switch.<name>_compensation_active` entity. **It defaults to off** —
 in this "learn mode" state, the sensor publishes the raw outdoor temperature
 unmodified (no compensation applied at all), while the heuristic (and the RC
 shadow model, below) keep computing normally in the background. The
@@ -56,9 +56,30 @@ oscillate on some houses while it does. The direction of any correction is
 always right (negative feedback toward your indoor target); only the magnitude
 is uncertain before calibration.
 
+### Entity naming: telling the two models apart
+
+Two models run side by side here, and on a device page the Diagnostic section
+is one flat list — so entity names carry a prefix saying which model the
+number belongs to:
+
+| Prefix | Meaning |
+| --- | --- |
+| *(none)* | `sensor.<name>_compensated_outdoor_temperature`, the single published output. Not attributed to either model: the heuristic pipeline always produces it, and the learned model only reaches it indirectly, by retuning that pipeline's coefficients in Auto mode. |
+| **Shared:** | Model-agnostic inputs and health — indoor/outdoor temperature, indoor temperature error, power draw, status. The same numbers whichever model is driving. |
+| **Heuristic:** | The hand-tuned rule-based controller of Phase 1 below. This is the one in the control path. Its full per-term breakdown lives in the main sensor's attributes (`indoor_adjustment_c`, `wind_adjustment_c`, `sun_adjustment_c`, `price_adjustment_c`, `total_adjustment_c`). |
+| **Learned:** | The self-learning model — the RC estimator (Phase 2), the auto-tuner built on it (Phase 4) and the MPC planner (Phase 3). Of these, only the auto-tuner can influence the output, and only when the tuning mode is Auto; the rest is shadow/advisory. |
+
+The prefix is part of the entity's *name*, so it also lands in the entity_id
+of a fresh install (`sensor.<name>_learned_rc_model_confidence`). **Existing
+installs keep the entity_ids they were first registered with** — Home
+Assistant never rewrites an entity_id on a rename — so on an upgraded instance
+the displayed names gain prefixes while automations and dashboards keep
+working untouched. Entity_ids written out below use the new form; drop the
+prefix to get the pre-upgrade one.
+
 ### Status sensor
 
-`sensor.<name>_status` reports `ok`, `degraded`, or `error`, with attributes
+`sensor.<name>_shared_status` reports `ok`, `degraded`, or `error`, with attributes
 breaking down each source (`outdoor_sensor_ok`, `indoor_sensor_ok`,
 `wind_forecast_ok`, `cloud_sun_forecast_ok`, `price_ok` if configured,
 `last_error`). `error` means the outdoor sensor (the one required source) is
@@ -141,20 +162,26 @@ It's a diagnostic/demo card, not a polished production widget: it exists to
 prove every sensor/number/switch/select a zone exposes is reachable from a
 dashboard, and to make the Phase 2/3 shadow-mode output (RC model params, the
 MPC plan and its predicted trajectory) inspectable at a glance without digging
-through entity attributes. Add it to a dashboard with:
+through entity attributes. It is laid out in the same groups as the entity
+name prefixes above — *Shared*, *Heuristic*, then *Learned* split into its RC /
+auto-tune / MPC parts — so the two models never share a row. The Heuristic
+group additionally unpacks that model's per-term breakdown out of the main
+sensor's attributes, since those terms have no sensors of their own; while the
+activation switch is off they are labelled `(rec.)`, because they are computed
+but not applied. Add it to a dashboard with:
 
 ```yaml
 type: custom:climate-optimizer-card
-entity: sensor.<name>_status
+entity: sensor.<name>_shared_status
 ```
 
 Any single entity belonging to the zone works — the card discovers the rest of
 that zone's entities itself via the frontend entity registry, so it stays
-correct even if you rename entities, and shows a `Feature test: N/20 known
-ClimateOptimizer entities discovered` line as a self-check. All 20 entities
+correct even if you rename entities, and shows a `Feature test: N/23 known
+ClimateOptimizer entities discovered` line as a self-check. All 23 entities
 exist regardless of configuration (e.g. the wind/power sensors just read
 unavailable or pinned when their optional source isn't set up), so this
-should normally read 20/20; a lower count means the card couldn't reach the
+should normally read 23/23; a lower count means the card couldn't reach the
 frontend entity registry and fell back to showing just the one configured
 entity.
 
@@ -243,7 +270,7 @@ and it diverges only as the model earns it.
 
 ### Comparing before committing
 
-The derivation runs in **both** modes. `sensor.*_auto_tune_blend` reports the
+The derivation runs in **both** modes. `sensor.*_learned_auto_tune_blend` reports the
 blend weight as a percentage, and its attributes carry the full side-by-side —
 every manual value, its derived counterpart, and the value actually in force.
 In Manual mode those derived figures are purely advisory, so you can watch them
@@ -259,8 +286,8 @@ output.
 
 Three layers, answering different questions:
 
-**Live sensors** — `sensor.*_auto_tune_blend` carries the full side-by-side in
-its attributes, and `sensor.*_auto_tune_effective_k_indoor` is a first-class
+**Live sensors** — `sensor.*_learned_auto_tune_blend` carries the full side-by-side in
+its attributes, and `sensor.*_learned_auto_tune_effective_k_indoor` is a first-class
 sensor so the loop gain can be graphed directly. That second one is the number
 to watch: it's inversely proportional to the estimated heat-pump gain, so it's
 exactly what moves across a season on a non-linear curve, and misbehaving
@@ -384,7 +411,7 @@ design.
 
 For houses expected to be genuinely wind-sensitive — old, leaky, exposed —
 enable `enable_wind_rc` on the Advanced page to add an estimated wind parameter,
-`sensor.<name>_rc_model_wind_gain`. This is separate from, and gated behind, the
+`sensor.<name>_learned_rc_model_wind_gain`. This is separate from, and gated behind, the
 wind input toggle on the Sensors page: that one says "wind is available and worth
 compensating for", this one opts into the statistically riskier business of
 *estimating* a wind coefficient. It's off by default because for a
@@ -415,7 +442,8 @@ whole plan every cycle with the latest forecasts and only ever surfaces the
 
 **It is advisory only.** Exactly like the RC model, it never influences
 `compensated_outdoor_temp_c` — the heuristic pipeline gated by
-`switch.<name>_active` remains the only thing that actually controls anything.
+`switch.<name>_compensation_active` remains the only thing that actually
+controls anything.
 The MPC planner exists so its recommendations can be observed and evaluated
 against reality over time, as groundwork before anyone trusts it to run heating.
 
@@ -453,7 +481,7 @@ underlying model isn't.
 
 ### Sensors
 
-- `sensor.<name>_mpc_recommended_compensation_delta` — the recommended
+- `sensor.<name>_learned_mpc_recommended_compensation_delta` — the recommended
   first-step delta. Its attributes carry the whole plan: the `reason` string,
   the `binding_constraint`, projected cost/savings, the predicted
   indoor-temperature `predicted_trajectory`, the full per-step `plan`, the
@@ -461,12 +489,12 @@ underlying model isn't.
   solar, wind if enabled) the plan was actually computed from this cycle — so
   you can troubleshoot *why* a plan looks the way it does. (The live RC gain /
   tau / solar / wind sensors from Phase 2 track the same values continuously.)
-- `sensor.<name>_mpc_status` — `ok`, `not_trustworthy`, `infeasible`,
+- `sensor.<name>_learned_mpc_status` — `ok`, `not_trustworthy`, `infeasible`,
   `no_forecast`, `no_data`, or `misconfigured`, with `trustworthy`,
   `binding_constraint` and forecast-coverage details in attributes.
-- `sensor.<name>_mpc_projected_savings` — projected horizon savings vs the
+- `sensor.<name>_learned_mpc_projected_savings` — projected horizon savings vs the
   hold-target baseline, in relative proxy units.
-- `sensor.<name>_mpc_planned_next_indoor_temperature` — the indoor temperature
+- `sensor.<name>_learned_mpc_planned_next_indoor_temperature` — the indoor temperature
   the plan predicts at the end of the first step.
 
 ### Options
@@ -504,7 +532,7 @@ purges history by default (commonly ~10 days) and its long-term statistics
 only keep hourly aggregates — too coarse to properly re-fit the RC model or
 backtest an MPC change later. With this on, real history survives and can be
 replayed offline through a candidate model change without waiting for new
-live data. The resolved file path is shown on `sensor.<name>_status`'s
+live data. The resolved file path is shown on `sensor.<name>_shared_status`'s
 `data_log_path` attribute whenever logging is on.
 
 Once the active file reaches 10 MB it's rotated: gzipped to a timestamped
@@ -515,7 +543,7 @@ Python) reads them directly as JSONL.
 
 If an optional heat-pump power sensor is configured (Configure → "Heat pump
 power sensor"), each logged record also gets `power_w` (the raw reading,
-echoed live on `sensor.<name>_power_draw`) and a coarse `cycle_energy_kwh` /
+echoed live on `sensor.<name>_shared_power_draw`) and a coarse `cycle_energy_kwh` /
 `cycle_cost` estimate (power held constant since the previous logged cycle,
 times the current price) — enough to compute a real cost trend offline,
 instead of MPC's relative proxy-unit "savings" figure. **Important:** on many
