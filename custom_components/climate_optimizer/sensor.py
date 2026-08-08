@@ -123,6 +123,14 @@ class CompensatedOutdoorTempSensor(ClimateOptimizerEntity, SensorEntity):
         attrs = asdict(result)
         recommended = attrs.pop("compensated_outdoor_temp_c")
         attrs["recommended_compensated_outdoor_temp_c"] = recommended
+        # The bottom line of the per-term breakdown: what the recommendation
+        # moves the outdoor reading by in total. Taken from the published value
+        # rather than by summing the *_adjustment_c terms, so it reflects the
+        # output sanity clamp when that bites. Like the individual terms it is
+        # the *recommendation*; nothing is applied while active is False.
+        attrs["total_adjustment_c"] = round(
+            recommended - result.raw_outdoor_temp_c, 2
+        )
         attrs["active"] = self.coordinator.is_active
         return attrs
 

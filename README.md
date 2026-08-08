@@ -171,8 +171,10 @@ compensated_outdoor_temp = raw_outdoor_temp
 All coefficients, comfort min/max bounds, and price thresholds are adjustable
 in the options flow, which is organised as a menu of focused pages (Sensors and
 inputs / Comfort / Tuning / Price and savings / Output push / Advanced). Each
-page saves independently. The sensor's attributes include a per-term breakdown
-and a plain-language `reason` string so the output is always explainable.
+page saves independently. The sensor's attributes include a per-term breakdown,
+a `total_adjustment_c` summing it up (the recommended shift from the raw
+outdoor reading, after the output sanity clamp), and a plain-language `reason`
+string so the output is always explainable.
 
 This is intentionally a simple, transparent heuristic, not a black-box model.
 
