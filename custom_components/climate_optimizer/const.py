@@ -125,7 +125,7 @@ DEFAULT_ENABLE_WIND_INPUT = True
 # bump it whenever the JS file changes so browsers pick up the new file
 # instead of serving a stale cached copy.
 FRONTEND_CARD_URL = "/climate_optimizer/climate-optimizer-card.js"
-FRONTEND_JS_VERSION = "1"
+FRONTEND_JS_VERSION = "2"
 # MPC defaults. A 24 h horizon spans a full day-ahead price cycle (Nordpool
 # publishes tomorrow's prices ~13:00 local, so most of the day a 24 h horizon
 # is fully covered by real data). 8 degC of heating authority matches the

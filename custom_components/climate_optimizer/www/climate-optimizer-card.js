@@ -8,10 +8,10 @@
 // automatically via the frontend entity registry (falling back to entity_id
 // suffix matching if the registry lookup isn't available).
 //
-// Layout mirrors the "Shared: / Heuristic: / Learned:" entity-name prefixes
-// (see sensor.py): the two models are kept in separate, labelled sections so
-// it is never ambiguous which one a number came from, and the section notes
-// say which one is actually in the control path.
+// Layout mirrors the "Shared: / Control: / Auto-tune: / MPC:" entity-name
+// prefixes (see sensor.py), so a number's section on the card and its name
+// on the device page always agree, and the section notes say which group can
+// actually reach the output.
 //
 // Plain custom element (no Lit/build step) so it ships as a single static
 // file with zero bundling, matching how HACS-distributed cards are normally
@@ -25,7 +25,7 @@ const FIELDS = [
   // Suffixes deliberately exclude the name prefix. Existing installs keep the
   // entity_ids they were first registered with, so on those the id has no
   // prefix at all, while a fresh install gets e.g.
-  // sensor.<zone>_learned_rc_model_heat_pump_gain. Names were only ever
+  // sensor.<zone>_auto_tune_rc_model_heat_pump_gain. Names were only ever
   // prefixed, never reworded, so an endsWith match still covers both.
   { key: "compensated_outdoor_temperature", suffix: "compensated_outdoor_temperature", label: "Compensated outdoor temp", kind: "temp", hero: true },
   { key: "indoor_temperature_error", suffix: "indoor_temperature_error", label: "Indoor temp error", kind: "temp" },
@@ -52,12 +52,12 @@ const FIELDS = [
   { key: "price_comfort_tier", suffix: "price_comfort_tier", label: "Price comfort tier", kind: "tier" },
 ].sort((a, b) => b.suffix.length - a.suffix.length);
 
-// The heuristic's own per-term breakdown lives only in the main sensor's
-// attributes, never on a sensor of its own. Surfaced here so the "Heuristic"
-// section shows what that model is actually doing rather than a single tile —
-// otherwise the card would attribute almost everything to the learned model
-// purely because that side happens to have more entities.
-const HEURISTIC_TERMS = [
+// The control law's per-term breakdown lives only in the main sensor's
+// attributes, never on a sensor of its own. Surfaced here so the "Control"
+// section shows what is actually being applied rather than a single tile —
+// otherwise the card would look as though almost everything happens in
+// auto-tune, purely because that side has more entities.
+const CONTROL_TERMS = [
   { attr: "indoor_adjustment_c", label: "Indoor term" },
   { attr: "wind_adjustment_c", label: "Wind term" },
   { attr: "sun_adjustment_c", label: "Sun term" },
@@ -244,28 +244,28 @@ class ClimateOptimizerCard extends HTMLElement {
             <span class="hero-label">compensated outdoor temperature — the only published output</span>
           </div>
 
-          <div class="section-title">Shared <span class="section-note">(inputs and health — same for both models)</span></div>
+          <div class="section-title">Shared <span class="section-note">(inputs and health — identical in either tuning mode)</span></div>
           <div class="stat-grid">
             ${statRow(["indoor_temperature", "outdoor_temperature", "indoor_temperature_error", "indoor_target_temperature", "power_draw"])}
           </div>
 
-          <div class="section-title">Heuristic <span class="section-note">(Phase 1 — this is what drives the output)</span></div>
+          <div class="section-title">Control <span class="section-note">(what is actually being applied, in either mode)</span></div>
           <div class="stat-grid">
             ${statRow(["price_shift_applied"])}
-            ${this._heuristicTermTiles(hero)}
+            ${this._controlTermTiles(hero)}
           </div>
 
-          <div class="section-title">Learned · RC thermal model <span class="section-note">(Phase 2, shadow mode)</span></div>
+          <div class="section-title">Auto-tune · learned house model <span class="section-note">(the fit the coefficients are derived from)</span></div>
           <div class="stat-grid">
             ${statRow(["rc_thermal_time_constant", "rc_model_confidence", "rc_heat_pump_gain", "rc_solar_gain", "rc_wind_gain", "rc_prediction_error"])}
           </div>
 
-          <div class="section-title">Learned · auto-tune <span class="section-note">(Phase 4 — reaches the heuristic's coefficients, but only in Auto mode)</span></div>
+          <div class="section-title">Auto-tune · derived coefficients <span class="section-note">(the only thing here that can reach the output, and only in Auto mode)</span></div>
           <div class="stat-grid">
             ${statRow(["tuning_mode", "autotune_blend", "autotune_effective_k_indoor"])}
           </div>
 
-          <div class="section-title">Learned · MPC planner <span class="section-note">(Phase 3, advisory only)</span></div>
+          <div class="section-title">MPC planner <span class="section-note">(advisory only — tunes nothing, drives nothing)</span></div>
           <div class="stat-grid">
             ${statRow(["mpc_recommended_delta", "mpc_status", "mpc_projected_savings", "mpc_planned_next_temperature"])}
           </div>
@@ -299,16 +299,16 @@ class ClimateOptimizerCard extends HTMLElement {
     return `<div class="stat"><span class="stat-label">${esc(field.label)}</span><span class="stat-value">${value}</span></div>`;
   }
 
-  // Per-term breakdown of the heuristic's recommendation, read off the main
+  // Per-term breakdown of the control law's recommendation, read off the main
   // sensor's attributes. These are always the *recommendation*: while the
   // activation switch is off they are computed but not applied, so the tiles
   // are marked as such rather than silently implying the house is being driven
   // by them.
-  _heuristicTermTiles(hero) {
+  _controlTermTiles(hero) {
     if (!hero) return "";
     const attrs = hero.state.attributes || {};
     const suffix = attrs.active === false ? " (rec.)" : "";
-    return HEURISTIC_TERMS
+    return CONTROL_TERMS
       .filter(({ attr }) => Number.isFinite(Number(attrs[attr])))
       .map(({ attr, label }) => (
         `<div class="stat"><span class="stat-label">${esc(label + suffix)}</span>` +

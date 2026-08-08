@@ -14,7 +14,7 @@
           "heating_type": "Heating system"
         },
         "data_description": {
-          "heating_type": "How fast your heating can respond. Underfloor heating is buried in a slab and takes hours; radiators react much faster. Used to keep self-tuning from correcting faster than your system can physically deliver."
+          "heating_type": "How fast your heating can respond. Underfloor heating is buried in a slab and takes hours; radiators react much faster. Read only by auto-tune, to keep it from correcting faster than your system can physically deliver."
         }
       },
       "reconfigure": {
@@ -47,7 +47,7 @@
         "menu_options": {
           "sensors": "Sensors and inputs",
           "comfort": "Comfort",
-          "tuning": "Tuning",
+          "tuning": "Tuning and auto-tune",
           "price": "Price and savings",
           "output": "Output push",
           "advanced": "Advanced"
@@ -80,44 +80,63 @@
         }
       },
       "tuning": {
-        "title": "Tuning",
-        "description": "Manual uses the coefficients below. Auto derives them from your house's measured thermal behaviour instead, easing across as the model gathers evidence and falling back to these values whenever it isn't confident. The derived numbers are published on the auto-tune sensor in both modes, so you can compare before committing. To switch modes later, use the tuning-mode entity rather than this page.",
+        "title": "Tuning and auto-tune",
+        "description": "Which path sets the controller's coefficients. Manual uses the numbers below exactly as typed. Auto derives them from your house's measured thermal behaviour, starting from these same numbers and easing across as the model gathers evidence, falling back to them whenever it isn't confident. Nothing here is wasted in Auto mode: every coefficient below is still the seed and the safety net. The derived values are published on the auto-tune sensors in both modes, so you can compare for a season before committing. To switch modes later use the tuning-mode entity, not this page.",
         "data": {
           "tuning_mode": "Tuning mode (initial value only)",
-          "heating_type": "Heating system",
+          "heating_type": "Heating system (auto-tune only)",
           "k_indoor": "Indoor error coefficient (k_indoor)",
           "k_wind": "Wind coefficient (k_wind)",
           "k_sun": "Sun coefficient (k_sun)"
         },
         "data_description": {
-          "heating_type": "Keeps self-tuning from correcting faster than your emitters can physically respond.",
-          "k_indoor": "Starting point in Auto mode, and the fallback whenever the model isn't trusted."
+          "tuning_mode": "Seeds the tuning-mode entity on first run only, so this box does nothing on an existing install. Use the entity to change modes.",
+          "heating_type": "Read only by auto-tune, and ignored completely in Manual mode. Its one job is to stop the derived coefficients from correcting faster than your emitters can physically deliver.",
+          "k_indoor": "Manual: used exactly as typed. Auto: the starting point, and the fallback whenever the model is not trusted.",
+          "k_wind": "Manual: used exactly as typed. Auto: the starting point, and the fallback whenever the model is not trusted.",
+          "k_sun": "Manual: used exactly as typed. Auto: the starting point, and the fallback whenever the model is not trusted."
         }
       },
       "price": {
         "title": "Price and savings",
-        "description": "How hard to trade comfort for cheaper energy. The Low/Mid/High tier is a separate entity so it can be automated. With a day-ahead forecast the price band is taken from the day's own spread and the two thresholds below are only a fallback. In Auto mode the deep-cold taper is replaced by a recovery-feasibility calculation from the thermal model.",
+        "description": "How hard to trade comfort for cheaper energy. The Low/Mid/High tier is a separate entity so it can be automated. With a day-ahead forecast the price band is taken from the day's own spread and the two thresholds below are only a fallback. Four settings here are also read by auto-tune and are marked as such: the braking gain, and the three deep-cold taper knobs that Auto replaces with a recovery-feasibility calculation from the thermal model once that model is trusted.",
         "data": {
           "enable_price_compensation": "Lower target during expensive price periods",
           "k_price": "Price braking gain (k_price)",
           "precharge_max_boost_c": "Max pre-heat boost before a spike (High tier only; 0 disables)",
           "price_threshold_start": "Price where reduction starts (fallback)",
           "price_threshold_max": "Price where reduction is at its maximum (fallback)",
-          "cold_taper_start_c": "Deep-cold taper: full braking at/above this outdoor temp",
-          "cold_taper_full_c": "Deep-cold taper: minimum braking at/below this outdoor temp",
+          "cold_taper_start_c": "Deep-cold taper: full braking at or above this outdoor temp",
+          "cold_taper_full_c": "Deep-cold taper: minimum braking at or below this outdoor temp",
           "cold_taper_min_factor": "Deep-cold taper: braking fraction at the coldest end (0-1)"
+        },
+        "data_description": {
+          "k_price": "Manual: used exactly as typed. Auto: the starting point, and the fallback whenever the model is not trusted.",
+          "price_threshold_start": "Never auto-tuned. Only used at all when no day-ahead price forecast is available.",
+          "precharge_max_boost_c": "Never auto-tuned. This is a comfort preference, not a property of the house.",
+          "cold_taper_start_c": "Manual: these three draw the taper by hand. Auto: they seed it and stay the fallback, but once the model is trusted the taper is computed from whether the comfort sag is actually recoverable in your house.",
+          "cold_taper_full_c": "Manual: used as typed. Auto: seed and fallback only.",
+          "cold_taper_min_factor": "Manual: used as typed. Auto: seed and fallback only."
         }
       },
       "advanced": {
         "title": "Advanced",
-        "description": "Experimental model settings. The MPC planner is advisory only and never affects the published temperature.",
+        "description": "Settings for the learned thermal model that auto-tune sits on top of, and for the advisory MPC planner. MPC never affects the published temperature - with one exception, marked below, where an MPC setting is also read by auto-tune.",
         "data": {
           "enable_wind_rc": "Estimate wind sensitivity in the thermal model (only for leaky, exposed houses)",
           "rc_wind_reference_ms": "Reference wind speed for the wind model",
           "mpc_horizon_hours": "MPC planning horizon (advisory-only)",
-          "mpc_max_heating_delta_c": "MPC max heating authority (compensation delta)",
+          "mpc_max_heating_delta_c": "MPC max heating authority - also read by auto-tune",
           "mpc_min_confidence": "MPC minimum RC-model confidence to be trustworthy",
           "enable_data_logging": "Log data locally for offline model testing"
+        },
+        "data_description": {
+          "enable_wind_rc": "Feeds the thermal model, so in Auto mode it reaches the controller through auto-tune. Separate from the wind input on the Sensors page, which feeds the coefficient directly.",
+          "rc_wind_reference_ms": "Read by both the thermal model and auto-tune's derived wind coefficient.",
+          "mpc_horizon_hours": "Advisory only. Changing it cannot affect the published temperature.",
+          "mpc_max_heating_delta_c": "Despite the name, not MPC-only: auto-tune also reads it as the available heating authority in its recovery-feasibility taper, so in Auto mode it does influence price braking.",
+          "mpc_min_confidence": "Advisory only. Governs the reported trustworthiness flag and nothing else.",
+          "enable_data_logging": "Never affects control. Writes a local JSONL file for offline analysis."
         }
       },
       "output": {
@@ -168,37 +187,37 @@
         }
       },
       "price_shift_applied": {
-        "name": "Heuristic: price shift applied"
+        "name": "Control: price shift applied"
       },
       "rc_thermal_time_constant": {
-        "name": "Learned: RC model thermal time constant"
+        "name": "Auto-tune: RC model thermal time constant"
       },
       "rc_heat_pump_gain": {
-        "name": "Learned: RC model heat pump gain"
+        "name": "Auto-tune: RC model heat pump gain"
       },
       "rc_solar_gain": {
-        "name": "Learned: RC model solar gain"
+        "name": "Auto-tune: RC model solar gain"
       },
       "rc_wind_gain": {
-        "name": "Learned: RC model wind gain"
+        "name": "Auto-tune: RC model wind gain"
       },
       "rc_model_confidence": {
-        "name": "Learned: RC model confidence"
+        "name": "Auto-tune: RC model confidence"
       },
       "rc_prediction_error": {
-        "name": "Learned: RC model prediction error"
+        "name": "Auto-tune: RC model prediction error"
       },
       "autotune_blend": {
-        "name": "Learned: auto-tune blend"
+        "name": "Auto-tune: blend"
       },
       "autotune_effective_k_indoor": {
-        "name": "Learned: auto-tune effective k_indoor"
+        "name": "Auto-tune: effective k_indoor"
       },
       "mpc_recommended_delta": {
-        "name": "Learned: MPC recommended compensation delta"
+        "name": "MPC: recommended compensation delta"
       },
       "mpc_status": {
-        "name": "Learned: MPC status",
+        "name": "MPC: status",
         "state": {
           "ok": "OK",
           "not_trustworthy": "Not yet trustworthy",
@@ -209,10 +228,10 @@
         }
       },
       "mpc_projected_savings": {
-        "name": "Learned: MPC projected savings"
+        "name": "MPC: projected savings"
       },
       "mpc_planned_next_temperature": {
-        "name": "Learned: MPC planned next indoor temperature"
+        "name": "MPC: planned next indoor temperature"
       }
     },
     "switch": {

@@ -1,19 +1,28 @@
 """Sensor platform for ClimateOptimizer.
 
-Two models coexist here and they are easy to confuse on a device page, where
-the Diagnostic section is one flat alphabetical list. Entity names therefore
-carry a prefix naming which model the number belongs to:
+Several subsystems publish here and they are easy to confuse on a device page,
+where the Diagnostic section is one flat alphabetical list. Entity names
+therefore carry a prefix naming which subsystem the number belongs to:
 
-    (none)       the compensated outdoor temperature — the single output,
-                 produced by the heuristic pipeline in both tuning modes and
-                 so not attributable to either model on its own.
-    "Shared:"    model-agnostic inputs and health. Same numbers whichever
-                 model is driving.
-    "Heuristic:" the hand-tuned rule-based controller (Phase 1). This is the
-                 one in the control path.
-    "Learned:"   the self-learning model — RC estimator (Phase 2), auto-tuner
-                 (Phase 4) and MPC planner (Phase 3). Only the auto-tuner
-                 reaches the output, and only in Auto tuning mode.
+    (none)       the compensated outdoor temperature — the single output.
+    "Shared:"    raw inputs and health. Identical whichever tuning mode is
+                 selected.
+    "Control:"   live output of the control law. It runs in both tuning modes;
+                 what differs between them is only where its coefficients
+                 came from.
+    "Auto-tune:" the self-learning path — the RC estimator that fits the house,
+                 plus the derivation that turns that fit into the controller's
+                 coefficients. The only group that can reach the output, and
+                 only when the tuning mode is Auto.
+    "MPC:"       the receding-horizon planner. Its own group rather than part
+                 of Auto-tune because it tunes nothing: it reads the RC model
+                 and is advisory only, feeding neither the controller nor the
+                 derivation.
+
+There is deliberately no "Manual" or "legacy" group. The manual path has no
+live diagnostics to show — its coefficients are static config, so nothing
+about it moves. To compare the two paths, read the manual/derived/effective
+triples in `sensor.*_auto_tune_blend`'s attributes.
 
 The prefix lives in translations/en.json (`entity.sensor.<key>.name`), not in
 Python, so it is translatable and so renaming an entity in the UI still wins.
@@ -57,27 +66,22 @@ async def async_setup_entry(
     coordinator = entry.runtime_data
     async_add_entities(
         [
-            # The single product of the integration. Deliberately unprefixed:
-            # it is not attributable to one model, since the heuristic pipeline
-            # always produces it and the learned model only influences it
-            # indirectly (by retuning the heuristic's coefficients in Auto).
+            # The single output, unprefixed.
             CompensatedOutdoorTempSensor(coordinator, entry),
-            # "Shared: …" — raw inputs and health, model-agnostic. Reading
-            # these tells you nothing about either model, only what both were
-            # handed this cycle.
+            # "Shared: …" — raw inputs and health. Same numbers in either mode.
             IndoorTemperatureSensor(coordinator, entry),
             OutdoorTemperatureSensor(coordinator, entry),
             IndoorTemperatureErrorSensor(coordinator, entry),
             StatusSensor(coordinator, entry),
             PowerDrawSensor(coordinator, entry),
-            # "Heuristic: …" — the hand-tuned rule-based controller (Phase 1),
-            # the one actually in the control path.
+            # "Control: …" — the control law's live output. Runs in both tuning
+            # modes, so it belongs to neither; only the origin of the
+            # coefficients behind it differs.
             PriceShiftAppliedSensor(coordinator, entry),
-            # "Learned: …" — everything belonging to the self-learning model:
-            # the RC estimator that fits the house (Phase 2), the auto-tuner
-            # that turns that fit into controller coefficients (Phase 4), and
-            # the MPC planner built on top of it (Phase 3). Only the auto-tuner
-            # can reach the output, and only in Auto mode; the rest is shadow.
+            # "Auto-tune: …" — the self-learning path. The RC estimator fits the
+            # house; the derivation turns that fit into the controller's
+            # coefficients. The only group here that can reach the output, and
+            # only when the tuning mode is Auto.
             RCThermalTimeConstantSensor(coordinator, entry),
             RCHeatPumpGainSensor(coordinator, entry),
             RCSolarGainSensor(coordinator, entry),
@@ -86,6 +90,9 @@ async def async_setup_entry(
             RCPredictionErrorSensor(coordinator, entry),
             AutotuneBlendSensor(coordinator, entry),
             AutotuneEffectiveKIndoorSensor(coordinator, entry),
+            # "MPC: …" — advisory planner, kept out of the Auto-tune group
+            # because it tunes nothing: it reads the RC model and feeds
+            # neither the controller nor the derivation.
             MPCRecommendedDeltaSensor(coordinator, entry),
             MPCStatusSensor(coordinator, entry),
             MPCProjectedSavingsSensor(coordinator, entry),
@@ -108,10 +115,10 @@ class ClimateOptimizerEntity(CoordinatorEntity[ClimateOptimizerCoordinator]):
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.title,
             manufacturer="ClimateOptimizer",
-            # Names both models, since the device page shows entities from both
-            # and the prefix convention above only makes sense if you know
-            # there are two.
-            model="Heuristic v1 + learned RC model",
+            # Names both paths, since the device page shows entities from
+            # both and the prefix convention above only makes sense once you
+            # know the coefficients have two possible origins.
+            model="Heuristic v1 + auto-tune",
             entry_type=DeviceEntryType.SERVICE,
         )
 
@@ -262,8 +269,11 @@ class IndoorTemperatureErrorSensor(ClimateOptimizerEntity, SensorEntity):
 
 
 class PriceShiftAppliedSensor(ClimateOptimizerEntity, SensorEntity):
-    """Diagnostic (Heuristic): how much the comfort target is currently being
-    lowered for price by the rule-based controller."""
+    """Diagnostic (Control): how much the comfort target is currently being
+    lowered for price.
+
+    Computed in both tuning modes; only the k_price behind it differs.
+    """
 
     _attr_translation_key = "price_shift_applied"
     _attr_device_class = SensorDeviceClass.TEMPERATURE
@@ -350,7 +360,7 @@ class StatusSensor(ClimateOptimizerEntity, SensorEntity):
 
 
 class AutotuneBlendSensor(ClimateOptimizerEntity, SensorEntity):
-    """Diagnostic (Learned): how far the controller has moved from the hand-configured
+    """Diagnostic (Auto-tune): how far the controller has moved from the hand-configured
     coefficients toward the ones derived from the learned house model.
 
     The state is the blend weight as a percentage — 0% means "running purely on
@@ -414,7 +424,7 @@ class AutotuneBlendSensor(ClimateOptimizerEntity, SensorEntity):
 
 
 class AutotuneEffectiveKIndoorSensor(ClimateOptimizerEntity, SensorEntity):
-    """Diagnostic (Learned): the indoor-error coefficient actually driving the
+    """Diagnostic (Auto-tune): the indoor-error coefficient actually driving the
     controller.
 
     A first-class sensor rather than just another attribute on the blend sensor
@@ -450,7 +460,7 @@ class AutotuneEffectiveKIndoorSensor(ClimateOptimizerEntity, SensorEntity):
 
 
 class RCThermalTimeConstantSensor(ClimateOptimizerEntity, SensorEntity):
-    """Diagnostic (Learned, shadow model): estimated thermal time constant tau = R*C.
+    """Diagnostic (Auto-tune, shadow model): estimated thermal time constant tau = R*C.
 
     Also carries the full RC-estimator result as attributes (reason string,
     parameter estimates, accepted/rejected counts, covariance trace, etc.),
@@ -489,7 +499,7 @@ class RCThermalTimeConstantSensor(ClimateOptimizerEntity, SensorEntity):
 
 
 class RCHeatPumpGainSensor(ClimateOptimizerEntity, SensorEntity):
-    """Diagnostic (Learned, shadow model): estimated effective heat-pump gain.
+    """Diagnostic (Auto-tune, shadow model): estimated effective heat-pump gain.
 
     The C-normalised effect on indoor temperature per degC of compensation
     delta the heuristic applies. Dimensionless proxy, not a physical power.
@@ -522,7 +532,7 @@ class RCHeatPumpGainSensor(ClimateOptimizerEntity, SensorEntity):
 
 
 class RCSolarGainSensor(ClimateOptimizerEntity, SensorEntity):
-    """Diagnostic (Learned, shadow model): estimated solar gain coefficient."""
+    """Diagnostic (Auto-tune, shadow model): estimated solar gain coefficient."""
 
     _attr_translation_key = "rc_solar_gain"
     _attr_state_class = SensorStateClass.MEASUREMENT
@@ -541,7 +551,7 @@ class RCSolarGainSensor(ClimateOptimizerEntity, SensorEntity):
 
 
 class RCWindGainSensor(ClimateOptimizerEntity, SensorEntity):
-    """Diagnostic (Learned, shadow model): estimated wind-sensitivity coefficient.
+    """Diagnostic (Auto-tune, shadow model): estimated wind-sensitivity coefficient.
 
     Only meaningful when the optional wind term is enabled in options
     (advanced, off by default) — reads a permanently-pinned 0.0 otherwise,
@@ -567,7 +577,7 @@ class RCWindGainSensor(ClimateOptimizerEntity, SensorEntity):
 
 
 class RCModelConfidenceSensor(ClimateOptimizerEntity, SensorEntity):
-    """Diagnostic (Learned, shadow model): estimator maturity / confidence, 0-100%."""
+    """Diagnostic (Auto-tune, shadow model): estimator maturity / confidence, 0-100%."""
 
     _attr_translation_key = "rc_model_confidence"
     _attr_native_unit_of_measurement = PERCENTAGE
@@ -587,7 +597,7 @@ class RCModelConfidenceSensor(ClimateOptimizerEntity, SensorEntity):
 
 
 class RCPredictionErrorSensor(ClimateOptimizerEntity, SensorEntity):
-    """Diagnostic (Learned, shadow model): last-cycle indoor prediction error.
+    """Diagnostic (Auto-tune, shadow model): last-cycle indoor prediction error.
 
     Actual indoor temperature this cycle minus what the model predicted for it
     last cycle. The headline accuracy metric for the shadow estimator.
@@ -614,7 +624,7 @@ class RCPredictionErrorSensor(ClimateOptimizerEntity, SensorEntity):
 
 
 class MPCRecommendedDeltaSensor(ClimateOptimizerEntity, SensorEntity):
-    """Diagnostic (Learned / MPC, advisory-shadow only): the recommended next-step
+    """Diagnostic (MPC, advisory/shadow only): the recommended next-step
     compensation delta from the receding-horizon plan.
 
     ADVISORY ONLY — this never influences the compensated outdoor temperature;
@@ -656,7 +666,7 @@ class MPCRecommendedDeltaSensor(ClimateOptimizerEntity, SensorEntity):
 
 
 class MPCStatusSensor(ClimateOptimizerEntity, SensorEntity):
-    """Diagnostic (Learned / MPC, advisory only): the planner's status / trustworthiness.
+    """Diagnostic (MPC, advisory only): the planner's status / trustworthiness.
 
     `ok` = a trustworthy plan; `not_trustworthy` = a plan was computed but the
     underlying RC model isn't mature/plausible enough to rely on it yet;
@@ -705,7 +715,7 @@ class MPCStatusSensor(ClimateOptimizerEntity, SensorEntity):
 
 
 class MPCProjectedSavingsSensor(ClimateOptimizerEntity, SensorEntity):
-    """Diagnostic (Learned / MPC, advisory only): projected horizon cost savings vs a
+    """Diagnostic (MPC, advisory only): projected horizon cost savings vs a
     myopic hold-target baseline, in RELATIVE proxy units (price × degC), not a
     currency figure — the absolute thermal scale is unidentifiable, so this is
     meaningful for comparison/tracking, not as a money amount."""
@@ -740,7 +750,7 @@ class MPCProjectedSavingsSensor(ClimateOptimizerEntity, SensorEntity):
 
 
 class MPCPlannedNextTempSensor(ClimateOptimizerEntity, SensorEntity):
-    """Diagnostic (Learned / MPC, advisory only): the indoor temperature the plan
+    """Diagnostic (MPC, advisory only): the indoor temperature the plan
     predicts at the end of the first (applied) step."""
 
     _attr_translation_key = "mpc_planned_next_temperature"
