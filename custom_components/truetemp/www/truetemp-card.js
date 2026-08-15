@@ -412,12 +412,13 @@ class TrueTempCard extends HTMLElement {
                     padding:2px 7px; border-radius:3px; background: var(--secondary-background-color);
                     color: var(--secondary-text-color); }
         .co-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; }
-        /* auto-fit stretches a short row's cells to fill the leftover space;
-           auto-fill leaves those tracks empty so a 2-cell row stays the same
-           size as the fuller rows around it. */
-        .co-grid-compact { grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); }
+        /* Capped at 220px so a short row (e.g. the 2-cell price-now row) can't
+           stretch its cells far past the size of cells in the fuller rows
+           around it. */
+        .co-grid-compact { grid-template-columns:repeat(auto-fill,minmax(120px,220px)); }
         .co-cell { display:flex; flex-direction:column; gap:2px; padding:8px 10px; border-radius:4px;
-                   background: var(--secondary-background-color); }
+                   background: var(--secondary-background-color);
+                   border:1px solid var(--divider-color); }
         .co-cell span { font-size:11px; color: var(--secondary-text-color); }
         .co-cell b { font-size:16px; font-weight:500; font-variant-numeric: tabular-nums; }
         .co-cell.co-off b { font-size:12px; font-style:italic; color: var(--disabled-text-color, #999); }
