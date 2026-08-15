@@ -1,0 +1,216 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up TrueTemp",
+        "description": "TrueTemp works out what outdoor temperature to show your heat pump so the house actually lands on the temperature you asked for. It learns your house by itself — there is nothing to tune.",
+        "data": {
+          "name": "Name",
+          "indoor_temp_sensor": "Indoor temperature sensor",
+          "outdoor_temp_sensor": "Outdoor temperature sensor",
+          "weather_entity": "Weather forecast",
+          "nordpool_price_entity": "Electricity price",
+          "indoor_target_temperature": "Temperature you want indoors",
+          "heating_type": "How the heat gets into the room"
+        },
+        "data_description": {
+          "indoor_temp_sensor": "Pick a sensor in a room you actually live in, away from direct sun and draughts. Everything is learned from this reading, so a cupboard or a basement will teach it the wrong house.",
+          "outdoor_temp_sensor": "A real outdoor sensor if you have one — it is usually more accurate than a weather service estimate.",
+          "weather_entity": "Optional. Used for the sun and wind forecast. You can add or change this later.",
+          "nordpool_price_entity": "Optional. A sensor with today's and tomorrow's hourly prices, needed to save money on electricity. You can add or change this later.",
+          "indoor_target_temperature": "You can change this any time from the thermostat, by voice, or on a schedule.",
+          "heating_type": "Only used for the first few days. After that, TrueTemp has measured how quickly your house responds and stops relying on this answer."
+        }
+      },
+      "reconfigure": {
+        "title": "Change TrueTemp setup",
+        "description": "Changing the indoor sensor means learning starts again for the new room.",
+        "data": {
+          "name": "Name",
+          "indoor_temp_sensor": "Indoor temperature sensor",
+          "outdoor_temp_sensor": "Outdoor temperature sensor",
+          "weather_entity": "Weather forecast",
+          "nordpool_price_entity": "Electricity price",
+          "indoor_target_temperature": "Temperature you want indoors",
+          "heating_type": "How the heat gets into the room"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "That indoor sensor is already used by another TrueTemp zone.",
+      "reconfigure_successful": "TrueTemp setup updated."
+    }
+  },
+  "options": {
+    "error": {
+      "cannot_connect": "Could not reach that address. Check the name or IP, and that the device is switched on and on the same network.",
+      "already_configured": "That indoor sensor is already used by another TrueTemp zone."
+    },
+    "step": {
+      "init": {
+        "title": "TrueTemp",
+        "description": "Everything here is optional. TrueTemp works with nothing on this page filled in.",
+        "menu_options": {
+          "settings": "Settings",
+          "sources": "Sun, wind and price sensors",
+          "price": "Saving money on electricity",
+          "output": "Outgoing sensors"
+        }
+      },
+      "settings": {
+        "title": "Settings",
+        "description": "Changing the indoor sensor means learning starts again for the new room.",
+        "data": {
+          "indoor_temp_sensor": "Indoor temperature sensor",
+          "outdoor_temp_sensor": "Outdoor temperature sensor",
+          "heating_type": "How the heat gets into the room",
+          "enable_data_logging": "Keep a detailed local log"
+        },
+        "data_description": {
+          "indoor_temp_sensor": "Pick a sensor in a room you actually live in, away from direct sun and draughts. Everything is learned from this reading, so a cupboard or a basement will teach it the wrong house.",
+          "outdoor_temp_sensor": "A real outdoor sensor if you have one — it is usually more accurate than a weather service estimate.",
+          "heating_type": "Only used for the first few days. After that, TrueTemp has measured how quickly your house responds and stops relying on this answer.",
+          "enable_data_logging": "Writes one line per cycle to a file in your config folder. Nothing leaves your machine. Useful if you ever want to check how well it has been doing."
+        }
+      },
+      "sources": {
+        "title": "Sun, wind and price sensors",
+        "description": "Optional extras. Sun and wind let TrueTemp react before the house has started to drift; a price sensor lets it save money when electricity is expensive.",
+        "data": {
+          "weather_entity": "Weather forecast",
+          "nordpool_price_entity": "Electricity price",
+          "power_sensor": "Heat pump power meter",
+          "enable_solar_input": "Compensate for sunshine",
+          "enable_wind_input": "Compensate for wind"
+        },
+        "data_description": {
+          "weather_entity": "Only used for the sun and wind forecast. Not needed if both are switched off below.",
+          "nordpool_price_entity": "A sensor with today's and tomorrow's hourly prices. Without one, price saving does nothing.",
+          "power_sensor": "Never used to control anything — it just adds real energy and cost figures to the log. On most installs this meter also covers hot water, so it is not heating alone.",
+          "enable_solar_input": "Backs off a little when the sun is warming the house. Only switch this on if your indoor sensor is somewhere the sun actually reaches. A sensor in a basement, a north-facing room or a hallway never sees the solar gain, so this would push the temperature down for a warming that your sensor cannot confirm.",
+          "enable_wind_input": "Adds a little when wind is stripping heat out of the house. Leave this off unless you have an older, draughty house that you can feel getting colder in high wind. A reasonably sealed house barely responds to wind, and compensating for an effect that is not there just adds noise."
+        }
+      },
+      "price": {
+        "title": "Saving money on electricity",
+        "description": "When electricity is expensive, TrueTemp can let the house drift slightly cooler and make it up when prices fall. How far it will drift is set on the zone's Price saving control; how careful it is when it is properly cold is set on Cold caution.",
+        "data": {
+          "enable_price_compensation": "Save money when electricity is expensive",
+          "comfort_min_c": "Never let it get colder than"
+        },
+        "data_description": {
+          "enable_price_compensation": "Needs an electricity price sensor on the previous page.",
+          "comfort_min_c": "A hard floor. No amount of saving will take the house below this."
+        }
+      },
+      "output": {
+        "title": "Outgoing sensors",
+        "description": "By default TrueTemp only publishes a sensor and you wire that to your heat pump yourself. These options let it send the value out for you instead. Pick an output method below and the next page will ask for what it needs.",
+        "data": {
+          "output_mode": "Output method"
+        }
+      },
+      "output_spoof": {
+        "title": "Spoofing the outdoor sensor",
+        "description": "The two ways of doing this can be combined, used alone, or left both empty.",
+        "sections": {
+          "output_number_push": {
+            "name": "Send to a number entity",
+            "description": "For example number.nibe_ohmigo_temperature, if you already have your OhmOnWifi or Ohmigo device set up in Home Assistant."
+          },
+          "ohmonwifi_direct": {
+            "name": "Send straight to an OhmOnWifi device",
+            "description": "Talks to the device over your local network with no Home Assistant entity in between. Enter its name (usually ohmonwifiplus.local) or its IP address. This is checked when you save."
+          }
+        },
+        "data": {
+          "output_number_entity": "Existing MQTT Device",
+          "ohmonwifi_host": "OhmOnWIFI address"
+        }
+      },
+      "output_curve": {
+        "title": "The heat pump's own offset",
+        "description": "For pumps that let you set \"heat curve or outdoor temp offset\" directly, instead of faking the outdoor sensor.",
+        "data": {
+          "heat_curve_offset_entity": "Number or Input Number entity",
+          "heat_curve_offset_invert": "This pump's offset works the other way round"
+        },
+        "data_description": {
+          "heat_curve_offset_invert": "Leave off if a higher number on your pump means more heat, which is the case for most pumps. Switch on if it is the other way round for yours."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "compensated_outdoor_temperature": {
+        "name": "Compensated outdoor temperature"
+      },
+      "heat_pump_offset": {
+        "name": "Heat pump offset"
+      },
+      "learned_offset": {
+        "name": "Learned offset"
+      },
+      "status": {
+        "name": "Status",
+        "state": {
+          "ok": "OK",
+          "degraded": "Degraded",
+          "error": "Error"
+        }
+      }
+    },
+    "switch": {
+      "active": {
+        "name": "Compensation active"
+      }
+    },
+    "select": {
+      "price_comfort_tier": {
+        "name": "Price saving",
+        "state": {
+          "low": "Comfort first",
+          "mid": "Balanced",
+          "high": "Savings first"
+        }
+      },
+      "cold_caution": {
+        "name": "Cold caution",
+        "state": {
+          "low": "Keep saving in the cold",
+          "mid": "Balanced",
+          "high": "Comfort first in the cold"
+        }
+      }
+    },
+    "climate": {
+      "thermostat": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "low": "Comfort first",
+              "mid": "Balanced",
+              "high": "Savings first"
+            }
+          }
+        }
+      }
+    }
+  },
+  "selector": {
+    "heating_type": {
+      "options": {
+        "radiators": "Radiators",
+        "underfloor": "Underfloor heating",
+        "mixed": "Both radiators and underfloor"
+      }
+    },
+    "output_mode": {
+      "options": {
+        "outdoor_temp_spoof": "OhmOnWIFI hardware",
+        "heat_curve_offset": "Heat pump sensor offset"
+      }
+    }
+  }
+}

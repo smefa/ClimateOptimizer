@@ -1,0 +1,216 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Konfigurera TrueTemp",
+        "description": "TrueTemp räknar ut vilken utomhustemperatur din värmepump ska visas för att huset faktiskt ska landa på den temperatur du bett om. Den lär sig ditt hus av sig själv — det finns inget att ställa in.",
+        "data": {
+          "name": "Namn",
+          "indoor_temp_sensor": "Inomhustemperaturgivare",
+          "outdoor_temp_sensor": "Utomhustemperaturgivare",
+          "weather_entity": "Väderprognos",
+          "nordpool_price_entity": "Elpris",
+          "indoor_target_temperature": "Temperatur du vill ha inomhus",
+          "heating_type": "Hur värmen kommer in i rummet"
+        },
+        "data_description": {
+          "indoor_temp_sensor": "Välj en givare i ett rum du faktiskt vistas i, undan direkt sol och drag. Allt lärs in från denna avläsning, så ett skafferi eller en källare lär den fel hus.",
+          "outdoor_temp_sensor": "En riktig utomhusgivare om du har en — den är oftast mer exakt än en väderleksuppskattning.",
+          "weather_entity": "Valfritt. Används för sol- och vindprognosen. Du kan lägga till eller ändra detta senare.",
+          "nordpool_price_entity": "Valfritt. En givare med dagens och morgondagens timpriser, behövs för att spara pengar på el. Du kan lägga till eller ändra detta senare.",
+          "indoor_target_temperature": "Du kan ändra detta när som helst från termostaten, med röststyrning eller via ett schema.",
+          "heating_type": "Används bara de första dagarna. Efter det har TrueTemp mätt hur snabbt ditt hus reagerar och slutar förlita sig på detta svar."
+        }
+      },
+      "reconfigure": {
+        "title": "Ändra TrueTemp-inställningar",
+        "description": "Att byta inomhusgivare innebär att inlärningen börjar om för det nya rummet.",
+        "data": {
+          "name": "Namn",
+          "indoor_temp_sensor": "Inomhustemperaturgivare",
+          "outdoor_temp_sensor": "Utomhustemperaturgivare",
+          "weather_entity": "Väderprognos",
+          "nordpool_price_entity": "Elpris",
+          "indoor_target_temperature": "Temperatur du vill ha inomhus",
+          "heating_type": "Hur värmen kommer in i rummet"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Den inomhusgivaren används redan av en annan TrueTemp-zon.",
+      "reconfigure_successful": "TrueTemp-inställningarna har uppdaterats."
+    }
+  },
+  "options": {
+    "error": {
+      "cannot_connect": "Kunde inte nå den adressen. Kontrollera namnet eller IP-adressen, och att enheten är påslagen och på samma nätverk.",
+      "already_configured": "Den inomhusgivaren används redan av en annan TrueTemp-zon."
+    },
+    "step": {
+      "init": {
+        "title": "TrueTemp",
+        "description": "Allt här är valfritt. TrueTemp fungerar utan att något på denna sida är ifyllt.",
+        "menu_options": {
+          "settings": "Inställningar",
+          "sources": "Sol-, vind- och prisgivare",
+          "price": "Spara pengar på el",
+          "output": "Utgående givare"
+        }
+      },
+      "settings": {
+        "title": "Inställningar",
+        "description": "Att byta inomhusgivare innebär att inlärningen börjar om för det nya rummet.",
+        "data": {
+          "indoor_temp_sensor": "Inomhustemperaturgivare",
+          "outdoor_temp_sensor": "Utomhustemperaturgivare",
+          "heating_type": "Hur värmen kommer in i rummet",
+          "enable_data_logging": "Håll en detaljerad lokal logg"
+        },
+        "data_description": {
+          "indoor_temp_sensor": "Välj en givare i ett rum du faktiskt vistas i, undan direkt sol och drag. Allt lärs in från denna avläsning, så ett skafferi eller en källare lär den fel hus.",
+          "outdoor_temp_sensor": "En riktig utomhusgivare om du har en — den är oftast mer exakt än en väderleksuppskattning.",
+          "heating_type": "Används bara de första dagarna. Efter det har TrueTemp mätt hur snabbt ditt hus reagerar och slutar förlita sig på detta svar.",
+          "enable_data_logging": "Skriver en rad per cykel till en fil i din config-mapp. Inget lämnar din maskin. Användbart om du någon gång vill kontrollera hur väl den har presterat."
+        }
+      },
+      "sources": {
+        "title": "Sol-, vind- och prisgivare",
+        "description": "Valfria tillägg. Sol och vind låter TrueTemp reagera innan huset har börjat driva; en prisgivare låter den spara pengar när elen är dyr.",
+        "data": {
+          "weather_entity": "Väderprognos",
+          "nordpool_price_entity": "Elpris",
+          "power_sensor": "Eleffektmätare för värmepump",
+          "enable_solar_input": "Kompensera för solsken",
+          "enable_wind_input": "Kompensera för vind"
+        },
+        "data_description": {
+          "weather_entity": "Används bara för sol- och vindprognosen. Behövs inte om båda är avstängda nedan.",
+          "nordpool_price_entity": "En givare med dagens och morgondagens timpriser. Utan en gör prisbesparing ingenting.",
+          "power_sensor": "Används aldrig för att styra något — den lägger bara till verkliga energi- och kostnadssiffror i loggen. På de flesta installationer täcker denna mätare även varmvatten, så den avser inte enbart uppvärmning.",
+          "enable_solar_input": "Backar av lite när solen värmer huset. Slå bara på detta om din inomhusgivare sitter någonstans dit solen faktiskt når. En givare i en källare, ett norrvänt rum eller en hall ser aldrig solinstrålningen, så detta skulle sänka temperaturen för en uppvärmning som din givare inte kan bekräfta.",
+          "enable_wind_input": "Lägger till lite när vind drar ut värme ur huset. Låt detta vara avstängt om du inte har ett äldre, dragigt hus som du märker blir kallare i hård vind. Ett rimligt tätt hus reagerar knappt på vind, och att kompensera för en effekt som inte finns lägger bara till brus."
+        }
+      },
+      "price": {
+        "title": "Spara pengar på el",
+        "description": "När elen är dyr kan TrueTemp låta huset drifta något svalare och ta igen det när priserna sjunker. Hur mycket det får drifta ställs in på zonens reglage för prisbesparing; hur försiktig den är när det är riktigt kallt ställs in på Försiktighet vid stark kyla.",
+        "data": {
+          "enable_price_compensation": "Spara pengar när elen är dyr",
+          "comfort_min_c": "Låt det aldrig bli kallare än"
+        },
+        "data_description": {
+          "enable_price_compensation": "Kräver en elprisgivare på föregående sida.",
+          "comfort_min_c": "Ett hårt golv. Ingen besparing tar huset under detta."
+        }
+      },
+      "output": {
+        "title": "Utgående givare",
+        "description": "Som standard publicerar TrueTemp bara en givare och du kopplar den själv till din värmepump. Dessa alternativ låter den skicka ut värdet åt dig istället. Välj en utmetod nedan så frågar nästa sida efter det som behövs.",
+        "data": {
+          "output_mode": "Utmetod"
+        }
+      },
+      "output_spoof": {
+        "title": "Förfalska utomhusgivaren",
+        "description": "De två sätten kan kombineras, användas var för sig, eller lämnas båda tomma.",
+        "sections": {
+          "output_number_push": {
+            "name": "Skicka till en number-entitet",
+            "description": "Till exempel number.nibe_ohmigo_temperature, om du redan har din OhmOnWifi- eller Ohmigo-enhet uppsatt i Home Assistant."
+          },
+          "ohmonwifi_direct": {
+            "name": "Skicka direkt till en OhmOnWifi-enhet",
+            "description": "Pratar med enheten över ditt lokala nätverk utan någon Home Assistant-entitet emellan. Ange dess namn (vanligtvis ohmonwifiplus.local) eller dess IP-adress. Detta kontrolleras när du sparar."
+          }
+        },
+        "data": {
+          "output_number_entity": "Befintlig MQTT-enhet",
+          "ohmonwifi_host": "OhmOnWIFI-adress"
+        }
+      },
+      "output_curve": {
+        "title": "Värmepumpens egen offset",
+        "description": "För pumpar som låter dig ställa in \"värmekurva eller utomhustemperatur-offset\" direkt, istället för att förfalska utomhusgivaren.",
+        "data": {
+          "heat_curve_offset_entity": "Number- eller Input Number-entitet",
+          "heat_curve_offset_invert": "Denna pumps offset fungerar tvärtom"
+        },
+        "data_description": {
+          "heat_curve_offset_invert": "Lämna avstängt om ett högre värde på din pump betyder mer värme, vilket gäller för de flesta pumpar. Slå på om det är tvärtom för din."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "compensated_outdoor_temperature": {
+        "name": "Kompenserad utomhustemperatur"
+      },
+      "heat_pump_offset": {
+        "name": "Offset värmepump"
+      },
+      "learned_offset": {
+        "name": "Inlärd offset"
+      },
+      "status": {
+        "name": "Status",
+        "state": {
+          "ok": "OK",
+          "degraded": "Nedsatt",
+          "error": "Fel"
+        }
+      }
+    },
+    "switch": {
+      "active": {
+        "name": "Kompensation aktiv"
+      }
+    },
+    "select": {
+      "price_comfort_tier": {
+        "name": "Prisbesparing",
+        "state": {
+          "low": "Komfort först",
+          "mid": "Balanserad",
+          "high": "Besparing först"
+        }
+      },
+      "cold_caution": {
+        "name": "Försiktighet vid stark kyla",
+        "state": {
+          "low": "Fortsätt spara i kylan",
+          "mid": "Balanserad",
+          "high": "Komfort först i kylan"
+        }
+      }
+    },
+    "climate": {
+      "thermostat": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "low": "Komfort först",
+              "mid": "Balanserad",
+              "high": "Besparing först"
+            }
+          }
+        }
+      }
+    }
+  },
+  "selector": {
+    "heating_type": {
+      "options": {
+        "radiators": "Radiatorer",
+        "underfloor": "Golvvärme",
+        "mixed": "Både radiatorer och golvvärme"
+      }
+    },
+    "output_mode": {
+      "options": {
+        "outdoor_temp_spoof": "OhmOnWIFI-hårdvara",
+        "heat_curve_offset": "Värmepumpens sensor för offset"
+      }
+    }
+  }
+}

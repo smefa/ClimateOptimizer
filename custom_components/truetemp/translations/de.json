@@ -1,0 +1,216 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "TrueTemp einrichten",
+        "description": "TrueTemp berechnet, welche Außentemperatur deiner Wärmepumpe gemeldet werden muss, damit das Haus tatsächlich die gewünschte Temperatur erreicht. Es lernt dein Haus von selbst — es gibt nichts einzustellen.",
+        "data": {
+          "name": "Name",
+          "indoor_temp_sensor": "Innentemperatursensor",
+          "outdoor_temp_sensor": "Außentemperatursensor",
+          "weather_entity": "Wettervorhersage",
+          "nordpool_price_entity": "Strompreis",
+          "indoor_target_temperature": "Gewünschte Innentemperatur",
+          "heating_type": "Wie die Wärme in den Raum gelangt"
+        },
+        "data_description": {
+          "indoor_temp_sensor": "Wähle einen Sensor in einem Raum, in dem du dich wirklich aufhältst, fern von direkter Sonne und Zugluft. Alles wird aus diesem Messwert gelernt — eine Abstellkammer oder ein Keller würden dem System das falsche Haus beibringen.",
+          "outdoor_temp_sensor": "Ein echter Außensensor, falls vorhanden — er ist meist genauer als die Schätzung eines Wetterdienstes.",
+          "weather_entity": "Optional. Wird für die Sonnen- und Windvorhersage genutzt. Kann später hinzugefügt oder geändert werden.",
+          "nordpool_price_entity": "Optional. Ein Sensor mit den stündlichen Preisen für heute und morgen, nötig um Stromkosten zu sparen. Kann später hinzugefügt oder geändert werden.",
+          "indoor_target_temperature": "Kann jederzeit über das Thermostat, per Sprachbefehl oder per Zeitplan geändert werden.",
+          "heating_type": "Wird nur für die ersten Tage genutzt. Danach hat TrueTemp gemessen, wie schnell dein Haus reagiert, und verlässt sich nicht mehr auf diese Angabe."
+        }
+      },
+      "reconfigure": {
+        "title": "TrueTemp-Einrichtung ändern",
+        "description": "Beim Ändern des Innensensors beginnt das Lernen für den neuen Raum von vorne.",
+        "data": {
+          "name": "Name",
+          "indoor_temp_sensor": "Innentemperatursensor",
+          "outdoor_temp_sensor": "Außentemperatursensor",
+          "weather_entity": "Wettervorhersage",
+          "nordpool_price_entity": "Strompreis",
+          "indoor_target_temperature": "Gewünschte Innentemperatur",
+          "heating_type": "Wie die Wärme in den Raum gelangt"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Dieser Innensensor wird bereits von einer anderen TrueTemp-Zone verwendet.",
+      "reconfigure_successful": "TrueTemp-Einrichtung aktualisiert."
+    }
+  },
+  "options": {
+    "error": {
+      "cannot_connect": "Diese Adresse konnte nicht erreicht werden. Prüfe Name oder IP-Adresse und ob das Gerät eingeschaltet und im selben Netzwerk ist.",
+      "already_configured": "Dieser Innensensor wird bereits von einer anderen TrueTemp-Zone verwendet."
+    },
+    "step": {
+      "init": {
+        "title": "TrueTemp",
+        "description": "Alles hier ist optional. TrueTemp funktioniert auch, wenn auf dieser Seite nichts ausgefüllt wird.",
+        "menu_options": {
+          "settings": "Einstellungen",
+          "sources": "Sonne-, Wind- und Preissensoren",
+          "price": "Stromkosten sparen",
+          "output": "Ausgehende Sensoren"
+        }
+      },
+      "settings": {
+        "title": "Einstellungen",
+        "description": "Beim Ändern des Innensensors beginnt das Lernen für den neuen Raum von vorne.",
+        "data": {
+          "indoor_temp_sensor": "Innentemperatursensor",
+          "outdoor_temp_sensor": "Außentemperatursensor",
+          "heating_type": "Wie die Wärme in den Raum gelangt",
+          "enable_data_logging": "Detailliertes lokales Protokoll führen"
+        },
+        "data_description": {
+          "indoor_temp_sensor": "Wähle einen Sensor in einem Raum, in dem du dich wirklich aufhältst, fern von direkter Sonne und Zugluft. Alles wird aus diesem Messwert gelernt — eine Abstellkammer oder ein Keller würden dem System das falsche Haus beibringen.",
+          "outdoor_temp_sensor": "Ein echter Außensensor, falls vorhanden — er ist meist genauer als die Schätzung eines Wetterdienstes.",
+          "heating_type": "Wird nur für die ersten Tage genutzt. Danach hat TrueTemp gemessen, wie schnell dein Haus reagiert, und verlässt sich nicht mehr auf diese Angabe.",
+          "enable_data_logging": "Schreibt pro Zyklus eine Zeile in eine Datei in deinem Konfigurationsordner. Es verlässt nichts deinen Rechner. Nützlich, um zu prüfen, wie gut das System funktioniert hat."
+        }
+      },
+      "sources": {
+        "title": "Sonne-, Wind- und Preissensoren",
+        "description": "Optionale Zusatzfunktionen. Sonne und Wind lassen TrueTemp reagieren, bevor das Haus zu driften beginnt; ein Preissensor spart Geld, wenn Strom teuer ist.",
+        "data": {
+          "weather_entity": "Wettervorhersage",
+          "nordpool_price_entity": "Strompreis",
+          "power_sensor": "Leistungsmesser der Wärmepumpe",
+          "enable_solar_input": "Sonneneinstrahlung ausgleichen",
+          "enable_wind_input": "Wind ausgleichen"
+        },
+        "data_description": {
+          "weather_entity": "Wird nur für die Sonnen- und Windvorhersage genutzt. Nicht nötig, wenn beides unten ausgeschaltet ist.",
+          "nordpool_price_entity": "Ein Sensor mit den stündlichen Preisen für heute und morgen. Ohne ihn bewirkt die Preisersparnis nichts.",
+          "power_sensor": "Wird nie zur Steuerung genutzt — fügt dem Protokoll nur echte Energie- und Kostenwerte hinzu. Bei den meisten Installationen deckt dieser Zähler auch das Warmwasser mit ab, misst also nicht nur die Heizung allein.",
+          "enable_solar_input": "Reduziert die Heizleistung etwas, wenn die Sonne das Haus aufwärmt. Nur einschalten, wenn dein Innensensor an einer Stelle sitzt, die die Sonne tatsächlich erreicht. Ein Sensor im Keller, in einem nach Norden ausgerichteten Raum oder im Flur bekommt den solaren Wärmegewinn nie mit — das würde die Temperatur für eine Erwärmung senken, die dein Sensor nicht bestätigen kann.",
+          "enable_wind_input": "Erhöht die Heizleistung etwas, wenn Wind dem Haus Wärme entzieht. Lass dies ausgeschaltet, außer du hast ein älteres, zugiges Haus, bei dem du bei starkem Wind spürbar auskühlende Räume bemerkst. Ein einigermaßen gut abgedichtetes Haus reagiert kaum auf Wind, und ein Ausgleich für einen nicht vorhandenen Effekt fügt nur Störrauschen hinzu."
+        }
+      },
+      "price": {
+        "title": "Stromkosten sparen",
+        "description": "Wenn Strom teuer ist, kann TrueTemp das Haus etwas kühler werden lassen und es nachholen, wenn die Preise fallen. Wie stark es driften darf, wird über den Regler „Preisersparnis“ der Zone festgelegt; wie vorsichtig es bei richtiger Kälte ist, über „Kältevorsicht“.",
+        "data": {
+          "enable_price_compensation": "Geld sparen, wenn Strom teuer ist",
+          "comfort_min_c": "Nie kälter werden lassen als"
+        },
+        "data_description": {
+          "enable_price_compensation": "Benötigt einen Strompreissensor auf der vorherigen Seite.",
+          "comfort_min_c": "Eine feste Untergrenze. Keine Ersparnis wird das Haus unter diesen Wert bringen."
+        }
+      },
+      "output": {
+        "title": "Ausgehende Sensoren",
+        "description": "Standardmäßig veröffentlicht TrueTemp nur einen Sensor, den du selbst mit deiner Wärmepumpe verknüpfst. Diese Optionen lassen den Wert stattdessen automatisch ausgeben. Wähle unten eine Ausgabemethode, die nächste Seite fragt dann nach den benötigten Angaben.",
+        "data": {
+          "output_mode": "Ausgabemethode"
+        }
+      },
+      "output_spoof": {
+        "title": "Außensensor vortäuschen",
+        "description": "Die beiden Methoden können kombiniert, einzeln genutzt oder beide leer gelassen werden.",
+        "sections": {
+          "output_number_push": {
+            "name": "An eine Number-Entität senden",
+            "description": "Zum Beispiel number.nibe_ohmigo_temperature, falls bereits ein OhmOnWifi- oder Ohmigo-Gerät in Home Assistant eingerichtet ist."
+          },
+          "ohmonwifi_direct": {
+            "name": "Direkt an ein OhmOnWifi-Gerät senden",
+            "description": "Kommuniziert über dein lokales Netzwerk direkt mit dem Gerät, ohne Home-Assistant-Entität dazwischen. Gib seinen Namen (meist ohmonwifiplus.local) oder seine IP-Adresse ein. Dies wird beim Speichern geprüft."
+          }
+        },
+        "data": {
+          "output_number_entity": "Vorhandenes MQTT-Gerät",
+          "ohmonwifi_host": "OhmOnWIFI-Adresse"
+        }
+      },
+      "output_curve": {
+        "title": "Der eigene Offset der Wärmepumpe",
+        "description": "Für Wärmepumpen, bei denen sich „Heizkurve“ oder „Außentemperatur-Offset“ direkt einstellen lässt, statt den Außensensor vorzutäuschen.",
+        "data": {
+          "heat_curve_offset_entity": "Number- oder Input-Number-Entität",
+          "heat_curve_offset_invert": "Der Offset dieser Wärmepumpe funktioniert andersherum"
+        },
+        "data_description": {
+          "heat_curve_offset_invert": "Ausgeschaltet lassen, wenn ein höherer Wert an deiner Wärmepumpe mehr Wärme bedeutet — das ist bei den meisten Wärmepumpen der Fall. Einschalten, wenn es bei deiner andersherum ist."
+        }
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "compensated_outdoor_temperature": {
+        "name": "Kompensierte Außentemperatur"
+      },
+      "heat_pump_offset": {
+        "name": "Wärmepumpen-Offset"
+      },
+      "learned_offset": {
+        "name": "Gelernter Offset"
+      },
+      "status": {
+        "name": "Status",
+        "state": {
+          "ok": "OK",
+          "degraded": "Eingeschränkt",
+          "error": "Fehler"
+        }
+      }
+    },
+    "switch": {
+      "active": {
+        "name": "Kompensation aktiv"
+      }
+    },
+    "select": {
+      "price_comfort_tier": {
+        "name": "Preisersparnis",
+        "state": {
+          "low": "Komfort zuerst",
+          "mid": "Ausgewogen",
+          "high": "Ersparnis zuerst"
+        }
+      },
+      "cold_caution": {
+        "name": "Kältevorsicht",
+        "state": {
+          "low": "Auch bei Kälte weiter sparen",
+          "mid": "Ausgewogen",
+          "high": "Komfort zuerst bei Kälte"
+        }
+      }
+    },
+    "climate": {
+      "thermostat": {
+        "state_attributes": {
+          "preset_mode": {
+            "state": {
+              "low": "Komfort zuerst",
+              "mid": "Ausgewogen",
+              "high": "Ersparnis zuerst"
+            }
+          }
+        }
+      }
+    }
+  },
+  "selector": {
+    "heating_type": {
+      "options": {
+        "radiators": "Heizkörper",
+        "underfloor": "Fußbodenheizung",
+        "mixed": "Heizkörper und Fußbodenheizung"
+      }
+    },
+    "output_mode": {
+      "options": {
+        "outdoor_temp_spoof": "OhmOnWIFI-Hardware",
+        "heat_curve_offset": "Wärmepumpen-Sensor-Offset"
+      }
+    }
+  }
+}
