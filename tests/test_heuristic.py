@@ -209,6 +209,7 @@ class TestHeatingCutoff:
         assert result.wind_adjustment_c == 0.0
         assert result.sun_adjustment_c == 0.0
         assert result.price_adjustment_c == 0.0
+        assert result.current_price == 9.0
 
     def test_just_below_cutoff_still_compensates(self):
         result = compute(

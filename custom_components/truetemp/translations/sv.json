@@ -17,7 +17,7 @@
           "indoor_temp_sensor": "Välj en givare i ett rum du faktiskt vistas i, undan direkt sol och drag. Allt lärs in från denna avläsning, så ett skafferi eller en källare lär den fel hus.",
           "outdoor_temp_sensor": "En riktig utomhusgivare om du har en — den är oftast mer exakt än en väderleksuppskattning.",
           "weather_entity": "Valfritt. Används för sol- och vindprognosen. Du kan lägga till eller ändra detta senare.",
-          "nordpool_price_entity": "Valfritt. En givare med dagens och morgondagens timpriser, behövs för att spara pengar på el. Du kan lägga till eller ändra detta senare.",
+          "nordpool_price_entity": "Valfritt. En Nordpool-givare med dagens och morgondagens timpriser, behövs för att spara pengar på el. Du kan lägga till eller ändra detta senare.",
           "indoor_target_temperature": "Du kan ändra detta när som helst från termostaten, med röststyrning eller via ett schema.",
           "heating_type": "Används bara de första dagarna. Efter det har TrueTemp mätt hur snabbt ditt hus reagerar och slutar förlita sig på detta svar."
         }
@@ -85,7 +85,7 @@
         },
         "data_description": {
           "weather_entity": "Används bara för sol- och vindprognosen. Behövs inte om båda är avstängda nedan.",
-          "nordpool_price_entity": "En givare med dagens och morgondagens timpriser. Utan en gör prisbesparing ingenting.",
+          "nordpool_price_entity": "En Nordpool-givare med dagens och morgondagens timpriser. Utan en gör prisbesparing ingenting.",
           "power_sensor": "Används aldrig för att styra något — den lägger bara till verkliga energi- och kostnadssiffror i loggen. På de flesta installationer täcker denna mätare även varmvatten, så den avser inte enbart uppvärmning.",
           "enable_solar_input": "Backar av lite när solen värmer huset. Slå bara på detta om din inomhusgivare sitter någonstans dit solen faktiskt når. En givare i en källare, ett norrvänt rum eller en hall ser aldrig solinstrålningen, så detta skulle sänka temperaturen för en uppvärmning som din givare inte kan bekräfta.",
           "enable_wind_input": "Lägger till lite när vind drar ut värme ur huset. Låt detta vara avstängt om du inte har ett äldre, dragigt hus som du märker blir kallare i hård vind. Ett rimligt tätt hus reagerar knappt på vind, och att kompensera för en effekt som inte finns lägger bara till brus."

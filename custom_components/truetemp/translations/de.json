@@ -17,7 +17,7 @@
           "indoor_temp_sensor": "Wähle einen Sensor in einem Raum, in dem du dich wirklich aufhältst, fern von direkter Sonne und Zugluft. Alles wird aus diesem Messwert gelernt — eine Abstellkammer oder ein Keller würden dem System das falsche Haus beibringen.",
           "outdoor_temp_sensor": "Ein echter Außensensor, falls vorhanden — er ist meist genauer als die Schätzung eines Wetterdienstes.",
           "weather_entity": "Optional. Wird für die Sonnen- und Windvorhersage genutzt. Kann später hinzugefügt oder geändert werden.",
-          "nordpool_price_entity": "Optional. Ein Sensor mit den stündlichen Preisen für heute und morgen, nötig um Stromkosten zu sparen. Kann später hinzugefügt oder geändert werden.",
+          "nordpool_price_entity": "Optional. Ein Nordpool-Sensor mit den stündlichen Preisen für heute und morgen, nötig um Stromkosten zu sparen. Kann später hinzugefügt oder geändert werden.",
           "indoor_target_temperature": "Kann jederzeit über das Thermostat, per Sprachbefehl oder per Zeitplan geändert werden.",
           "heating_type": "Wird nur für die ersten Tage genutzt. Danach hat TrueTemp gemessen, wie schnell dein Haus reagiert, und verlässt sich nicht mehr auf diese Angabe."
         }
@@ -85,7 +85,7 @@
         },
         "data_description": {
           "weather_entity": "Wird nur für die Sonnen- und Windvorhersage genutzt. Nicht nötig, wenn beides unten ausgeschaltet ist.",
-          "nordpool_price_entity": "Ein Sensor mit den stündlichen Preisen für heute und morgen. Ohne ihn bewirkt die Preisersparnis nichts.",
+          "nordpool_price_entity": "Ein Nordpool-Sensor mit den stündlichen Preisen für heute und morgen. Ohne ihn bewirkt die Preisersparnis nichts.",
           "power_sensor": "Wird nie zur Steuerung genutzt — fügt dem Protokoll nur echte Energie- und Kostenwerte hinzu. Bei den meisten Installationen deckt dieser Zähler auch das Warmwasser mit ab, misst also nicht nur die Heizung allein.",
           "enable_solar_input": "Reduziert die Heizleistung etwas, wenn die Sonne das Haus aufwärmt. Nur einschalten, wenn dein Innensensor an einer Stelle sitzt, die die Sonne tatsächlich erreicht. Ein Sensor im Keller, in einem nach Norden ausgerichteten Raum oder im Flur bekommt den solaren Wärmegewinn nie mit — das würde die Temperatur für eine Erwärmung senken, die dein Sensor nicht bestätigen kann.",
           "enable_wind_input": "Erhöht die Heizleistung etwas, wenn Wind dem Haus Wärme entzieht. Lass dies ausgeschaltet, außer du hast ein älteres, zugiges Haus, bei dem du bei starkem Wind spürbar auskühlende Räume bemerkst. Ein einigermaßen gut abgedichtetes Haus reagiert kaum auf Wind, und ein Ausgleich für einen nicht vorhandenen Effekt fügt nur Störrauschen hinzu."

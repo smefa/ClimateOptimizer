@@ -431,7 +431,9 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
             cloud_coverage_pct=inputs.cloud_coverage_pct,
             cloud_data_available=inputs.cloud_data_available,
             solar_effect=solar_effect,
-            current_price=None,
+            # Informational, like the normal path below: a house above the
+            # cutoff can still ask what power costs right now.
+            current_price=inputs.current_price if inputs.price_data_available else None,
             price_shift_applied_c=0.0,
             price_data_available=inputs.price_data_available,
             heating_cutoff_engaged=True,

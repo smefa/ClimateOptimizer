@@ -385,7 +385,7 @@ class TrueTempCard extends HTMLElement {
           <div class="co-grid">${this._cells(terms)}</div>
 
           <div class="co-section">${this._esc(t.sectionPrice)}${showPrice && priceDisabled ? ` <span class="co-badge">${this._esc(t.badgeDisabled)}</span>` : ""}</div>
-          <div class="co-grid">${this._cells(priceAlways)}</div>
+          <div class="co-grid co-grid-compact">${this._cells(priceAlways)}</div>
           ${showPrice ? `<div class="co-grid">${this._cells(price)}</div>` : ""}
 
           <div class="co-section">${this._esc(t.sectionHouseKnowledge)}</div>
@@ -412,6 +412,10 @@ class TrueTempCard extends HTMLElement {
                     padding:2px 7px; border-radius:3px; background: var(--secondary-background-color);
                     color: var(--secondary-text-color); }
         .co-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; }
+        /* auto-fit stretches a short row's cells to fill the leftover space;
+           auto-fill leaves those tracks empty so a 2-cell row stays the same
+           size as the fuller rows around it. */
+        .co-grid-compact { grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); }
         .co-cell { display:flex; flex-direction:column; gap:2px; padding:8px 10px; border-radius:4px;
                    background: var(--secondary-background-color); }
         .co-cell span { font-size:11px; color: var(--secondary-text-color); }
