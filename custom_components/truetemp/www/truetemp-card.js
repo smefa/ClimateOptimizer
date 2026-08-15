@@ -385,8 +385,7 @@ class TrueTempCard extends HTMLElement {
           <div class="co-grid">${this._cells(terms)}</div>
 
           <div class="co-section">${this._esc(t.sectionPrice)}${showPrice && priceDisabled ? ` <span class="co-badge">${this._esc(t.badgeDisabled)}</span>` : ""}</div>
-          <div class="co-grid co-grid-compact">${this._cells(priceAlways)}</div>
-          ${showPrice ? `<div class="co-grid">${this._cells(price)}</div>` : ""}
+          <div class="co-grid${showPrice ? "" : " co-grid-compact"}">${this._cells(showPrice ? [...priceAlways, ...price] : priceAlways)}</div>
 
           <div class="co-section">${this._esc(t.sectionHouseKnowledge)}</div>
           <div class="co-bar"><div class="co-fill" style="width:${Number.isNaN(progress) ? 0 : progress}%"></div></div>
