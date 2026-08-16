@@ -24,6 +24,27 @@ import { STRINGS as EN } from "./lang/en.js";
 import { STRINGS as DE } from "./lang/de.js";
 import { STRINGS as SV } from "./lang/sv.js";
 
+// Registry translation_key per entity — stable across languages, unlike the
+// entity_id, whose object_id is slugified from the *translated* friendly name
+// at creation time. A Swedish install ends up with
+// sensor.<name>_varmepumpsoffset rather than sensor.<name>_heat_pump_offset,
+// so matching on entity_id suffix (as this card used to) silently fails on
+// any non-English install. translation_key is set directly by the Python
+// entity (see _attr_translation_key in sensor.py/select.py/switch.py) and
+// never changes with locale or a user's custom friendly name.
+const TRANSLATION_KEYS = {
+  status: "status",
+  compensated: "compensated_outdoor_temperature",
+  heatPumpOffset: "heat_pump_offset",
+  offset: "learned_offset",
+  active: "active",
+  tier: "price_comfort_tier",
+  caution: "cold_caution",
+};
+
+// Fallback for the rare case a registry entry lacks translation_key (e.g. a
+// very old frontend). English-only, so still subject to the bug above, but
+// better than nothing.
 const SUFFIXES = {
   status: "status",
   compensated: "compensated_outdoor_temperature",
@@ -120,9 +141,16 @@ class TrueTempCard extends HTMLElement {
     }
 
     Object.keys(hass.entities).forEach((entityId) => {
-      if (hass.entities[entityId].device_id !== deviceId) return;
+      const info = hass.entities[entityId];
+      if (info.device_id !== deviceId) return;
       if (entityId.startsWith("climate.")) {
         found.climate = entityId;
+        return;
+      }
+      if (info.translation_key) {
+        Object.entries(TRANSLATION_KEYS).forEach(([key, tKey]) => {
+          if (info.translation_key === tKey) found[key] = entityId;
+        });
         return;
       }
       Object.entries(SUFFIXES).forEach(([key, suffix]) => {
