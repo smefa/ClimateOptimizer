@@ -357,7 +357,10 @@ class TrueTempCard extends HTMLElement {
     } else if (attrs.price_braking) {
       notes.push(t.notePriceBraking);
     }
-    if (attrs.last_error) notes.push(fmt(t.noteLastError, { value: attrs.last_error }));
+    if (attrs.last_error) {
+      const since = attrs.last_error_at ? ` (${new Date(attrs.last_error_at).toLocaleTimeString()})` : "";
+      notes.push(fmt(t.noteLastError, { value: attrs.last_error + since }));
+    }
 
     const title =
       (climate && climate.attributes.friendly_name) || "TrueTemp";

@@ -36,6 +36,7 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant, State
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -194,6 +195,15 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         self.last_power_w: float | None = None
         self.last_power_data_available: bool = False
         self._energy_last_monotonic: float | None = None
+
+        # --- Error tracking ----------------------------------------------------
+        # HA's DataUpdateCoordinator.last_exception is sticky - it is set on
+        # failure but never cleared on a later successful update - so reading
+        # it directly for a "last error" display would show a stale message
+        # forever after the sensor recovers. Track our own timestamp instead,
+        # scoped to the exact call that can raise UpdateFailed, and clear it as
+        # soon as that call succeeds again.
+        self.last_error_at: datetime | None = None
 
         # --- Output push channels -------------------------------------------
         # Independent, and both pushed every cycle when configured. Each tracks
@@ -357,6 +367,57 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             enable_wind_input=self.wind_input_enabled,
             spoof_per_indoor_c=SPOOF_PER_INDOOR_C,
         )
+
+    # --- Source health as Repairs ---------------------------------------------
+    # HA's own notification bell surfaces active Repairs issues, so this is the
+    # "default trigger" for posting a real error/warning without a bespoke
+    # automation. One issue per source, keyed by entry so multiple zones don't
+    # collide; created while the source is down, deleted the moment it is not.
+
+    _SOURCE_ISSUE_KEYS = (
+        "outdoor_sensor_unavailable",
+        "indoor_sensor_unavailable",
+        "wind_forecast_unavailable",
+        "cloud_sun_forecast_unavailable",
+        "price_unavailable",
+    )
+
+    def _sync_source_issue(
+        self,
+        key: str,
+        ok: bool,
+        severity: ir.IssueSeverity,
+        entity_id: str | None,
+    ) -> None:
+        issue_id = f"{key}_{self.entry.entry_id}"
+        if ok:
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+        ir.async_create_issue(
+            self.hass,
+            DOMAIN,
+            issue_id,
+            is_fixable=False,
+            severity=severity,
+            translation_key=key,
+            translation_placeholders={
+                "name": self.entry.title,
+                "entity_id": entity_id or "",
+            },
+        )
+
+    def _sync_optional_source_issue(
+        self, key: str, enabled: bool, ok: bool, entity_id: str | None
+    ) -> None:
+        """Same as `_sync_source_issue`, but for a source that can be switched
+        off entirely — in which case it is never a problem."""
+        self._sync_source_issue(key, ok=not enabled or ok, severity=ir.IssueSeverity.WARNING, entity_id=entity_id)
+
+    def clear_source_issues(self) -> None:
+        """Drop every issue this entry could own, e.g. on unload — otherwise a
+        Repair raised while broken outlives the integration that raised it."""
+        for key in self._SOURCE_ISSUE_KEYS:
+            ir.async_delete_issue(self.hass, DOMAIN, f"{key}_{self.entry.entry_id}")
 
     # --- Source reads --------------------------------------------------------
 
@@ -752,11 +813,49 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
     # --- The cycle -----------------------------------------------------------
 
     async def _async_update_data(self) -> HeuristicResult:
-        raw_outdoor_temp_c = self._read_raw_outdoor_temp_c()
+        try:
+            raw_outdoor_temp_c = self._read_raw_outdoor_temp_c()
+        except UpdateFailed:
+            self.last_error_at = dt_util.utcnow()
+            self._sync_source_issue(
+                "outdoor_sensor_unavailable",
+                ok=False,
+                severity=ir.IssueSeverity.ERROR,
+                entity_id=_entry_value(self.entry, CONF_OUTDOOR_TEMP_SENSOR, None),
+            )
+            raise
+        self.last_error_at = None
+        self._sync_source_issue(
+            "outdoor_sensor_unavailable", ok=True, severity=ir.IssueSeverity.ERROR, entity_id=None
+        )
         indoor_temp_c, indoor_ok = self._read_indoor_temp_c()
         wind_speed_ms, wind_ok, cloud_coverage_pct, cloud_ok = await self._read_forecast()
         sun_elevation_deg = self._read_sun_elevation()
         current_price, price_ok = self._read_price()
+        self._sync_source_issue(
+            "indoor_sensor_unavailable",
+            ok=indoor_ok,
+            severity=ir.IssueSeverity.WARNING,
+            entity_id=_entry_value(self.entry, CONF_INDOOR_TEMP_SENSOR, None),
+        )
+        self._sync_optional_source_issue(
+            "wind_forecast_unavailable",
+            self.wind_input_enabled,
+            wind_ok,
+            _entry_value(self.entry, CONF_WEATHER_ENTITY, None),
+        )
+        self._sync_optional_source_issue(
+            "cloud_sun_forecast_unavailable",
+            self.solar_input_enabled,
+            cloud_ok,
+            _entry_value(self.entry, CONF_WEATHER_ENTITY, None),
+        )
+        self._sync_optional_source_issue(
+            "price_unavailable",
+            self.price_configured,
+            price_ok,
+            _entry_value(self.entry, CONF_NORDPOOL_PRICE_ENTITY, None),
+        )
         price_forecast = self._price_forecast_offsets()
         self._last_price_forecast = price_forecast
         power_w, power_ok = self._read_power_w()

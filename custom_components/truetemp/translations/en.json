@@ -212,5 +212,27 @@
         "heat_curve_offset": "Heat pump sensor offset"
       }
     }
+  },
+  "issues": {
+    "outdoor_sensor_unavailable": {
+      "title": "TrueTemp ({name}) has lost its outdoor sensor",
+      "description": "{entity_id} is unavailable or not reporting a number, so TrueTemp cannot publish a compensated value. It will keep retrying and this warning clears itself once the sensor is readable again."
+    },
+    "indoor_sensor_unavailable": {
+      "title": "TrueTemp ({name}) has lost its indoor sensor",
+      "description": "{entity_id} is unavailable or not reporting a number. TrueTemp is holding the learned offset and pausing learning until it comes back — nothing else is affected."
+    },
+    "wind_forecast_unavailable": {
+      "title": "TrueTemp ({name}) has lost its wind forecast",
+      "description": "The weather entity {entity_id} has no wind reading right now, so wind compensation is contributing nothing this cycle."
+    },
+    "cloud_sun_forecast_unavailable": {
+      "title": "TrueTemp ({name}) has lost its sun/cloud forecast",
+      "description": "The weather entity {entity_id} has no cloud reading right now, so sun compensation is contributing nothing this cycle."
+    },
+    "price_unavailable": {
+      "title": "TrueTemp ({name}) has lost its electricity price",
+      "description": "{entity_id} is unavailable, so price-based saving is contributing nothing this cycle."
+    }
   }
 }

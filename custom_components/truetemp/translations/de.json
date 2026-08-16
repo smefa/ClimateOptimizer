@@ -212,5 +212,27 @@
         "heat_curve_offset": "Wärmepumpen-Sensor-Offset"
       }
     }
+  },
+  "issues": {
+    "outdoor_sensor_unavailable": {
+      "title": "TrueTemp ({name}) hat den Außensensor verloren",
+      "description": "{entity_id} ist nicht erreichbar oder liefert keinen Zahlenwert, daher kann TrueTemp keinen kompensierten Wert veröffentlichen. Es wird weiter versucht; diese Meldung verschwindet von selbst, sobald der Sensor wieder lesbar ist."
+    },
+    "indoor_sensor_unavailable": {
+      "title": "TrueTemp ({name}) hat den Innensensor verloren",
+      "description": "{entity_id} ist nicht erreichbar oder liefert keinen Zahlenwert. TrueTemp hält den gelernten Offset und pausiert das Lernen, bis er zurückkommt — sonst ist nichts betroffen."
+    },
+    "wind_forecast_unavailable": {
+      "title": "TrueTemp ({name}) hat die Windvorhersage verloren",
+      "description": "Die Wetter-Entität {entity_id} liefert gerade keinen Windwert, daher trägt die Windkompensation diesen Zyklus nichts bei."
+    },
+    "cloud_sun_forecast_unavailable": {
+      "title": "TrueTemp ({name}) hat die Sonnen-/Wolkenvorhersage verloren",
+      "description": "Die Wetter-Entität {entity_id} liefert gerade keinen Bewölkungswert, daher trägt die Sonnenkompensation diesen Zyklus nichts bei."
+    },
+    "price_unavailable": {
+      "title": "TrueTemp ({name}) hat den Strompreis verloren",
+      "description": "{entity_id} ist nicht erreichbar, daher trägt die preisbasierte Einsparung diesen Zyklus nichts bei."
+    }
   }
 }

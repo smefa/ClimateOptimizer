@@ -137,7 +137,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: TrueTempConfigEntry) ->
     # Store.async_delay_save on full shutdown, not on an entry reload, so
     # without this the most recent learning is lost on every options change.
     await entry.runtime_data.async_save_state_now()
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    # Otherwise a Repair raised while a source was down outlives the
+    # integration that raised it (or the reload that briefly tears it down).
+    entry.runtime_data.clear_source_issues()
+    return unloaded
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: TrueTempConfigEntry) -> None:

@@ -262,11 +262,18 @@ that would fill it is switched off — see the module docstring in `sensor.py`.
 | Attribute | Meaning |
 | --- | --- |
 | `outdoor_sensor_ok` | The hard-required source. `False` here is what makes the state `error`. |
-| `last_error` | The exception behind the last failed cycle, or `None`. |
+| `last_error` | The exception behind the *current* failure, or `None` once recovered — cleared as soon as `outdoor_sensor_ok` goes back to `True`. |
+| `last_error_at` | Local ISO timestamp of when the current failure started, or `None`. |
 | `indoor_sensor_ok` | Indoor reading available this cycle. |
 | `wind_forecast_ok` | Present only if wind input is enabled. Weather-entity forecast had a wind reading. |
 | `cloud_sun_forecast_ok` | Present only if sun input is enabled. Weather-entity forecast had a cloud reading. |
 | `price_ok` | Present only if a price sensor is configured. Today's/tomorrow's forecast was readable. |
+
+Each source above also raises a Home Assistant Repair (`homeassistant.helpers.issue_registry`)
+while it is down — `outdoor_sensor_unavailable` at `ERROR` severity, the rest at `WARNING` — so a
+failing sensor surfaces in the Notifications bell and Settings > Repairs without needing a
+separate automation. One issue per source per config entry; cleared the moment that source reads
+again, and on unload/reload so nothing outlives the entry. See `TrueTempCoordinator._sync_source_issue`.
 
 **Output breakdown** — every term behind the published value, why it's what it is now, regardless of which output sensor is actually live:
 

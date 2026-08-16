@@ -212,5 +212,27 @@
         "heat_curve_offset": "Värmepumpens sensor för offset"
       }
     }
+  },
+  "issues": {
+    "outdoor_sensor_unavailable": {
+      "title": "TrueTemp ({name}) har tappat utomhusgivaren",
+      "description": "{entity_id} är otillgänglig eller rapporterar inget numeriskt värde, så TrueTemp kan inte publicera ett kompenserat värde. Den fortsätter försöka, och varningen försvinner av sig själv när givaren går att läsa igen."
+    },
+    "indoor_sensor_unavailable": {
+      "title": "TrueTemp ({name}) har tappat inomhusgivaren",
+      "description": "{entity_id} är otillgänglig eller rapporterar inget numeriskt värde. TrueTemp håller kvar det inlärda offsetvärdet och pausar inlärningen tills den kommer tillbaka — inget annat påverkas."
+    },
+    "wind_forecast_unavailable": {
+      "title": "TrueTemp ({name}) har tappat vindprognosen",
+      "description": "Väderentiteten {entity_id} saknar just nu ett vindvärde, så vindkompensationen bidrar inte alls denna cykel."
+    },
+    "cloud_sun_forecast_unavailable": {
+      "title": "TrueTemp ({name}) har tappat sol-/molnprognosen",
+      "description": "Väderentiteten {entity_id} saknar just nu ett molnvärde, så solkompensationen bidrar inte alls denna cykel."
+    },
+    "price_unavailable": {
+      "title": "TrueTemp ({name}) har tappat elpriset",
+      "description": "{entity_id} är otillgänglig, så prisbaserad besparing bidrar inte alls denna cykel."
+    }
   }
 }

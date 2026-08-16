@@ -48,6 +48,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from . import TrueTempConfigEntry
 from .const import DOMAIN, OUTPUT_MODE_HEAT_CURVE_OFFSET, OUTPUT_MODE_OUTDOOR_SPOOF
@@ -331,11 +332,21 @@ class StatusSensor(TrueTempEntity, SensorEntity):
         result: HeuristicResult | None = self.coordinator.data
         learner = self.coordinator.learner_result
         lag = self.coordinator.lag_result
-        last_error = self.coordinator.last_exception
+        outdoor_ok = self.coordinator.last_update_success
+        # last_exception is sticky in HA's DataUpdateCoordinator - it is never
+        # cleared on a later successful update - so it is only trustworthy as
+        # "the current problem" while outdoor_ok is False. Once recovered, drop
+        # it rather than showing a stale message with no way to tell it is old.
+        last_error = self.coordinator.last_exception if not outdoor_ok else None
 
         attrs: dict = {
-            "outdoor_sensor_ok": self.coordinator.last_update_success,
+            "outdoor_sensor_ok": outdoor_ok,
             "last_error": str(last_error) if last_error else None,
+            "last_error_at": (
+                dt_util.as_local(self.coordinator.last_error_at).isoformat()
+                if last_error and self.coordinator.last_error_at
+                else None
+            ),
         }
         if result is not None:
             attrs["indoor_sensor_ok"] = result.indoor_data_available
