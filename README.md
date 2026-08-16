@@ -74,6 +74,10 @@ eftersom de skulle kompensera samma sak två gånger.
 
 ## Installation
 
+<a href="https://my.home-assistant.io/redirect/hacs_repository/?owner=smefa&repository=TrueTemp-for-Heat-Pumps&category=integration" target="_blank">
+  <img src="https://my.home-assistant.io/badges/hacs_repository.svg" alt="Öppna din Home Assistant-instans och lägg till repositoryt i Home Assistant Community Store.">
+</a>
+
 1. Öppna **HACS** i Home Assistant.
 2. Klicka på de tre punkterna uppe i högra hörnet → **Anpassade repositories**
    (Custom repositories).

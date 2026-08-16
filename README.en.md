@@ -60,6 +60,10 @@ directly, with nothing else to configure.
 
 ## Installation
 
+<a href="https://my.home-assistant.io/redirect/hacs_repository/?owner=smefa&repository=TrueTemp-for-Heat-Pumps&category=integration" target="_blank">
+  <img src="https://my.home-assistant.io/badges/hacs_repository.svg" alt="Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.">
+</a>
+
 1. Open **HACS** in Home Assistant.
 2. Click the three dots in the top-right corner → **Custom repositories**.
 3. Add `https://github.com/smefa/TrueTemp-for-Heat-Pumps` with category **Integration**.
