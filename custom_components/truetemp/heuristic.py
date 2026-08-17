@@ -105,9 +105,38 @@ WIND_GAIN_C_PER_MS = 0.3
 # not freeze the learner.
 PRICE_BRAKING_EPS_C = 0.05
 
+# Re-entry margin below `heating_cutoff_c` before the summer guardrail lets
+# go again. Without this, an outdoor reading idling within noise of the
+# threshold flips the published output between the full learned offset and a
+# hard zero every cycle it crosses back and forth — see
+# `resolve_heating_cutoff_engaged`.
+HEATING_CUTOFF_HYSTERESIS_C = 2.0
+
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
+
+
+def resolve_heating_cutoff_engaged(
+    raw_outdoor_temp_c: float, heating_cutoff_c: float, prev_engaged: bool
+) -> bool:
+    """Whether the summer heating-cutoff guardrail is active this cycle.
+
+    Hysteresis, not a bare `>=`: a raw outdoor reading that idles within a
+    fraction of a degree of `heating_cutoff_c` — routine sensor noise, or
+    just the weather sitting on the boundary — would otherwise cross back and
+    forth every cycle, snapping the published offset between the full
+    learned value and a hard zero each time (that is what
+    `sensor.*_heat_pump_offset` "flipping between 4 and 0" looks like from
+    the outside). Once engaged, the reading has to drop
+    `HEATING_CUTOFF_HYSTERESIS_C` below the threshold, not just below it,
+    before compensation resumes. `prev_engaged` defaults to `False` for a
+    fresh install or an unavailable previous cycle, which reproduces the old
+    bare-`>=` behaviour on the very first call.
+    """
+    if prev_engaged:
+        return raw_outdoor_temp_c >= heating_cutoff_c - HEATING_CUTOFF_HYSTERESIS_C
+    return raw_outdoor_temp_c >= heating_cutoff_c
 
 
 def solar_effect_of(sun_elevation_deg: float, cloud_coverage_pct: float | None) -> float:
@@ -622,6 +651,11 @@ class HeuristicInputs:
     price_significance_factor: float = 1.0
     today_price_spread_c: float | None = None
     seasonal_reference_spread_c: float | None = None
+    # Last cycle's `HeuristicResult.heating_cutoff_engaged`, for
+    # `resolve_heating_cutoff_engaged`'s hysteresis. Threaded in by the
+    # coordinator the same way `previous.price_braking` is; see that field's
+    # docstring in coordinator.py.
+    prev_heating_cutoff_engaged: bool = False
 
 
 @dataclass(frozen=True)
@@ -704,7 +738,9 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
     # logs want reality rather than a zeroed value on warm days.
     solar_effect = solar_effect_of(inputs.sun_elevation_deg, inputs.cloud_coverage_pct)
 
-    if inputs.raw_outdoor_temp_c >= params.heating_cutoff_c:
+    if resolve_heating_cutoff_engaged(
+        inputs.raw_outdoor_temp_c, params.heating_cutoff_c, inputs.prev_heating_cutoff_engaged
+    ):
         # Summer guardrail: above the cutoff, suppress everything rather than
         # letting a cold indoor reading or a windy afternoon push the published
         # value below the raw one and trick the pump's curve into calling for
@@ -739,9 +775,18 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
             today_price_spread_c=inputs.today_price_spread_c,
             seasonal_reference_spread_c=inputs.seasonal_reference_spread_c,
             reason=(
-                f"Raw outdoor {inputs.raw_outdoor_temp_c:.1f}°C ≥ heating cutoff "
-                f"{params.heating_cutoff_c:.1f}°C; compensation suppressed, "
-                f"publishing raw temperature unmodified"
+                (
+                    f"Raw outdoor {inputs.raw_outdoor_temp_c:.1f}°C ≥ heating cutoff "
+                    f"{params.heating_cutoff_c:.1f}°C; compensation suppressed, "
+                    f"publishing raw temperature unmodified"
+                )
+                if inputs.raw_outdoor_temp_c >= params.heating_cutoff_c
+                else (
+                    f"Raw outdoor {inputs.raw_outdoor_temp_c:.1f}°C below heating cutoff "
+                    f"{params.heating_cutoff_c:.1f}°C but within "
+                    f"{HEATING_CUTOFF_HYSTERESIS_C:.1f}°C hysteresis margin of it; "
+                    f"compensation still suppressed, publishing raw temperature unmodified"
+                )
             ),
         )
 

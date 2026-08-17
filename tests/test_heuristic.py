@@ -9,6 +9,7 @@ teeth — when price refuses to act because it is too cold to buy the sag back.
 from __future__ import annotations
 
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -218,6 +219,59 @@ class TestHeatingCutoff:
         )
         assert not result.heating_cutoff_engaged
         assert result.compensated_outdoor_temp_c == pytest.approx(16.9)
+
+
+class TestHeatingCutoffHysteresis:
+    """Reproduces the reported symptom: `sensor.*_heat_pump_offset` flipping
+    between its full value and 0 because raw outdoor temperature idles right
+    on `heating_cutoff_c`. Without hysteresis, `test_just_below_cutoff_still_
+    compensates` above and `test_above_cutoff_everything_is_suppressed` would
+    both fire, alternately, on every cycle the reading crosses back and
+    forth — that flip is exactly what these tests close off."""
+
+    def test_resolve_engaged_is_a_bare_threshold_when_not_previously_engaged(self):
+        engaged = heuristic.resolve_heating_cutoff_engaged
+        assert not engaged(17.9, 18.0, prev_engaged=False)
+        assert engaged(18.0, 18.0, prev_engaged=False)
+
+    def test_resolve_engaged_requires_the_margin_to_release(self):
+        engaged = heuristic.resolve_heating_cutoff_engaged
+        margin = heuristic.HEATING_CUTOFF_HYSTERESIS_C
+        # Still within the margin below cutoff: stays engaged.
+        assert engaged(18.0 - margin + 0.1, 18.0, prev_engaged=True)
+        # Past the margin: releases.
+        assert not engaged(18.0 - margin - 0.1, 18.0, prev_engaged=True)
+
+    def test_previously_engaged_stays_suppressed_just_below_cutoff(self):
+        """Same 17.9°C reading as `test_just_below_cutoff_still_compensates`,
+        but arriving with last cycle's cutoff already engaged — the case
+        that formula-only comparison got wrong."""
+        result = compute(
+            replace(
+                make_inputs(raw_outdoor_temp_c=17.9, learned_offset_c=-1.0),
+                prev_heating_cutoff_engaged=True,
+            ),
+            make_params(heating_cutoff_c=18.0),
+        )
+        assert result.heating_cutoff_engaged
+        assert result.compensated_outdoor_temp_c == 17.9
+        assert result.learned_offset_c == 0.0
+
+    def test_releases_once_past_the_hysteresis_margin(self):
+        margin = heuristic.HEATING_CUTOFF_HYSTERESIS_C
+        result = compute(
+            replace(
+                make_inputs(
+                    raw_outdoor_temp_c=18.0 - margin - 0.1, learned_offset_c=-1.0
+                ),
+                prev_heating_cutoff_engaged=True,
+            ),
+            make_params(heating_cutoff_c=18.0),
+        )
+        assert not result.heating_cutoff_engaged
+        assert result.compensated_outdoor_temp_c == pytest.approx(
+            18.0 - margin - 0.1 - 1.0
+        )
 
 
 class TestPriceGating:

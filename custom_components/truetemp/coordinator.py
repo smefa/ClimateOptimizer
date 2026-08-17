@@ -90,6 +90,7 @@ from .heuristic import (
     heat_curve_offset_c,
     initial_price_spread_history,
     price_significance,
+    resolve_heating_cutoff_engaged,
     solar_effect_of,
     today_price_spread_and_median_c,
     update_price_spread_history,
@@ -686,10 +687,13 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
 
         The heating-cutoff and price-braking flags the learner needs come from
         `heuristic.compute`, which needs the learner's offset — so cutoff is
-        recomputed directly here (it is a one-line comparison) and price
-        braking is read from the PREVIOUS cycle. One cycle of staleness on a
-        15-minute clock is immaterial against lags measured in hours, and it
-        avoids an ordering cycle between the two.
+        recomputed directly here via `resolve_heating_cutoff_engaged` (reading
+        this same PREVIOUS cycle's engaged flag for its hysteresis) and price
+        braking is read from the PREVIOUS cycle too. One cycle of staleness on
+        a 15-minute clock is immaterial against lags measured in hours, and it
+        avoids an ordering cycle between the two. `compute()` below recomputes
+        the identical value off the identical previous cycle, so the two never
+        disagree.
         """
         now = time.monotonic()
         last = self._learner_last_step_s
@@ -735,7 +739,11 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                     indoor_data_available=indoor_ok,
                     target_c=self.indoor_target_c,
                     outdoor_temp_c=raw_outdoor_temp_c,
-                    heating_cutoff_engaged=raw_outdoor_temp_c >= self.heating_cutoff_c,
+                    heating_cutoff_engaged=resolve_heating_cutoff_engaged(
+                        raw_outdoor_temp_c,
+                        self.heating_cutoff_c,
+                        bool(previous and previous.heating_cutoff_engaged),
+                    ),
                     is_active=self.is_active,
                     price_braking=bool(previous and previous.price_braking),
                     rise_hours=self.lag_result.rise_hours,
@@ -929,6 +937,9 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 price_significance_factor=price_significance_factor,
                 today_price_spread_c=today_spread,
                 seasonal_reference_spread_c=seasonal_reference_spread_c,
+                prev_heating_cutoff_engaged=bool(
+                    self.data and self.data.heating_cutoff_engaged
+                ),
             ),
             self._params(),
         )
