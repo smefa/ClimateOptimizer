@@ -8,6 +8,8 @@ export const STRINGS = {
   badgeDisabled: "deaktiviert",
   rowPublishingOffset: "Veröffentlichter Offset",
   rowPublishing: "Veröffentlicht",
+  rowWouldPublishOffset: "Würde Offset veröffentlichen",
+  rowWouldPublish: "Würde veröffentlichen",
   rowOutdoorNow: "Außentemperatur jetzt",
   rowIndoorNow: "Innentemperatur jetzt",
   rowTarget: "Zieltemperatur",

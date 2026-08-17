@@ -476,8 +476,6 @@ class StatusSensor(TrueTempEntity, SensorEntity):
             )
 
         # --- Plumbing --------------------------------------------------------
-        if self.coordinator.last_power_data_available:
-            attrs["heat_pump_power_w"] = self.coordinator.last_power_w
         attrs["data_logging_enabled"] = self.coordinator.data_logging_enabled
         if self.coordinator.data_log_path:
             attrs["data_log_path"] = self.coordinator.data_log_path

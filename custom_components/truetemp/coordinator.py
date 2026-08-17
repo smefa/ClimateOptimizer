@@ -31,7 +31,6 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
-    UnitOfPower,
     UnitOfSpeed,
     UnitOfTemperature,
 )
@@ -41,11 +40,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
-from homeassistant.util.unit_conversion import (
-    PowerConverter,
-    SpeedConverter,
-    TemperatureConverter,
-)
+from homeassistant.util.unit_conversion import SpeedConverter, TemperatureConverter
 
 from .const import (
     CONF_COMFORT_MIN_C,
@@ -63,7 +58,7 @@ from .const import (
     CONF_OUTDOOR_TEMP_SENSOR,
     CONF_OUTPUT_MODE,
     CONF_OUTPUT_NUMBER_ENTITY,
-    CONF_POWER_SENSOR,
+    CONF_PRICE_SIGNIFICANCE_FLOOR,
     CONF_WEATHER_ENTITY,
     DEFAULT_COMFORT_MIN_C,
     DEFAULT_ENABLE_DATA_LOGGING,
@@ -73,10 +68,13 @@ from .const import (
     DEFAULT_HEAT_CURVE_OFFSET_INVERT,
     DEFAULT_INDOOR_TARGET_TEMPERATURE,
     DEFAULT_OUTPUT_MODE,
+    DEFAULT_PRICE_SIGNIFICANCE_FLOOR,
     DOMAIN,
     HEATING_CUTOFF_MARGIN_C,
     LEARNER_STEP_SECONDS,
     OUTPUT_MODE_HEAT_CURVE_OFFSET,
+    OUTPUT_MODE_OUTDOOR_SPOOF,
+    STARTUP_GRACE_PERIOD_MINUTES,
     UPDATE_INTERVAL_MINUTES,
 )
 from .data_logger import async_log_record, log_file_path
@@ -87,9 +85,14 @@ from .heuristic import (
     HeuristicInputs,
     HeuristicParams,
     HeuristicResult,
+    PriceSpreadHistory,
     compute,
     heat_curve_offset_c,
+    initial_price_spread_history,
+    price_significance,
     solar_effect_of,
+    today_price_spread_and_median_c,
+    update_price_spread_history,
 )
 from .lag import (
     DEFAULT_HEATING_TYPE,
@@ -185,16 +188,17 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # the log so an offline replay can separate decision cycles from bare
         # republishes — see `_build_log_record`.
         self._learner_stepped: bool = False
+        # Rolling record of past days' price spread, the seasonal half of
+        # `heuristic.price_significance()`. Persisted alongside the learner and
+        # lag state (same Store, same payload — see `learner_store.py`) but
+        # updated every cycle rather than on the learner's fixed cadence: it is
+        # a running max, which only ever needs sampling more often, never
+        # produces the zero-transition noise a rate estimator would from
+        # irregular polling. See `_async_update_data`.
+        self.price_spread_history: PriceSpreadHistory = initial_price_spread_history()
         self._store: Store[dict] = Store(
             hass, LEARNER_STORAGE_VERSION, learner_store_key(entry.entry_id)
         )
-
-        # --- Optional power draw (diagnostic echo + local-log cost) ----------
-        # Purely informational: never read by the controller. The monotonic
-        # timer only advances when a cycle is actually logged.
-        self.last_power_w: float | None = None
-        self.last_power_data_available: bool = False
-        self._energy_last_monotonic: float | None = None
 
         # --- Error tracking ----------------------------------------------------
         # HA's DataUpdateCoordinator.last_exception is sticky - it is set on
@@ -205,6 +209,11 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # soon as that call succeeds again.
         self.last_error_at: datetime | None = None
 
+        # When this coordinator was constructed, i.e. this config entry's setup
+        # (HA start, integration reload, or an options change). Used to hold off
+        # Repairs issues for a short grace period — see `_sync_source_issue`.
+        self._setup_at: datetime = dt_util.utcnow()
+
         # --- Output push channels -------------------------------------------
         # Independent, and both pushed every cycle when configured. Each tracks
         # its own last-written value so an unchanged value does not keep
@@ -213,6 +222,12 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         self._last_ohmonwifi_value_c: float | None = None
         self._last_output_number_value_c: float | None = None
         self._last_heat_curve_offset_value_c: int | None = None
+        # Whether this integration switched the OhmOnWifi device's relay to
+        # bypass because the outdoor sensor it spoofs from went unavailable —
+        # see `_async_ohmonwifi_relay_failsafe`. Tracked so recovery only
+        # re-engages a bypass WE caused, never one set from the device's own
+        # web UI.
+        self._ohmonwifi_forced_bypass: bool = False
 
         # --- Live control surface (restored by the entities) -----------------
         # All in-memory rather than config options: an options change reloads
@@ -254,7 +269,6 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             CONF_OUTDOOR_TEMP_SENSOR,
             CONF_INDOOR_TEMP_SENSOR,
             CONF_NORDPOOL_PRICE_ENTITY,
-            CONF_POWER_SENSOR,
         )
         return [
             entity_id
@@ -335,6 +349,19 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         return _entry_value(self.entry, CONF_HEATING_TYPE, DEFAULT_HEATING_TYPE)
 
     @property
+    def price_significance_floor_c(self) -> float:
+        """The absolute-money backstop for `heuristic.price_significance()`,
+        in the price sensor's own native units — see CONF_PRICE_SIGNIFICANCE_FLOOR's
+        docstring in const.py."""
+        return float(
+            _entry_value(
+                self.entry,
+                CONF_PRICE_SIGNIFICANCE_FLOOR,
+                DEFAULT_PRICE_SIGNIFICANCE_FLOOR,
+            )
+        )
+
+    @property
     def weather_needed(self) -> bool:
         """Whether the optional weather entity is worth reading at all. Its only
         consumers are the wind and solar terms, so with both off the per-cycle
@@ -372,7 +399,10 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
     # HA's own notification bell surfaces active Repairs issues, so this is the
     # "default trigger" for posting a real error/warning without a bespoke
     # automation. One issue per source, keyed by entry so multiple zones don't
-    # collide; created while the source is down, deleted the moment it is not.
+    # collide; created while the source is down, deleted the moment it is not
+    # (or the moment setup is still within its startup grace period — sources
+    # loaded by other integrations routinely read unavailable for the first
+    # minute or so after a restart, which is not a real outage).
 
     _SOURCE_ISSUE_KEYS = (
         "outdoor_sensor_unavailable",
@@ -382,6 +412,10 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         "price_unavailable",
     )
 
+    def _in_startup_grace_period(self) -> bool:
+        elapsed = dt_util.utcnow() - self._setup_at
+        return elapsed < timedelta(minutes=STARTUP_GRACE_PERIOD_MINUTES)
+
     def _sync_source_issue(
         self,
         key: str,
@@ -390,7 +424,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         entity_id: str | None,
     ) -> None:
         issue_id = f"{key}_{self.entry.entry_id}"
-        if ok:
+        if ok or self._in_startup_grace_period():
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
             return
         ir.async_create_issue(
@@ -613,51 +647,6 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             for start, price in sorted(entries, key=lambda e: e[0])
         )
 
-    def _read_power_w(self) -> tuple[float | None, bool]:
-        """Optional heat-pump power draw. Soft-degrades like price: never an
-        input to the controller, only to the diagnostic echo and the log."""
-        entity_id = _entry_value(self.entry, CONF_POWER_SENSOR, None)
-        if not entity_id:
-            return None, False
-        state = self.hass.states.get(entity_id)
-        if not _state_is_usable(state):
-            _LOGGER.debug("Power sensor %s is unavailable this cycle", entity_id)
-            return None, False
-        value = _as_float(state)
-        if value is None:
-            _LOGGER.warning("Power sensor %s has no numeric state", entity_id)
-            return None, False
-        unit = state.attributes.get("unit_of_measurement", UnitOfPower.WATT)
-        try:
-            return PowerConverter.convert(value, unit, UnitOfPower.WATT), True
-        except Exception:  # noqa: BLE001 - unrecognized unit, treat as unavailable
-            _LOGGER.warning("Power sensor %s has an unrecognized unit %s", entity_id, unit)
-            return None, False
-
-    def _cycle_energy_and_cost(
-        self, power_ok: bool, current_price: float | None, price_ok: bool
-    ) -> tuple[float | None, float | None]:
-        """Coarse energy/cost for one logged cycle: the last power reading held
-        constant over the time since the previous logged cycle. Adequate for an
-        offline cost trend, not billing-grade.
-
-        On installs where the power sensor is shared with hot water production
-        this is NOT attributable to space heating alone — see README.
-        """
-        now = time.monotonic()
-        last = self._energy_last_monotonic
-        self._energy_last_monotonic = now
-        if not power_ok or last is None or self.last_power_w is None:
-            return None, None
-        dt_h = (now - last) / 3600.0
-        energy_kwh = self.last_power_w / 1000.0 * dt_h
-        cost = (
-            energy_kwh * current_price
-            if (price_ok and current_price is not None)
-            else None
-        )
-        return energy_kwh, cost
-
     # --- Learning ------------------------------------------------------------
 
     def _lag_result(self) -> LagResult:
@@ -767,7 +756,9 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
     def _schedule_state_save(self) -> None:
         try:
             self._store.async_delay_save(
-                lambda: learner_serialize(self.learner_state, self.lag_state),
+                lambda: learner_serialize(
+                    self.learner_state, self.lag_state, self.price_spread_history
+                ),
                 LEARNER_STATE_SAVE_DELAY_SECONDS,
             )
         except Exception as err:  # noqa: BLE001 - persistence is best-effort
@@ -791,7 +782,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         if restored is None:
             _LOGGER.info("Stored learned state was not usable; starting fresh")
             return
-        self.learner_state, self.lag_state = restored
+        self.learner_state, self.lag_state, self.price_spread_history = restored
         _LOGGER.debug(
             "Restored learned state: %d samples, %d lag samples",
             self.learner_state.total_samples,
@@ -805,7 +796,9 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         options change."""
         try:
             await self._store.async_save(
-                learner_serialize(self.learner_state, self.lag_state)
+                learner_serialize(
+                    self.learner_state, self.lag_state, self.price_spread_history
+                )
             )
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("Could not save learned state (ignored): %s", err)
@@ -823,11 +816,13 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 severity=ir.IssueSeverity.ERROR,
                 entity_id=_entry_value(self.entry, CONF_OUTDOOR_TEMP_SENSOR, None),
             )
+            await self._async_ohmonwifi_relay_failsafe(sensor_ok=False)
             raise
         self.last_error_at = None
         self._sync_source_issue(
             "outdoor_sensor_unavailable", ok=True, severity=ir.IssueSeverity.ERROR, entity_id=None
         )
+        await self._async_ohmonwifi_relay_failsafe(sensor_ok=True)
         indoor_temp_c, indoor_ok = self._read_indoor_temp_c()
         wind_speed_ms, wind_ok, cloud_coverage_pct, cloud_ok = await self._read_forecast()
         sun_elevation_deg = self._read_sun_elevation()
@@ -858,9 +853,40 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         )
         price_forecast = self._price_forecast_offsets()
         self._last_price_forecast = price_forecast
-        power_w, power_ok = self._read_power_w()
-        self.last_power_w = power_w
-        self.last_power_data_available = power_ok
+
+        # Price significance: a taper on braking/pre-charge authority for days
+        # whose price swing is economically trivial — see
+        # `heuristic.price_significance()` for the full design and the field
+        # data that justified it. The seasonal history only ever records a
+        # REAL observation: with no usable forecast this cycle, `today_band`
+        # is None and the persisted history — and hence the seasonal
+        # reference and the auto floor other days compare against — is left
+        # untouched rather than folding in a bogus zero.
+        today_band = today_price_spread_and_median_c(price_forecast)
+        today_spread: float | None = None
+        price_significance_factor = 1.0
+        seasonal_reference_spread_c: float | None = None
+        if today_band is not None:
+            today_spread, today_median = today_band
+            updated_history = update_price_spread_history(
+                self.price_spread_history,
+                dt_util.now().date().isoformat(),
+                today_spread,
+                today_median,
+            )
+            # `update_price_spread_history` returns the SAME object (not an
+            # equal one) when neither today's spread nor its median moved, so
+            # this identity check is what keeps a quiet day from scheduling a
+            # write every single cycle.
+            if updated_history is not self.price_spread_history:
+                self.price_spread_history = updated_history
+                self._schedule_state_save()
+            price_significance_factor, seasonal_reference_spread_c = price_significance(
+                today_spread,
+                today_median,
+                self.price_spread_history,
+                self.price_significance_floor_c,
+            )
 
         # Learning advances on its own clock; republishing happens every time.
         self._learner_stepped = self._due_for_learner_step() and self._advance_learning(
@@ -900,6 +926,9 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 fall_minutes=lag.fall_minutes,
                 rise_minutes=lag.rise_minutes,
                 recoverable_sag_c=recoverable,
+                price_significance_factor=price_significance_factor,
+                today_price_spread_c=today_spread,
+                seasonal_reference_spread_c=seasonal_reference_spread_c,
             ),
             self._params(),
         )
@@ -1008,6 +1037,79 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 "Could not push to OhmOnWifi device %s (ignored): %s", host, err
             )
 
+    async def _async_ohmonwifi_relay_failsafe(self, sensor_ok: bool) -> None:
+        """Keep the OhmOnWifi device off a stale override when its source goes
+        bad, and hand control back once it's ours to give.
+
+        `_async_push_ohmonwifi` only fires from a successful cycle, so once
+        the outdoor sensor it spoofs from goes unavailable, `_async_update_data`
+        raises before ever reaching that push — the device is left holding
+        whatever AT value it last received, indefinitely, with no further
+        write to even notice the source is down. `/info`'s `relay` field is
+        "ON" while the device outputs our override and "OFF" while its relay
+        bypasses to the real external sensor; this flips it to "OFF" the
+        moment the source sensor goes bad, and back once it recovers.
+
+        Only used while CONF_OUTPUT_MODE is OUTPUT_MODE_OUTDOOR_SPOOF — the
+        heat-curve-offset mode never engages the device's relay in the first
+        place, see `CONF_OHMONWIFI_HOST` in const.py.
+
+        Guarded by `_ohmonwifi_forced_bypass` so recovery only re-engages a
+        bypass this integration itself caused, never one set by hand from the
+        device's own web UI.
+        """
+        host = self.ohmonwifi_host
+        if not host or self.output_mode != OUTPUT_MODE_OUTDOOR_SPOOF:
+            return
+        try:
+            if not sensor_ok:
+                if await self._async_ohmonwifi_relay_state(host) == "ON":
+                    await self._async_ohmonwifi_toggle(host)
+                    self._ohmonwifi_forced_bypass = True
+                    _LOGGER.warning(
+                        "Outdoor sensor unavailable; switched OhmOnWifi device "
+                        "%s to bypass so the heat pump reads its real external "
+                        "sensor instead of a stale override",
+                        host,
+                    )
+            elif self._ohmonwifi_forced_bypass:
+                if await self._async_ohmonwifi_relay_state(host) == "OFF":
+                    await self._async_ohmonwifi_toggle(host)
+                    _LOGGER.info(
+                        "Outdoor sensor recovered; switched OhmOnWifi device %s "
+                        "back to override",
+                        host,
+                    )
+                self._ohmonwifi_forced_bypass = False
+        except Exception as err:  # noqa: BLE001 - best-effort, never break output
+            _LOGGER.warning(
+                "Could not update OhmOnWifi device %s relay state (ignored): %s",
+                host,
+                err,
+            )
+
+    async def _async_ohmonwifi_relay_state(self, host: str) -> str | None:
+        """GET `/info`'s `relay` field: "ON" (override active) or "OFF"
+        (bypassed to the real external sensor)."""
+        session = async_get_clientsession(self.hass)
+        async with session.get(
+            f"http://{host}/info",
+            timeout=aiohttp.ClientTimeout(total=OHMONWIFI_REQUEST_TIMEOUT_SECONDS),
+        ) as response:
+            response.raise_for_status()
+            data = await response.json(content_type=None)
+        return data.get("relay")
+
+    async def _async_ohmonwifi_toggle(self, host: str) -> None:
+        """GET `/toggle` — OhmOnWifi's own local API to flip its relay between
+        override and bypass."""
+        session = async_get_clientsession(self.hass)
+        async with session.get(
+            f"http://{host}/toggle",
+            timeout=aiohttp.ClientTimeout(total=OHMONWIFI_REQUEST_TIMEOUT_SECONDS),
+        ) as response:
+            response.raise_for_status()
+
     async def _async_push_number_entity(self, entity_id: str, value: float) -> None:
         """Push via a HA `number.set_value` call. Best-effort: any failure
         (entity gone, wrong domain, outside the target's min/max) is logged and
@@ -1065,7 +1167,6 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             "solar_effect": result.solar_effect,
             "current_price": result.current_price,
             "price_ok": result.price_data_available,
-            "power_w": self.last_power_w,
             # --- live control surface ---
             "is_active": self.is_active,
             "output_mode": self.output_mode,
@@ -1081,6 +1182,9 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             "price_adjustment_c": result.price_adjustment_c,
             "price_response": result.price_response,
             "cold_brake_factor": result.cold_brake_factor,
+            "price_significance_factor": result.price_significance_factor,
+            "today_price_spread_c": result.today_price_spread_c,
+            "seasonal_reference_spread_c": result.seasonal_reference_spread_c,
             "price_braking": result.price_braking,
             "precharge_active": result.precharge_active,
             "heating_cutoff_engaged": result.heating_cutoff_engaged,
@@ -1142,13 +1246,6 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             record["price_forecast"] = [
                 [round(h, 3), p] for h, p in self._last_price_forecast
             ]
-        energy_kwh, cost = self._cycle_energy_and_cost(
-            self.last_power_data_available, result.current_price, result.price_data_available
-        )
-        if energy_kwh is not None:
-            record["cycle_energy_kwh"] = energy_kwh
-        if cost is not None:
-            record["cycle_cost"] = cost
         return record
 
     async def _log_data_point(self, result: HeuristicResult) -> None:

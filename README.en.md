@@ -36,7 +36,8 @@ house, over a few days — there are no settings to fiddle with.
   the difference.
 - ☀️💨 **Accounts for sun and wind** (optional) — for homes where sunlight
   genuinely warms the room, or where draughts are a real issue.
-- 📊 **A dashboard card is included**, showing what it's doing and why.
+- 📊 **[A dashboard card is included](docs/card.png)**, showing what it's
+  doing and why.
 - 🔌 **Works with most heat pumps** — all it needs is a pump that reads an
   outdoor-temperature sensor, which almost all of them do.
 

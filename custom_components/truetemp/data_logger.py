@@ -20,12 +20,6 @@ internal state (which moves every cycle and is not reconstructible from
 stored config), and the price forecast the decision actually used. That last
 one matters because forecasts get revised: the realised prices are not a
 substitute for what was known at decision time.
-
-When an optional power sensor is configured, each record also gets a coarse
-per-cycle energy/cost estimate (see coordinator._cycle_energy_and_cost) —
-the only real (non-proxy-unit) savings signal in the project. On installs
-where that sensor is shared with hot water production it isn't attributable
-to space heating alone; see README.
 """
 
 from __future__ import annotations

@@ -9,6 +9,8 @@ export const STRINGS = {
   badgeDisabled: "disabled",
   rowPublishingOffset: "Publishing offset",
   rowPublishing: "Publishing",
+  rowWouldPublishOffset: "Would publish offset",
+  rowWouldPublish: "Would publish",
   rowOutdoorNow: "Outdoor now",
   rowIndoorNow: "Indoor now",
   rowTarget: "Target",

@@ -79,14 +79,12 @@
         "data": {
           "weather_entity": "Wettervorhersage",
           "nordpool_price_entity": "Strompreis",
-          "power_sensor": "Leistungsmesser der Wärmepumpe",
           "enable_solar_input": "Sonneneinstrahlung ausgleichen",
           "enable_wind_input": "Wind ausgleichen"
         },
         "data_description": {
           "weather_entity": "Wird nur für die Sonnen- und Windvorhersage genutzt. Nicht nötig, wenn beides unten ausgeschaltet ist.",
           "nordpool_price_entity": "Ein Nordpool-Sensor mit den stündlichen Preisen für heute und morgen. Ohne ihn bewirkt die Preisersparnis nichts.",
-          "power_sensor": "Wird nie zur Steuerung genutzt — fügt dem Protokoll nur echte Energie- und Kostenwerte hinzu. Bei den meisten Installationen deckt dieser Zähler auch das Warmwasser mit ab, misst also nicht nur die Heizung allein.",
           "enable_solar_input": "Reduziert die Heizleistung etwas, wenn die Sonne das Haus aufwärmt. Nur einschalten, wenn dein Innensensor an einer Stelle sitzt, die die Sonne tatsächlich erreicht. Ein Sensor im Keller, in einem nach Norden ausgerichteten Raum oder im Flur bekommt den solaren Wärmegewinn nie mit — das würde die Temperatur für eine Erwärmung senken, die dein Sensor nicht bestätigen kann.",
           "enable_wind_input": "Erhöht die Heizleistung etwas, wenn Wind dem Haus Wärme entzieht. Lass dies ausgeschaltet, außer du hast ein älteres, zugiges Haus, bei dem du bei starkem Wind spürbar auskühlende Räume bemerkst. Ein einigermaßen gut abgedichtetes Haus reagiert kaum auf Wind, und ein Ausgleich für einen nicht vorhandenen Effekt fügt nur Störrauschen hinzu."
         }
@@ -96,11 +94,13 @@
         "description": "Wenn Strom teuer ist, kann TrueTemp das Haus etwas kühler werden lassen und es nachholen, wenn die Preise fallen. Wie stark es driften darf, wird über den Regler „Preisersparnis“ der Zone festgelegt; wie vorsichtig es bei richtiger Kälte ist, über „Kältevorsicht“.",
         "data": {
           "enable_price_compensation": "Geld sparen, wenn Strom teuer ist",
-          "comfort_min_c": "Nie kälter werden lassen als"
+          "comfort_min_c": "Nie kälter werden lassen als",
+          "price_significance_floor": "Preisschwankungen kleiner als das ignorieren"
         },
         "data_description": {
           "enable_price_compensation": "Benötigt einen Strompreissensor auf der vorherigen Seite.",
-          "comfort_min_c": "Eine feste Untergrenze. Keine Ersparnis wird das Haus unter diesen Wert bringen."
+          "comfort_min_c": "Eine feste Untergrenze. Keine Ersparnis wird das Haus unter diesen Wert bringen.",
+          "price_significance_floor": "Unterhalb dieses Unterschieds zwischen der günstigsten und teuersten Stunde des Tages klingen Bremsen und Vorladen aus, statt zu reagieren — schützt eine dauerhaft günstige Phase davor, auf Schwankungen zu reagieren, die den Komfortverlust nicht wert sind. Bei 0 belassen für automatisch (skaliert auf dein typisches lokales Preisniveau); zum selbst Festlegen eine Zahl in der Einheit deines Preissensors eingeben."
         }
       },
       "output": {

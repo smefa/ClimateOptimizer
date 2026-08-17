@@ -20,12 +20,6 @@ CONF_INDOOR_TEMP_SENSOR = "indoor_temp_sensor"
 CONF_OUTDOOR_TEMP_SENSOR = "outdoor_temp_sensor"
 CONF_WEATHER_ENTITY = "weather_entity"
 CONF_NORDPOOL_PRICE_ENTITY = "nordpool_price_entity"
-# Optional: the heat pump's live electrical power draw. Purely for local
-# history logging and a diagnostic echo — never an input to the controller
-# (it's an effect of past decisions, not something a control decision should
-# react to). On many installs this circuit also serves hot water production,
-# so it is NOT a clean space-heating-only signal.
-CONF_POWER_SENSOR = "power_sensor"
 
 # --- Config / options keys: targets to write ------------------------------
 # Which mechanism carries the published value to the heat pump. The two
@@ -73,6 +67,22 @@ CONF_ENABLE_PRICE_COMPENSATION = "enable_price_compensation"
 # there is no upper bound because pre-charging is already limited by the tier's
 # own boost allowance, so a second clamp above never bound anything.
 CONF_COMFORT_MIN_C = "comfort_min_c"
+# How much day-ahead price swing (peak minus median, in the price sensor's own
+# native units) counts as economically worth reacting to at all. Below this,
+# `heuristic.price_significance()` tapers braking/pre-charge authority toward
+# zero regardless of how large the swing looks in RELATIVE terms — see that
+# function's docstring for the field data that showed relative-only scoring
+# ranking days backwards in money terms and misfiring near a near-zero median.
+#
+# 0 (the default) means AUTO rather than "no floor": see
+# `heuristic._resolve_absolute_floor_c` for why a single fixed constant cannot
+# mean the same thing across currencies and sub-units (SEK/kWh, öre/kWh,
+# EUR/MWh, ...) and what the auto value is derived from instead. Any other
+# value is used verbatim as an explicit override, in the price sensor's own
+# native units — see config_flow.py's `_price_unit` for why that unit must be
+# read from the price entity's `unit_of_measurement` attribute and never its
+# `currency` one.
+CONF_PRICE_SIGNIFICANCE_FLOOR = "price_significance_floor"
 # Master toggles for the two optional weather-derived feedforward terms. Each
 # switches its term off entirely rather than relying on a zeroed coefficient.
 # With both off, no weather entity is needed at all.
@@ -104,7 +114,6 @@ KNOWN_CONFIG_KEYS = frozenset(
         CONF_OUTDOOR_TEMP_SENSOR,
         CONF_WEATHER_ENTITY,
         CONF_NORDPOOL_PRICE_ENTITY,
-        CONF_POWER_SENSOR,
         CONF_OUTPUT_MODE,
         CONF_OUTPUT_NUMBER_ENTITY,
         CONF_OHMONWIFI_HOST,
@@ -114,6 +123,7 @@ KNOWN_CONFIG_KEYS = frozenset(
         CONF_HEATING_TYPE,
         CONF_ENABLE_PRICE_COMPENSATION,
         CONF_COMFORT_MIN_C,
+        CONF_PRICE_SIGNIFICANCE_FLOOR,
         CONF_ENABLE_SOLAR_INPUT,
         CONF_ENABLE_WIND_INPUT,
         CONF_ENABLE_DATA_LOGGING,
@@ -124,6 +134,15 @@ KNOWN_CONFIG_KEYS = frozenset(
 DEFAULT_INDOOR_TARGET_TEMPERATURE = 21.0
 DEFAULT_ENABLE_PRICE_COMPENSATION = False
 DEFAULT_COMFORT_MIN_C = 18.0
+# 0 means AUTO: heuristic._resolve_absolute_floor_c derives a floor from this
+# install's own price history instead of using a fixed number. A fixed
+# non-zero default was tried and rejected — Nordpool alone spans SEK, NOK,
+# DKK and EUR, in whole-currency or öre/øre/cents sub-units, and per kWh, Wh
+# or MWh: a single constant spanning ~10^8 in real terms would either silently
+# disable saving entirely for some users (a EUR/kWh household) or protect
+# nobody (an öre/kWh or Wh household). See that function's docstring for what
+# the auto value actually computes and its own honestly-stated limitation.
+DEFAULT_PRICE_SIGNIFICANCE_FLOOR = 0.0
 DEFAULT_ENABLE_SOLAR_INPUT = True
 DEFAULT_ENABLE_WIND_INPUT = False
 DEFAULT_ENABLE_DATA_LOGGING = False
@@ -140,6 +159,15 @@ DEFAULT_HEAT_CURVE_OFFSET_INVERT = False
 # recovering still republish the output, they just don't advance learning.
 UPDATE_INTERVAL_MINUTES = 15
 LEARNER_STEP_SECONDS = UPDATE_INTERVAL_MINUTES * 60
+
+# How long after this config entry's setup to hold off raising a source-unavailable
+# Repair issue. HA restarts entities in no guaranteed order, so a sensor that is
+# perfectly healthy can still read unavailable/unknown for the first minute or two
+# while its own integration is still starting up. Source reads, retries and the
+# state-change listener all behave normally through this window - only the
+# Repairs alarm is deferred, so a genuine outage still surfaces once the window
+# passes.
+STARTUP_GRACE_PERIOD_MINUTES = 5
 
 # Above this outdoor temperature, compensation is suppressed entirely and the
 # raw outdoor temperature is published unmodified. Derived from the target

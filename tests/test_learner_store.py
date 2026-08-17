@@ -24,6 +24,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from loader import load  # noqa: E402
 
+# `heuristic` must load before `learner_store`: learner_store.py's own
+# `from .heuristic import ...` falls back to a bare `from heuristic import ...`
+# when loaded standalone by path (see loader.py's docstring), and that fallback
+# only resolves if "heuristic" is already registered in sys.modules by then.
+heuristic = load("heuristic")
 lag = load("lag")
 learner = load("learner")
 store = load("learner_store")
@@ -73,10 +78,23 @@ def populated_lag() -> lag.LagState:
     )
 
 
+def populated_price_spread_history() -> "heuristic.PriceSpreadHistory":
+    return heuristic.PriceSpreadHistory(
+        daily_spreads_c=tuple(0.1 + 0.02 * i for i in range(12)),
+        daily_medians_c=tuple(0.3 + 0.01 * i for i in range(12)),
+        current_date="2026-08-16",
+        current_date_max_spread_c=0.42,
+        current_date_median_c=0.31,
+    )
+
+
 class TestRoundTrip:
     def test_every_learned_field_survives(self):
         state, lag_state = populated_state(), populated_lag()
-        restored, restored_lag = store.deserialize(store.serialize(state, lag_state))
+        price_history = populated_price_spread_history()
+        restored, restored_lag, restored_price_history = store.deserialize(
+            store.serialize(state, lag_state, price_history)
+        )
         assert restored.bins == state.bins
         assert restored.baseline_bins == state.baseline_bins
         assert restored.total_samples == state.total_samples
@@ -86,25 +104,32 @@ class TestRoundTrip:
         assert restored.prev_offset_c == state.prev_offset_c
         assert restored.prev_is_active == state.prev_is_active
         assert restored_lag == lag_state
+        assert restored_price_history == price_history
 
     def test_payload_is_json_serializable(self):
         """It goes through homeassistant's Store, which is JSON on disk."""
-        payload = store.serialize(populated_state(), populated_lag())
+        payload = store.serialize(
+            populated_state(), populated_lag(), populated_price_spread_history()
+        )
         assert json.loads(json.dumps(payload)) == payload
 
     def test_a_cold_start_round_trips(self):
         state = learner.initial_state()
         lag_state = lag.initial_state(15.0)
-        restored, restored_lag = store.deserialize(store.serialize(state, lag_state))
+        price_history = heuristic.initial_price_spread_history()
+        restored, restored_lag, restored_price_history = store.deserialize(
+            store.serialize(state, lag_state, price_history)
+        )
         assert restored == state
         assert restored_lag == lag_state
+        assert restored_price_history == price_history
 
     def test_holdoff_is_deliberately_not_persisted(self):
         """It is measured against a monotonic clock that resets on restart, so
         a stored value would be meaningless. No hold-off is the safe reading."""
         payload = store.serialize(populated_state(), populated_lag())
         assert "holdoff_until_s" not in payload
-        restored, _ = store.deserialize(payload)
+        restored, _, _ = store.deserialize(payload)
         assert restored.holdoff_until_s is None
 
     def test_store_key_is_entry_scoped(self):
@@ -119,7 +144,7 @@ class TestCompatibility:
         shape of the table — so a payload written under any configuration loads
         under any other."""
         payload = store.serialize(populated_state(), populated_lag())
-        restored, _ = store.deserialize(payload)
+        restored, _, _ = store.deserialize(payload)
         assert restored.total_samples == 421
         assert restored.bins[3].samples > 0
 
@@ -157,7 +182,7 @@ class TestBaselineTable:
             del item["seeded"]
         del payload["prev_is_active"]
 
-        restored, restored_lag = store.deserialize(payload)
+        restored, restored_lag, restored_price_history = store.deserialize(payload)
         assert restored is not None
         # The valuable part — the offset table — survives untouched.
         assert restored.total_samples == 421
@@ -169,12 +194,15 @@ class TestBaselineTable:
         )
         assert all(not b.seeded for b in restored.bins)
         assert restored.prev_is_active is False
+        # `price_spread_history` didn't exist yet either — same upgrade path,
+        # same "comes back at its default" expectation.
+        assert restored_price_history == heuristic.initial_price_spread_history()
 
     def test_corrupt_baseline_drops_only_the_baseline(self):
         payload = store.serialize(populated_state(), populated_lag())
         payload["baseline_bins"][0]["indoor_c"] = float("nan")
 
-        restored, _ = store.deserialize(payload)
+        restored, _, _ = store.deserialize(payload)
         assert restored is not None
         assert restored.total_samples == 421
         assert restored.bins[3].samples > 0
@@ -186,7 +214,7 @@ class TestBaselineTable:
         payload = store.serialize(populated_state(), populated_lag())
         payload["baseline_bins"] = payload["baseline_bins"][:-1]
 
-        restored, _ = store.deserialize(payload)
+        restored, _, _ = store.deserialize(payload)
         assert restored is not None
         assert restored.total_samples == 421
         assert restored.baseline_bins == tuple(
@@ -197,7 +225,7 @@ class TestBaselineTable:
         payload = store.serialize(populated_state(), populated_lag())
         payload["baseline_bins"][0]["samples"] = -1
 
-        restored, _ = store.deserialize(payload)
+        restored, _, _ = store.deserialize(payload)
         assert restored is not None
         assert restored.total_samples == 421
         assert restored.baseline_bins == tuple(
@@ -216,7 +244,7 @@ class TestBaselineTable:
 
         payload["prev_bin_index"] = 5
         payload["bin_entered_s"] = 123.0
-        restored, _ = store.deserialize(payload)
+        restored, _, _ = store.deserialize(payload)
         assert restored.prev_bin_index is None
         assert restored.bin_entered_s is None
 
@@ -288,7 +316,7 @@ class TestLagBufferIsExpendable:
         mutate(payload)
         restored = store.deserialize(payload)
         assert restored is not None
-        state, lag_state = restored
+        state, lag_state, _ = restored
         assert state.total_samples == 421
         assert lag_state.indoors_c == ()
 
@@ -298,7 +326,7 @@ class TestLagBufferIsExpendable:
         discard perfectly good samples over it."""
         payload = store.serialize(populated_state(), populated_lag())
         payload["lag"]["step_minutes"] = "fifteen"
-        _, lag_state = store.deserialize(payload)
+        _, lag_state, _ = store.deserialize(payload)
         assert len(lag_state.indoors_c) == 40
         assert lag_state.step_minutes == 15.0
 
@@ -309,6 +337,76 @@ class TestLagBufferIsExpendable:
             targets_c=tuple(21.0 for _ in range(lag.BUFFER_SAMPLES + 100)),
             step_minutes=15.0,
         )
-        _, restored = store.deserialize(store.serialize(populated_state(), big))
+        _, restored, _ = store.deserialize(store.serialize(populated_state(), big))
         assert len(restored.offsets_c) == lag.BUFFER_SAMPLES
         assert restored.offsets_c[-1] == float(lag.BUFFER_SAMPLES + 99)
+
+
+class TestPriceSpreadHistoryIsExpendable:
+    """The rolling price-spread/median history behind
+    `heuristic.price_significance()`. Same "expendable, drop it on its own"
+    treatment as the lag buffer above: losing it costs weeks of
+    reference-building for the price-significance taper, not the calibrated
+    offset table beside it."""
+
+    def test_omitted_key_is_a_cold_start_for_history_only(self):
+        """`serialize` with no third argument (most calls in this file,
+        including every one above this class) simply omits the key — the same
+        upgrade path a payload written before this feature existed takes."""
+        payload = store.serialize(populated_state(), populated_lag())
+        assert "price_spread_history" not in payload
+        state, _, price_history = store.deserialize(payload)
+        assert state.total_samples == 421
+        assert price_history == heuristic.initial_price_spread_history()
+
+    @pytest.mark.parametrize(
+        "mutate",
+        [
+            lambda p: p.update(price_spread_history="not a dict"),
+            lambda p: p["price_spread_history"].update(daily_spreads_c="nope"),
+            lambda p: p["price_spread_history"].update(
+                daily_medians_c=[float("nan"), 0.3]
+            ),
+            # Parallel arrays (see PriceSpreadHistory's docstring) — a length
+            # mismatch breaks the date-by-date pairing itself.
+            lambda p: p["price_spread_history"].update(
+                daily_spreads_c=[0.1, 0.2], daily_medians_c=[0.3]
+            ),
+            lambda p: p["price_spread_history"].update(
+                current_date_max_spread_c=float("nan")
+            ),
+            lambda p: p["price_spread_history"].update(current_date_median_c=-1.0),
+            lambda p: p["price_spread_history"].update(current_date=123),
+        ],
+    )
+    def test_bad_history_keeps_the_table(self, mutate):
+        payload = store.serialize(
+            populated_state(), populated_lag(), populated_price_spread_history()
+        )
+        mutate(payload)
+        restored = store.deserialize(payload)
+        assert restored is not None
+        state, _, price_history = restored
+        assert state.total_samples == 421
+        assert price_history == heuristic.initial_price_spread_history()
+
+    def test_oversized_history_is_truncated_to_the_newest(self):
+        long_history = heuristic.PriceSpreadHistory(
+            daily_spreads_c=tuple(
+                float(i) for i in range(heuristic.PRICE_SPREAD_HISTORY_DAYS + 10)
+            ),
+            daily_medians_c=tuple(
+                0.3 + 0.001 * i
+                for i in range(heuristic.PRICE_SPREAD_HISTORY_DAYS + 10)
+            ),
+            current_date="2026-08-16",
+            current_date_max_spread_c=0.5,
+            current_date_median_c=0.3,
+        )
+        _, _, restored = store.deserialize(
+            store.serialize(populated_state(), populated_lag(), long_history)
+        )
+        assert len(restored.daily_spreads_c) == heuristic.PRICE_SPREAD_HISTORY_DAYS
+        assert restored.daily_spreads_c[-1] == float(
+            heuristic.PRICE_SPREAD_HISTORY_DAYS + 9
+        )

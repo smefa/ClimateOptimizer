@@ -34,6 +34,17 @@ loads exactly as it always did — empty baseline table, every bin unseeded, and
 table intact. Bumping the version here would cold-start every existing
 install's offset table just to gain a table that starts empty anyway, which is
 the same throwaway `learner.py`'s own docstring argues against.
+
+The rolling price-spread/median history (`PriceSpreadHistory` from
+`heuristic.py`, added for `heuristic.price_significance()`) follows the exact
+same rule: it lives under its own top-level `price_spread_history` key,
+entirely absent from any payload written before this feature existed, and
+`deserialize` reads it with `.get()` and falls back to an empty history — see
+`_parse_price_spread_history` — rather than bumping the schema version. Losing
+it is cheap by the same reasoning the lag buffer below already established:
+it costs a few weeks of reference-building for the price-significance taper,
+not the calibrated offset table, so a corrupt or missing one is dropped on its
+own instead of taking the far more valuable learner state down with it.
 """
 
 from __future__ import annotations
@@ -46,6 +57,7 @@ from typing import Any
 # this file is loaded standalone by file path in the test suite, which has no
 # package context and pre-registers the sibling modules in sys.modules.
 try:  # pragma: no cover - trivial import shim
+    from .heuristic import PRICE_SPREAD_HISTORY_DAYS, PriceSpreadHistory
     from .lag import BUFFER_SAMPLES, LagState
     from .learner import (
         MODEL_VERSION,
@@ -55,6 +67,10 @@ try:  # pragma: no cover - trivial import shim
         OutdoorBin,
     )
 except ImportError:  # pragma: no cover - test path-load fallback
+    from heuristic import (  # type: ignore[no-redef]
+        PRICE_SPREAD_HISTORY_DAYS,
+        PriceSpreadHistory,
+    )
     from lag import BUFFER_SAMPLES, LagState  # type: ignore[no-redef]
     from learner import (  # type: ignore[no-redef]
         MODEL_VERSION,
@@ -86,9 +102,22 @@ def store_key(entry_id: str) -> str:
     return f"{STORAGE_KEY_PREFIX}_{entry_id}"
 
 
-def serialize(state: LearnerState, lag_state: LagState) -> dict[str, Any]:
-    """Convert learner + lag state into a JSON-safe dict for the Store."""
-    return {
+def serialize(
+    state: LearnerState,
+    lag_state: LagState,
+    price_spread_history: PriceSpreadHistory | None = None,
+) -> dict[str, Any]:
+    """Convert learner + lag + price-spread-history state into a JSON-safe
+    dict for the Store.
+
+    `price_spread_history` defaults to None and, when None, is simply omitted
+    from the payload rather than serialized as an empty history — the same
+    outcome `deserialize` falls back to for a payload that never had the key
+    at all (see `_parse_price_spread_history`), so a caller with nothing to
+    persist yet (this module's own tests included) does not need to invent a
+    placeholder value.
+    """
+    payload: dict[str, Any] = {
         "schema_version": STATE_SCHEMA_VERSION,
         "model_version": MODEL_VERSION,
         "n_bins": len(state.bins),
@@ -130,6 +159,15 @@ def serialize(state: LearnerState, lag_state: LagState) -> dict[str, Any]:
             "targets_c": list(lag_state.targets_c),
         },
     }
+    if price_spread_history is not None:
+        payload["price_spread_history"] = {
+            "daily_spreads_c": list(price_spread_history.daily_spreads_c),
+            "daily_medians_c": list(price_spread_history.daily_medians_c),
+            "current_date": price_spread_history.current_date,
+            "current_date_max_spread_c": price_spread_history.current_date_max_spread_c,
+            "current_date_median_c": price_spread_history.current_date_median_c,
+        }
+    return payload
 
 
 def _finite_or_none(value: Any) -> bool:
@@ -149,6 +187,51 @@ def _floats(values: Any, limit: int) -> tuple[float, ...] | None:
     if not all(math.isfinite(v) for v in out):
         return None
     return out[-limit:]
+
+
+def _parse_price_spread_history(raw: Any) -> PriceSpreadHistory | None:
+    """Coerce a stored price-spread history, or `None` if it is not usable as
+    one.
+
+    A missing key (`raw is None` — every payload written before this feature
+    existed) and a genuinely corrupt one both return `None` here, exactly like
+    `_parse_baseline_bins` above: the caller falls back to an empty history
+    either way, which just means `heuristic.price_significance()`'s seasonal
+    term and auto floor contribute no extra information until fresh days
+    accumulate again — far cheaper to lose than the offset table beside it.
+    """
+    if not isinstance(raw, dict):
+        return None
+    try:
+        daily_spreads_c = _floats(raw.get("daily_spreads_c"), PRICE_SPREAD_HISTORY_DAYS)
+        daily_medians_c = _floats(raw.get("daily_medians_c"), PRICE_SPREAD_HISTORY_DAYS)
+        if daily_spreads_c is None or daily_medians_c is None:
+            raise ValueError("unreadable daily_spreads_c/daily_medians_c")
+        if len(daily_spreads_c) != len(daily_medians_c):
+            # The two tuples are parallel, one entry per stored date (see
+            # PriceSpreadHistory's docstring) — a length mismatch means the
+            # pairing itself cannot be trusted, not just one value in it.
+            raise ValueError("daily_spreads_c/daily_medians_c length mismatch")
+        if any(v < 0 for v in daily_spreads_c) or any(v < 0 for v in daily_medians_c):
+            raise ValueError("negative stored price/spread")
+        current_date = raw.get("current_date")
+        if current_date is not None and not isinstance(current_date, str):
+            raise TypeError("current_date is not a string")
+        current_date_max_spread_c = float(raw.get("current_date_max_spread_c", 0.0))
+        current_date_median_c = float(raw.get("current_date_median_c", 0.0))
+        if not math.isfinite(current_date_max_spread_c) or current_date_max_spread_c < 0:
+            raise ValueError("bad current_date_max_spread_c")
+        if not math.isfinite(current_date_median_c) or current_date_median_c < 0:
+            raise ValueError("bad current_date_median_c")
+    except (TypeError, ValueError):
+        return None
+    return PriceSpreadHistory(
+        daily_spreads_c=daily_spreads_c,
+        daily_medians_c=daily_medians_c,
+        current_date=current_date,
+        current_date_max_spread_c=current_date_max_spread_c,
+        current_date_median_c=current_date_median_c,
+    )
 
 
 def _parse_baseline_bins(raw: Any) -> tuple[BaselineBin, ...] | None:
@@ -179,8 +262,11 @@ def _parse_baseline_bins(raw: Any) -> tuple[BaselineBin, ...] | None:
     return tuple(out)
 
 
-def deserialize(data: Any) -> tuple[LearnerState, LagState] | None:
-    """Reconstruct (learner state, lag state), or `None` if unusable.
+def deserialize(
+    data: Any,
+) -> tuple[LearnerState, LagState, PriceSpreadHistory] | None:
+    """Reconstruct (learner state, lag state, price-spread history), or `None`
+    if unusable.
 
     Never raises. `None` means "cold start cleanly", which is always a safe
     outcome: an empty table simply relearns, starting from the minimum
@@ -330,4 +416,20 @@ def deserialize(data: Any) -> tuple[LearnerState, LagState] | None:
         else:
             _LOGGER.debug("Lag buffer discarded (learned table kept)")
 
-    return learner_state, lag_state
+    # Same "expendable, drop it on its own" treatment as the lag buffer just
+    # above — see `_parse_price_spread_history`'s docstring for why losing it
+    # is cheap. Missing entirely is the normal upgrade path from a payload
+    # written before this feature existed and gets no log line; present but
+    # unusable is genuine corruption and does, mirroring the baseline table's
+    # own missing-vs-corrupt distinction above.
+    price_spread_history = PriceSpreadHistory()
+    raw_price_spread_history = data.get("price_spread_history")
+    parsed_price_spread_history = _parse_price_spread_history(raw_price_spread_history)
+    if parsed_price_spread_history is not None:
+        price_spread_history = parsed_price_spread_history
+    elif raw_price_spread_history is not None:
+        _LOGGER.debug(
+            "Price spread history discarded (learned table kept): corrupt payload"
+        )
+
+    return learner_state, lag_state, price_spread_history

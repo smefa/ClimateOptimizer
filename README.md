@@ -37,8 +37,8 @@ skruva på.
   märker någon skillnad i huset. Som standard sänker den också värmen om det inte behövs och du sparar även på det.
 - ☀️💨 **Tar hänsyn till sol och vind** (valfritt) — för hus där solen
   faktiskt värmer rummet, eller där drag är ett riktigt problem.
-- 📊 **Egen kontrollpanel** — ett färdigt kort som visar vad tillägget gör
-  och varför.
+- 📊 **[Egen kontrollpanel](docs/card.png)** — ett färdigt kort som visar vad
+  tillägget gör och varför.
 - 🔌 **Fungerar med de flesta värmepumpar** — allt som krävs är en pump som
   läser av en utegivare, vilket nästan alla gör.
 

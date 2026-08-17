@@ -56,6 +56,30 @@ Price compensation is the one thing here that intentionally holds the house
 away from target. That matters for the learner, which would otherwise read the
 sag as error and wind up fighting it. `price_braking` on the result is what
 tells the learner to freeze; see `learner._freeze_reason`.
+
+## Price significance: a taper, not a gate
+
+`_price_band_info` below scores TODAY's price band purely in relative terms —
+peak vs median, as a fraction of the median. That is not the same question as
+"is today's swing worth the comfort trade", and confirmed against 16 days of
+the reference install's real SE2 logs, it answers the wrong one in two
+distinct ways: it ranked a 0.19 SEK/kWh day above a 0.91 SEK/kWh day because
+the smaller swing happened to sit on a smaller median (400% relative vs 95%),
+and it hands out full braking authority for a one-öre swing whenever the
+median itself is close to zero (a 0.001/0.01 SEK median/peak pair scores a
+9.0 ratio).
+
+`price_significance()` fixes this with two multiplicative 0..1 terms — how
+large today's spread is against a SEASONAL reference built from this
+install's own price history, and how large it is against one ABSOLUTE floor
+(auto-derived from the local price level by default, or a fixed user-set
+value) — combined by taking the minimum, and applied as a continuous taper on
+`price_shift_c` rather than a second hard gate. A gate would flap:
+the band widens within a day as tomorrow's prices publish (typically ~13:00
+for Nordpool), so a threshold crossed and re-crossed mid-day would start and
+stop braking mid-cycle for no change in outdoor conditions. See
+`PriceSpreadHistory`, `update_price_spread_history` and `price_significance`
+below for the mechanism, and `compute()` for where the taper is applied.
 """
 
 from __future__ import annotations
@@ -218,6 +242,17 @@ def cold_brake_factor(
 _MIN_FORECAST_POINTS = 6
 # The day must vary by at least this fraction (peak vs median, relative to the
 # median) before any compensation engages. A flat day gets left alone.
+#
+# This ratio has exactly the two failure modes `price_significance()` below
+# was built to fix (ranks money backwards, degenerates near a zero median),
+# and is deliberately left as-is here rather than rewritten to use it:
+# `engaged` is a hard boolean that `price_flat_day` and the reason string also
+# key off, and swapping its logic was more churn than the actual bug needed.
+# What changes instead is the failure mode's reach: a day that spuriously
+# reads "engaged" off a near-zero median now still gets tapered to ~0
+# authority by `price_significance()`'s absolute floor before it reaches
+# `price_shift_c`, so this check's own degeneracy no longer reaches the
+# published output — see `compute()`.
 PRICE_MIN_RELATIVE_SPREAD = 0.2
 # Where in the median->peak range braking starts. Below this the price is
 # "ordinary for today" and the convex curve keeps the response near zero.
@@ -260,6 +295,248 @@ def _price_band_info(
     spread = p_peak - p_med
     engaged = spread / max(abs(p_med), 1e-6) >= PRICE_MIN_RELATIVE_SPREAD
     return p_med + _PRICE_ENGAGE_FRACTION * spread, p_peak, p_med, engaged
+
+
+def today_price_spread_and_median_c(
+    forecast: tuple[tuple[float, float], ...] | None,
+) -> tuple[float, float] | None:
+    """Today's (peak-minus-median spread, median), or None with no usable
+    day-distribution — the same forecast-quality gate `_price_band_info` uses,
+    for the same reason (see its docstring).
+
+    Deliberately shares `_price_band_info` rather than recomputing the
+    median/peak separately, and deliberately returns BOTH numbers from one
+    call rather than offering two single-purpose functions: `compute()`'s
+    braking-band logic, the seasonal spread history, and the significance
+    floor's auto mode (see `_resolve_absolute_floor_c`) must never read a
+    different spread or median for the same cycle, and one function is what
+    guarantees that rather than relying on independent implementations
+    staying in sync by hand.
+    """
+    band = _price_band_info(forecast)
+    if band is None:
+        return None
+    _, full, median, _ = band
+    return max(0.0, full - median), median
+
+
+# --- Price significance -----------------------------------------------------
+# See the module docstring's "Price significance: a taper, not a gate" section
+# for why this exists. Two pieces: a persisted rolling history of past days'
+# spread and median price (below), and the pure scoring function that reads it
+# (`price_significance`, further down).
+
+# How many trailing days of daily spread/median to keep for the seasonal
+# reference and the auto absolute floor. Long enough to smooth day-to-day
+# noise and genuinely track winter vs summer; short enough that the reference
+# actually moves as the season turns rather than lagging it by months.
+PRICE_SPREAD_HISTORY_DAYS = 30
+
+# Below this many STORED (i.e. completed) days there is not enough history to
+# trust a seasonal median at all, so the relative term contributes NO damping
+# — 1.0, meaning "let the absolute floor alone decide" — rather than blocking
+# every saving for weeks on a fresh install while history accumulates. Only
+# gates the RELATIVE term; the auto absolute floor has its own, looser
+# cold-start rule (see `_resolve_absolute_floor_c`) because a single day's
+# price level is already a reasonable scale reference, unlike a single day's
+# spread being a reasonable variability reference.
+PRICE_SIGNIFICANCE_COLD_START_DAYS = 5
+
+# The auto absolute floor (CONF_PRICE_SIGNIFICANCE_FLOOR == 0) is this
+# fraction of the long-run median daily price — see `_resolve_absolute_floor_c`.
+PRICE_SIGNIFICANCE_AUTO_FRACTION = 0.33
+
+
+@dataclass(frozen=True)
+class PriceSpreadHistory:
+    """Persisted rolling record of past days' price spread and price level —
+    together, everything `price_significance()` needs beyond today's own
+    numbers.
+
+    `daily_spreads_c` holds up to `PRICE_SPREAD_HISTORY_DAYS` *completed*
+    days, oldest first. Each entry is the running MAX peak-minus-median spread
+    observed during that local date, not a single end-of-day sample: the band
+    widens within a day as tomorrow's prices publish (typically ~13:00 for
+    Nordpool) — in the reference install's real logs, one date's spread ran
+    0.249 -> 1.139 SEK/kWh on the very same date — so the day's max is the
+    fullest view of that day's distribution. An end-of-day snapshot would have
+    systematically undercounted every day where the late-arriving tomorrow
+    prices turned out to be the spike.
+
+    `daily_medians_c` is the parallel record of each of those same completed
+    days' median price — the LATEST value seen for that date, not a running
+    max: unlike the spread, which genuinely grows as more of the day's true
+    range is revealed, the median is a level estimate that a plain "last
+    reading wins" is enough to track, and this is what the auto absolute
+    floor (`_resolve_absolute_floor_c`) is built from.
+
+    `current_date`/`current_date_max_spread_c`/`current_date_median_c` track
+    the day still in progress; both move into the two tuples above on the next
+    date rollover — see `update_price_spread_history`.
+    """
+
+    daily_spreads_c: tuple[float, ...] = ()
+    daily_medians_c: tuple[float, ...] = ()
+    current_date: str | None = None
+    current_date_max_spread_c: float = 0.0
+    current_date_median_c: float = 0.0
+
+
+def initial_price_spread_history() -> PriceSpreadHistory:
+    """Cold-start value: no history at all. `price_significance` falls back to
+    today's own numbers alone (see `PRICE_SIGNIFICANCE_COLD_START_DAYS` and
+    `_resolve_absolute_floor_c`) until enough days accumulate."""
+    return PriceSpreadHistory()
+
+
+def update_price_spread_history(
+    history: PriceSpreadHistory,
+    local_date: str,
+    today_spread_c: float,
+    today_median_c: float,
+) -> PriceSpreadHistory:
+    """Advance the rolling history by one cycle's observation.
+
+    `local_date` is an opaque ISO date string (e.g. "2026-08-16"): this module
+    stays free of any datetime dependency (see the module docstring), so
+    working out what "today" means in the house's own timezone is the
+    coordinator's job, not this function's — the same division of labour
+    `HeuristicInputs.price_forecast`'s hours-from-now floats already use.
+
+    Safe to call every cycle rather than once a day. A same-date call folds
+    `today_spread_c` into the running max but simply OVERWRITES
+    `current_date_median_c` with `today_median_c` (see `PriceSpreadHistory`'s
+    docstring for why the two use different update rules) — a no-op,
+    returning the exact same `history` object, only when neither actually
+    changes, which lets the caller tell "nothing changed" from "state
+    advanced" without a separate flag. A date change is detected by comparing
+    to the stored `current_date` rather than requiring the caller to know when
+    midnight passed.
+    """
+    if history.current_date == local_date:
+        max_spread_c = max(today_spread_c, history.current_date_max_spread_c)
+        if (
+            max_spread_c == history.current_date_max_spread_c
+            and today_median_c == history.current_date_median_c
+        ):
+            return history
+        return PriceSpreadHistory(
+            daily_spreads_c=history.daily_spreads_c,
+            daily_medians_c=history.daily_medians_c,
+            current_date=local_date,
+            current_date_max_spread_c=max_spread_c,
+            current_date_median_c=today_median_c,
+        )
+    # Either the very first observation ever (current_date is None, nothing to
+    # bank) or a genuine date rollover (bank yesterday's completed values).
+    banked_spreads = history.daily_spreads_c
+    banked_medians = history.daily_medians_c
+    if history.current_date is not None:
+        banked_spreads = (banked_spreads + (history.current_date_max_spread_c,))[
+            -PRICE_SPREAD_HISTORY_DAYS:
+        ]
+        banked_medians = (banked_medians + (history.current_date_median_c,))[
+            -PRICE_SPREAD_HISTORY_DAYS:
+        ]
+    return PriceSpreadHistory(
+        daily_spreads_c=banked_spreads,
+        daily_medians_c=banked_medians,
+        current_date=local_date,
+        current_date_max_spread_c=today_spread_c,
+        current_date_median_c=today_median_c,
+    )
+
+
+def _resolve_absolute_floor_c(
+    floor_setting_c: float, today_median_c: float, history: PriceSpreadHistory
+) -> float:
+    """The absolute backstop floor actually in effect this cycle.
+
+    `floor_setting_c` is `CONF_PRICE_SIGNIFICANCE_FLOOR` verbatim. 0 (the
+    default) means AUTO: `PRICE_SIGNIFICANCE_AUTO_FRACTION` times the long-run
+    median of stored daily median prices, falling back to that same fraction
+    of TODAY's median while history is still empty so the floor is sensible
+    from day one rather than 0 — which would make `absolute_significance`
+    clamp to 1.0 for any nonzero spread, defeating the whole backstop on a
+    fresh install.
+
+    This is dimensionally self-consistent in ANY currency and ANY energy
+    denominator (SEK/kWh, öre/kWh, EUR/MWh, ...) because the numerator (a
+    price spread) and the reference (a price level) carry the same units —
+    unlike a fixed constant, which would need a currency/denominator lookup
+    table to mean the same thing twice. Sanity-checked against the reference
+    install's real SE2 data: daily medians there run ~0.3 SEK/kWh, giving an
+    auto floor of ~0.10 SEK/kWh, which is the same figure this project
+    originally hand-calibrated before this function existed.
+
+    Any explicit non-zero `floor_setting_c` overrides auto entirely and is
+    used as-is, in the price sensor's own units — the money-anchored choice
+    for an occupant who wants a fixed answer regardless of how prices are
+    trending.
+
+    Residual limitation, stated honestly rather than papered over: the auto
+    floor scales WITH the price level, so during a persistently cheap stretch
+    it scales down right along with prices and stops protecting against
+    economically trivial variation — the exact failure mode it exists to
+    guard against, just recurring at a lower price level. It is a
+    sensible-SCALE default, not a money-correct one; an occupant who
+    specifically cares about the persistently-cheap case should set an
+    explicit floor instead of relying on auto.
+    """
+    if floor_setting_c != 0.0:
+        return floor_setting_c
+    if history.daily_medians_c:
+        return PRICE_SIGNIFICANCE_AUTO_FRACTION * _percentile(
+            sorted(history.daily_medians_c), 50
+        )
+    return PRICE_SIGNIFICANCE_AUTO_FRACTION * today_median_c
+
+
+def price_significance(
+    today_spread_c: float,
+    today_median_c: float,
+    history: PriceSpreadHistory,
+    floor_setting_c: float,
+) -> tuple[float, float | None]:
+    """Combined 0..1 taper on price-braking/pre-charge authority, and the
+    seasonal reference spread it used (`None` during cold start, for display).
+
+    Two independent terms, combined by taking the minimum — either one alone
+    being low is enough to damp the response, since each is a distinct reason
+    today's swing might not be worth reacting to:
+
+    - `relative_significance`: today's spread against the MEDIAN (not mean —
+      robust to a single spike day skewing the reference) of up to
+      `PRICE_SPREAD_HISTORY_DAYS` stored daily spreads. This is what makes
+      winter's larger typical spreads automatically raise the bar, and lets
+      the reference drift across the year with no user action. Contributes
+      1.0 (no damping at all) during cold start — see
+      `PRICE_SIGNIFICANCE_COLD_START_DAYS` — so a fresh install is not blocked
+      from saving anything while history accumulates.
+
+    - `absolute_significance`: today's spread against the floor
+      `_resolve_absolute_floor_c` resolves — either the one user-configured
+      value, or an auto floor scaled off the local price level. This is what
+      stops braking for economically meaningless variation during a
+      persistently cheap stretch, where the relative term alone would keep
+      re-normalising against a low seasonal reference and misfire again — the
+      same failure the module docstring's field data describes for
+      `_price_band_info`'s ratio, just with a moving reference instead of
+      today's own median.
+    """
+    if len(history.daily_spreads_c) < PRICE_SIGNIFICANCE_COLD_START_DAYS:
+        relative_significance = 1.0
+        reference_spread_c = None
+    else:
+        reference_spread_c = _percentile(sorted(history.daily_spreads_c), 50)
+        relative_significance = _clamp(
+            today_spread_c / max(reference_spread_c, 1e-6), 0.0, 1.0
+        )
+    absolute_floor_c = _resolve_absolute_floor_c(floor_setting_c, today_median_c, history)
+    absolute_significance = _clamp(
+        today_spread_c / max(absolute_floor_c, 1e-6), 0.0, 1.0
+    )
+    return min(relative_significance, absolute_significance), reference_spread_c
 
 
 def _band_response(price: float, start: float, full: float, gamma: float) -> float:
@@ -334,6 +611,17 @@ class HeuristicInputs:
     # How much sag the current outdoor bin has been observed to buy back within
     # the recovery window. 0.0 means "no measurement yet".
     recoverable_sag_c: float = 0.0
+    # Combined 0..1 taper from `price_significance()`, derived by the
+    # coordinator from the persisted `PriceSpreadHistory` before this cycle's
+    # `compute()` call — see the module docstring's "Price significance: a
+    # taper, not a gate" section. 1.0 means no damping. `today_price_spread_c`
+    # and `seasonal_reference_spread_c` are threaded through purely so
+    # `compute()` can echo them onto `HeuristicResult` for the same reason
+    # `price_band_start`/`price_median` are published: troubleshooting why the
+    # published number is what it is.
+    price_significance_factor: float = 1.0
+    today_price_spread_c: float | None = None
+    seasonal_reference_spread_c: float | None = None
 
 
 @dataclass(frozen=True)
@@ -400,6 +688,12 @@ class HeuristicResult:
     price_band_start: float | None = None
     price_band_full: float | None = None
     price_median: float | None = None
+    # Echoed straight from `HeuristicInputs` — see that dataclass's docstring
+    # for what each means and why they live there rather than being
+    # recomputed here.
+    price_significance_factor: float = 1.0
+    today_price_spread_c: float | None = None
+    seasonal_reference_spread_c: float | None = None
     model_version: str = MODEL_VERSION
 
 
@@ -439,6 +733,11 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
             heating_cutoff_engaged=True,
             price_comfort_tier=params.price_comfort_tier,
             cold_caution=params.cold_caution,
+            # Also informational and also unaffected by the cutoff, same as
+            # current_price above.
+            price_significance_factor=inputs.price_significance_factor,
+            today_price_spread_c=inputs.today_price_spread_c,
+            seasonal_reference_spread_c=inputs.seasonal_reference_spread_c,
             reason=(
                 f"Raw outdoor {inputs.raw_outdoor_temp_c:.1f}°C ≥ heating cutoff "
                 f"{params.heating_cutoff_c:.1f}°C; compensation suppressed, "
@@ -533,6 +832,16 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
                             price_response = response_now
                         price_shift_c = price_response * tier.max_sag_c * taper
 
+                    # Significance taper — see the module docstring's "Price
+                    # significance: a taper, not a gate" section. Applied here,
+                    # after the precharge/brake if/else rather than inside
+                    # either branch, so it damps WHICHEVER one just ran:
+                    # banking heat for a two-öre swing is exactly as pointless
+                    # as braking for one, and a single multiply after the
+                    # branch is what guarantees neither path can be missed by
+                    # a future change to one of them.
+                    price_shift_c *= inputs.price_significance_factor
+
     # The comfort floor is the only bound applied here. There is no upper
     # clamp: pre-charging is already limited by the tier's own boost, so a
     # second bound above never bound anything.
@@ -592,6 +901,12 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
                 )
             else:
                 reason += f", cold caution ×{taper:.2f}"
+        if (
+            inputs.price_significance_factor < 1.0
+            and not no_forecast
+            and not price_flat_day
+        ):
+            reason += f", low significance ×{inputs.price_significance_factor:.2f}"
         if precharge_active:
             reason += (
                 f", pre-charging ahead of spike in {upcoming_spike_in_min:.0f} min "
@@ -643,6 +958,9 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         price_band_start=price_band_start,
         price_band_full=price_band_full,
         price_median=price_median,
+        price_significance_factor=inputs.price_significance_factor,
+        today_price_spread_c=inputs.today_price_spread_c,
+        seasonal_reference_spread_c=inputs.seasonal_reference_spread_c,
     )
 
 

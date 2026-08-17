@@ -53,7 +53,7 @@ from .const import (
     CONF_OUTDOOR_TEMP_SENSOR,
     CONF_OUTPUT_MODE,
     CONF_OUTPUT_NUMBER_ENTITY,
-    CONF_POWER_SENSOR,
+    CONF_PRICE_SIGNIFICANCE_FLOOR,
     CONF_WEATHER_ENTITY,
     DEFAULT_COMFORT_MIN_C,
     DEFAULT_ENABLE_DATA_LOGGING,
@@ -63,6 +63,7 @@ from .const import (
     DEFAULT_HEAT_CURVE_OFFSET_INVERT,
     DEFAULT_INDOOR_TARGET_TEMPERATURE,
     DEFAULT_OUTPUT_MODE,
+    DEFAULT_PRICE_SIGNIFICANCE_FLOOR,
     DOMAIN,
     OUTPUT_MODE_HEAT_CURVE_OFFSET,
     OUTPUT_MODES,
@@ -340,18 +341,6 @@ class TrueTempOptionsFlow(config_entries.OptionsFlow):
                             selector.EntitySelectorConfig(domain="sensor")
                         ),
                     ),
-                    # Never an input to the controller — it is an effect of past
-                    # decisions, not something a decision should react to. It
-                    # enables real energy/cost figures in the local log and a
-                    # reading on the status sensor.
-                    vol.Optional(
-                        CONF_POWER_SENSOR, default=current.get(CONF_POWER_SENSOR)
-                    ): vol.Any(
-                        None,
-                        selector.EntitySelector(
-                            selector.EntitySelectorConfig(domain="sensor")
-                        ),
-                    ),
                     vol.Required(
                         CONF_ENABLE_SOLAR_INPUT,
                         default=current.get(
@@ -370,13 +359,36 @@ class TrueTempOptionsFlow(config_entries.OptionsFlow):
 
     # --- Page: price ---------------------------------------------------------
 
+    def _price_unit(self) -> str | None:
+        """Unit label for the price-significance-floor field below, read from
+        the configured price entity's OWN `unit_of_measurement` attribute.
+
+        Deliberately NOT `currency`: on the Nordpool integration this project
+        targets, `currency` reports the base ISO currency code ("SEK") even
+        when the entity's `price_in_cents` option is on and the values it
+        actually publishes are in öre — using it here would silently be off by
+        100x on exactly the installs most likely to type a small number into
+        this field. `unit_of_measurement` gives the right answer either way
+        ("SEK/kWh" or "öre/kWh"). Omitted (None, which the selector shows as
+        no unit at all) rather than guessed when the entity or the attribute
+        is not available — a wrong label is worse than none.
+        """
+        entity_id = self._current().get(CONF_NORDPOOL_PRICE_ENTITY)
+        if not entity_id:
+            return None
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return None
+        unit = state.attributes.get("unit_of_measurement")
+        return unit if isinstance(unit, str) else None
+
     async def async_step_price(
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         if user_input is not None:
             return self._save(user_input)
 
-        # Two fields, because the aggressiveness tier and the cold-caution
+        # Three fields, because the aggressiveness tier and the cold-caution
         # setting are live entities rather than options — they are adjusted
         # often enough that routing them through a config option (which reloads
         # the entry) would be the wrong home.
@@ -403,6 +415,31 @@ class TrueTempOptionsFlow(config_entries.OptionsFlow):
                     ): selector.NumberSelector(
                         selector.NumberSelectorConfig(
                             min=5, max=25, step=0.5, unit_of_measurement="°C", mode="box"
+                        )
+                    ),
+                    # The one absolute-money knob left: see
+                    # CONF_PRICE_SIGNIFICANCE_FLOOR's docstring in const.py. 0
+                    # (the default) means "auto" — a floor derived from this
+                    # zone's own price history rather than a fixed number,
+                    # since no single constant means the same thing across
+                    # every currency and sub-unit Nordpool can report in. min
+                    # deliberately allows exactly 0 for that reason; max/step
+                    # are otherwise unit-agnostic rather than trying to rescale
+                    # bounds by whatever unit `_price_unit` happens to read
+                    # this cycle.
+                    vol.Required(
+                        CONF_PRICE_SIGNIFICANCE_FLOOR,
+                        default=current.get(
+                            CONF_PRICE_SIGNIFICANCE_FLOOR,
+                            DEFAULT_PRICE_SIGNIFICANCE_FLOOR,
+                        ),
+                    ): selector.NumberSelector(
+                        selector.NumberSelectorConfig(
+                            min=0,
+                            max=50,
+                            step=0.01,
+                            unit_of_measurement=self._price_unit(),
+                            mode="box",
                         )
                     ),
                 }

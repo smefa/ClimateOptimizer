@@ -672,3 +672,430 @@ class TestHeatCurveOffset:
         )
         assert value == 6
         assert isinstance(value, int)
+
+
+class TestTodayPriceSpreadAndMedian:
+    """`today_price_spread_and_median_c` — the one function both the seasonal
+    history and `compute()`'s own braking-band logic read the day's spread
+    and median through, so they can never disagree for the same cycle."""
+
+    def test_no_forecast_is_none(self):
+        assert heuristic.today_price_spread_and_median_c(None) is None
+
+    def test_too_few_forecast_points_is_none(self):
+        assert (
+            heuristic.today_price_spread_and_median_c(((0.0, 1.0), (1.0, 9.0)))
+            is None
+        )
+
+    def test_flat_day_has_zero_spread(self):
+        result = heuristic.today_price_spread_and_median_c(flat_forecast(price=2.0))
+        assert result == pytest.approx((0.0, 2.0))
+
+    def test_spike_widens_the_spread_around_the_median(self):
+        # 23 hours at 1.0, one hour at 5.0: median stays at the ordinary
+        # price, peak is the spike, spread is peak minus median.
+        result = heuristic.today_price_spread_and_median_c(spiky_forecast())
+        assert result == pytest.approx((4.0, 1.0))
+
+    def test_never_negative_even_if_median_exceeded_peak(self):
+        # Degenerate/contrived forecast, but the function must not hand back a
+        # negative "spread" that would then feed a negative significance ratio.
+        result = heuristic.today_price_spread_and_median_c(
+            tuple((float(h), 1.0) for h in range(6))
+        )
+        assert result[0] >= 0.0
+
+
+class TestPriceSpreadHistoryRollover:
+    """`update_price_spread_history` — the pure state-advance step behind the
+    seasonal half of `price_significance()`. See `PriceSpreadHistory`'s
+    docstring for why spread uses a running MAX per date but median just takes
+    the latest reading."""
+
+    def test_cold_start_has_no_history(self):
+        history = heuristic.initial_price_spread_history()
+        assert history.daily_spreads_c == ()
+        assert history.daily_medians_c == ()
+        assert history.current_date is None
+
+    def test_first_observation_seeds_the_current_date_without_banking(self):
+        history = heuristic.update_price_spread_history(
+            heuristic.initial_price_spread_history(), "2026-08-01", 0.2, 0.3
+        )
+        assert history.current_date == "2026-08-01"
+        assert history.current_date_max_spread_c == pytest.approx(0.2)
+        assert history.current_date_median_c == pytest.approx(0.3)
+        # Nothing completed yet, so nothing banked.
+        assert history.daily_spreads_c == ()
+        assert history.daily_medians_c == ()
+
+    def test_same_date_spread_only_ever_grows(self):
+        history = heuristic.update_price_spread_history(
+            heuristic.initial_price_spread_history(), "2026-08-01", 0.2, 0.3
+        )
+        # A smaller spread later the same day must not erase the earlier max
+        # — see the module docstring's "0.249 -> 1.139 SEK/kWh on the same
+        # date" field observation for why the running max matters.
+        history = heuristic.update_price_spread_history(
+            history, "2026-08-01", 0.05, 0.3
+        )
+        assert history.current_date_max_spread_c == pytest.approx(0.2)
+
+    def test_same_date_median_always_takes_the_latest_reading(self):
+        """Unlike the spread, the median is a level estimate, not a range —
+        see PriceSpreadHistory's docstring for why "latest wins" is the right
+        rule here even though it is the wrong one for spread."""
+        history = heuristic.update_price_spread_history(
+            heuristic.initial_price_spread_history(), "2026-08-01", 0.2, 0.3
+        )
+        history = heuristic.update_price_spread_history(
+            history, "2026-08-01", 0.05, 0.1
+        )
+        assert history.current_date_median_c == pytest.approx(0.1)
+
+    def test_no_op_call_returns_the_identical_object(self):
+        """A cycle that changes nothing must be a true no-op — same object,
+        not just an equal one — so the coordinator can skip a debounced state
+        save with a plain identity check rather than a deep comparison."""
+        history = heuristic.update_price_spread_history(
+            heuristic.initial_price_spread_history(), "2026-08-01", 0.2, 0.3
+        )
+        same = heuristic.update_price_spread_history(history, "2026-08-01", 0.1, 0.3)
+        assert same is history
+
+    def test_date_rollover_banks_the_completed_day(self):
+        day_one = heuristic.update_price_spread_history(
+            heuristic.initial_price_spread_history(), "2026-08-01", 0.2, 0.3
+        )
+        day_two = heuristic.update_price_spread_history(
+            day_one, "2026-08-02", 0.15, 0.25
+        )
+        assert day_two.daily_spreads_c == (pytest.approx(0.2),)
+        assert day_two.daily_medians_c == (pytest.approx(0.3),)
+        assert day_two.current_date == "2026-08-02"
+        assert day_two.current_date_max_spread_c == pytest.approx(0.15)
+        assert day_two.current_date_median_c == pytest.approx(0.25)
+
+    def test_history_window_trims_to_the_newest_days(self):
+        history = heuristic.initial_price_spread_history()
+        # The first call only SEEDS the current date rather than banking
+        # anything (there is no prior day yet to bank), so getting one more
+        # BANKED day than the window holds needs PRICE_SPREAD_HISTORY_DAYS + 2
+        # total calls. Plain sequential labels rather than real calendar
+        # dates: `update_price_spread_history` only ever compares
+        # `local_date` for equality, never parses it (see its docstring).
+        for day in range(heuristic.PRICE_SPREAD_HISTORY_DAYS + 2):
+            history = heuristic.update_price_spread_history(
+                history, f"day-{day:03d}", float(day), 0.3
+            )
+        assert len(history.daily_spreads_c) == heuristic.PRICE_SPREAD_HISTORY_DAYS
+        # Oldest first: day 0's spread (banked first) was pushed out, so the
+        # oldest surviving entry is day 1's.
+        assert history.daily_spreads_c[0] == pytest.approx(1.0)
+        assert history.daily_spreads_c[-1] == pytest.approx(
+            float(heuristic.PRICE_SPREAD_HISTORY_DAYS)
+        )
+
+
+class TestPriceSignificance:
+    """`price_significance` — the combined taper that replaced a
+    relative-only spread ratio which ranked days backwards in money terms and
+    degenerated near a zero median (see the module docstring's field data)."""
+
+    def test_cold_start_relative_term_contributes_no_damping(self):
+        """Fewer than PRICE_SIGNIFICANCE_COLD_START_DAYS stored days: the
+        relative term must not block saving while history accumulates, so
+        only the absolute floor decides."""
+        history = heuristic.initial_price_spread_history()
+        significance, reference = heuristic.price_significance(
+            today_spread_c=0.05, today_median_c=0.3, history=history, floor_setting_c=1.0
+        )
+        assert reference is None
+        # relative=1.0, absolute=clamp(0.05/1.0)=0.05 -> combined is the min.
+        assert significance == pytest.approx(0.05)
+
+    def test_seasonal_reference_is_the_median_of_stored_spreads(self):
+        history = heuristic.PriceSpreadHistory(
+            daily_spreads_c=(0.1, 0.2, 0.3, 0.4, 0.5),
+            daily_medians_c=(0.3,) * 5,
+        )
+        significance, reference = heuristic.price_significance(
+            today_spread_c=0.15,
+            today_median_c=0.3,
+            history=history,
+            # Tiny floor so the absolute term never binds in this test —
+            # isolates the relative term's own behaviour.
+            floor_setting_c=0.0001,
+        )
+        assert reference == pytest.approx(0.3)
+        assert significance == pytest.approx(0.5)  # 0.15 / 0.3
+
+    def test_median_reference_ignores_one_spike_day(self):
+        """Median, not mean — a single outlier day must not drag the
+        reference far off what most days actually looked like."""
+        normal_days = (0.1, 0.1, 0.1, 0.1, 0.1)
+        history_with_spike = heuristic.PriceSpreadHistory(
+            daily_spreads_c=normal_days + (50.0,),
+            daily_medians_c=(0.3,) * 6,
+        )
+        _, reference = heuristic.price_significance(
+            today_spread_c=0.1,
+            today_median_c=0.3,
+            history=history_with_spike,
+            floor_setting_c=0.0001,
+        )
+        assert reference == pytest.approx(0.1)
+
+    def test_relative_term_clamps_at_one(self):
+        history = heuristic.PriceSpreadHistory(
+            daily_spreads_c=(0.1,) * 5, daily_medians_c=(0.3,) * 5
+        )
+        significance, _ = heuristic.price_significance(
+            today_spread_c=10.0,
+            today_median_c=0.3,
+            history=history,
+            floor_setting_c=0.0001,
+        )
+        assert significance == pytest.approx(1.0)
+
+    def test_explicit_floor_overrides_auto(self):
+        history = heuristic.PriceSpreadHistory(
+            daily_spreads_c=(0.05,) * 5, daily_medians_c=(0.9,) * 5
+        )
+        # Auto floor here would be 0.33 * 0.9 = 0.297; an explicit floor of
+        # 0.05 must be used verbatim instead, in the price sensor's own units.
+        significance, _ = heuristic.price_significance(
+            today_spread_c=0.025,
+            today_median_c=0.9,
+            history=history,
+            floor_setting_c=0.05,
+        )
+        # relative = 0.025 / 0.05 (reference spread) = 0.5
+        # absolute = 0.025 / 0.05 (explicit floor) = 0.5
+        assert significance == pytest.approx(0.5)
+
+    def test_auto_floor_uses_the_median_of_stored_daily_prices(self):
+        history = heuristic.PriceSpreadHistory(
+            # Tiny reference spreads so the relative term clamps to 1.0 and
+            # only the absolute (auto-floor) term is what this test measures.
+            daily_spreads_c=(0.001,) * 5,
+            daily_medians_c=(0.2, 0.3, 0.4, 0.5, 0.6),
+        )
+        # Auto floor = 0.33 * median(0.2..0.6) = 0.33 * 0.4 = 0.132.
+        significance, _ = heuristic.price_significance(
+            today_spread_c=0.066,  # half the auto floor
+            today_median_c=999.0,  # must be ignored: history exists
+            history=history,
+            floor_setting_c=0.0,
+        )
+        assert significance == pytest.approx(0.5, rel=1e-3)
+
+    def test_auto_floor_falls_back_to_todays_median_with_no_history(self):
+        history = heuristic.initial_price_spread_history()
+        # Auto floor = 0.33 * today's own median (0.3) = 0.099.
+        significance, _ = heuristic.price_significance(
+            today_spread_c=0.0495,  # half the auto floor
+            today_median_c=0.3,
+            history=history,
+            floor_setting_c=0.0,
+        )
+        assert significance == pytest.approx(0.5, rel=1e-3)
+
+    def test_absolute_floor_backstops_a_near_zero_median_day(self):
+        """The exact degeneracy the module docstring's field data describes:
+        a 0.001/0.01 median/peak pair scores a 9.0 RELATIVE ratio (full
+        authority), but a tiny absolute spread must still be tapered near 0
+        once a real floor backstops it."""
+        history = heuristic.PriceSpreadHistory(
+            daily_spreads_c=(0.05,) * 5, daily_medians_c=(0.05,) * 5
+        )
+        significance, _ = heuristic.price_significance(
+            today_spread_c=0.009,  # 0.01 peak - 0.001 median
+            today_median_c=0.001,
+            history=history,
+            floor_setting_c=0.10,
+        )
+        assert significance < 0.1
+
+    def test_either_term_being_low_is_enough_to_damp(self):
+        """min(), not a product or an average: a day that is significant on
+        ONE axis but not the other must still be damped."""
+        history = heuristic.PriceSpreadHistory(
+            daily_spreads_c=(0.1,) * 5, daily_medians_c=(0.3,) * 5
+        )
+        # High relative (spread far exceeds the seasonal reference) but low
+        # absolute (still under an explicit high floor).
+        significance, _ = heuristic.price_significance(
+            today_spread_c=1.0, today_median_c=0.3, history=history, floor_setting_c=50.0
+        )
+        assert significance == pytest.approx(1.0 / 50.0)
+
+
+class TestComputeAppliesSignificanceTaper:
+    """Integration: `compute()` must apply `price_significance_factor` to
+    BOTH the braking and pre-charge branches, as a continuous taper rather
+    than a second hard gate — see the module docstring's "Price significance:
+    a taper, not a gate" section."""
+
+    def test_default_factor_of_one_changes_nothing(self):
+        """Every pre-existing price test in this file constructs inputs
+        without a significance factor and relies on it defaulting to 1.0 (no
+        damping) — this pins that default down explicitly."""
+        baseline = compute(
+            make_inputs(
+                current_price=5.0,
+                price_data_available=True,
+                price_forecast=spiky_forecast(spike_at=0),
+            ),
+            make_params(
+                enable_price_compensation=True,
+                price_comfort_tier="high",
+                cold_caution="low",
+            ),
+        )
+        damped = compute(
+            make_inputs(
+                current_price=5.0,
+                price_data_available=True,
+                price_forecast=spiky_forecast(spike_at=0),
+                price_significance_factor=1.0,
+            ),
+            make_params(
+                enable_price_compensation=True,
+                price_comfort_tier="high",
+                cold_caution="low",
+            ),
+        )
+        assert damped.price_adjustment_c == pytest.approx(baseline.price_adjustment_c)
+
+    def test_half_significance_halves_the_braking_shift(self):
+        full = compute(
+            make_inputs(
+                current_price=5.0,
+                price_data_available=True,
+                price_forecast=spiky_forecast(spike_at=0),
+                price_significance_factor=1.0,
+            ),
+            make_params(
+                enable_price_compensation=True,
+                price_comfort_tier="high",
+                cold_caution="low",
+            ),
+        )
+        half = compute(
+            make_inputs(
+                current_price=5.0,
+                price_data_available=True,
+                price_forecast=spiky_forecast(spike_at=0),
+                price_significance_factor=0.5,
+            ),
+            make_params(
+                enable_price_compensation=True,
+                price_comfort_tier="high",
+                cold_caution="low",
+            ),
+        )
+        assert half.price_shift_applied_c == pytest.approx(
+            full.price_shift_applied_c * 0.5
+        )
+
+    def test_zero_significance_fully_suppresses_braking(self):
+        result = compute(
+            make_inputs(
+                current_price=5.0,
+                price_data_available=True,
+                price_forecast=spiky_forecast(spike_at=0),
+                price_significance_factor=0.0,
+            ),
+            make_params(
+                enable_price_compensation=True,
+                price_comfort_tier="high",
+                cold_caution="low",
+            ),
+        )
+        assert result.price_adjustment_c == 0.0
+        assert not result.price_braking
+
+    def test_zero_significance_also_suppresses_pre_charge(self):
+        result = compute(
+            make_inputs(
+                current_price=1.0,
+                price_data_available=True,
+                price_forecast=spiky_forecast(spike_at=1),
+                rise_minutes=120.0,
+                price_significance_factor=0.0,
+            ),
+            make_params(
+                enable_price_compensation=True,
+                price_comfort_tier="high",
+                cold_caution="low",
+            ),
+        )
+        # Pre-charge is still the branch that WOULD have run (the price is
+        # cheap with a spike coming), it just banks nothing once damped.
+        assert result.precharge_active
+        assert result.price_adjustment_c == 0.0
+
+    def test_half_significance_halves_pre_charge_too(self):
+        full = compute(
+            make_inputs(
+                current_price=1.0,
+                price_data_available=True,
+                price_forecast=spiky_forecast(spike_at=1),
+                rise_minutes=120.0,
+                price_significance_factor=1.0,
+            ),
+            make_params(
+                enable_price_compensation=True,
+                price_comfort_tier="high",
+                cold_caution="low",
+            ),
+        )
+        half = compute(
+            make_inputs(
+                current_price=1.0,
+                price_data_available=True,
+                price_forecast=spiky_forecast(spike_at=1),
+                rise_minutes=120.0,
+                price_significance_factor=0.5,
+            ),
+            make_params(
+                enable_price_compensation=True,
+                price_comfort_tier="high",
+                cold_caution="low",
+            ),
+        )
+        assert half.price_shift_applied_c == pytest.approx(
+            full.price_shift_applied_c * 0.5
+        )
+
+    def test_significance_fields_are_echoed_onto_the_result(self):
+        result = compute(
+            make_inputs(
+                price_significance_factor=0.42,
+                today_price_spread_c=1.23,
+                seasonal_reference_spread_c=0.87,
+            ),
+            make_params(),
+        )
+        assert result.price_significance_factor == pytest.approx(0.42)
+        assert result.today_price_spread_c == pytest.approx(1.23)
+        assert result.seasonal_reference_spread_c == pytest.approx(0.87)
+
+    def test_significance_fields_survive_the_heating_cutoff(self):
+        """Informational, like current_price — a house above the cutoff can
+        still see how significant today's price swing is."""
+        result = compute(
+            make_inputs(
+                raw_outdoor_temp_c=18.0,
+                price_significance_factor=0.42,
+                today_price_spread_c=1.23,
+                seasonal_reference_spread_c=0.87,
+            ),
+            make_params(heating_cutoff_c=18.0),
+        )
+        assert result.heating_cutoff_engaged
+        assert result.price_significance_factor == pytest.approx(0.42)
+        assert result.today_price_spread_c == pytest.approx(1.23)
+        assert result.seasonal_reference_spread_c == pytest.approx(0.87)

@@ -306,6 +306,9 @@ again, and on unload/reload so nothing outlives the entry. See `TrueTempCoordina
 | `price_band_start` | Price at which braking begins today. `disabled` if price compensation is off. |
 | `price_band_full` | Price at which braking is at full authority today. `disabled` if price compensation is off. |
 | `price_median` | Today's median price — the "ordinary for today" line. Read regardless of whether price compensation is switched on. |
+| `today_price_spread_c` | Today's peak-minus-median price spread, in the price sensor's own units. `None` with no usable day-ahead forecast. Read regardless of whether price compensation is switched on. |
+| `seasonal_reference_spread_c` | The median of the last ~30 stored days' spread — the seasonal reference `price_significance_factor`'s relative term compares today against. `None` during cold start (fewer than 5 stored days). |
+| `price_significance_factor` | Combined 0–1 taper on braking/pre-charge authority for how economically meaningful today's price swing is — see `heuristic.price_significance()`. 1.0 means no damping. |
 | `recommended_compensated_outdoor_temp_c` | What `compensated_outdoor_temperature` would show, computed even in heat-curve-offset mode or while compensation is off. |
 | `total_adjustment_c` | `recommended_compensated_outdoor_temp_c` minus `raw_outdoor_temp_c` — taken from the published value, not summed from the terms above, so it reflects the output sanity clamp when that bites. |
 | `recommended_heat_pump_offset` | What `heat_pump_offset` would show, computed even in outdoor-spoof mode or while compensation is off. |
@@ -353,7 +356,6 @@ again, and on unload/reload so nothing outlives the entry. See `TrueTempCoordina
 
 | Attribute | Meaning |
 | --- | --- |
-| `heat_pump_power_w` | Present only if a power sensor is configured. Last reading, used for the local log's coarse energy/cost estimate. |
 | `data_logging_enabled` | Whether local JSONL logging is switched on. |
 | `data_log_path` | Present only while logging is enabled. Full path to this zone's log file. |
 
@@ -478,11 +480,6 @@ and its long-term statistics keep only hourly aggregates — too coarse to judge
 controller or replay a candidate change offline.
 
 Files rotate to a gzipped sibling at 10 MB and are never deleted automatically.
-
-If a heat pump power sensor is configured, records also carry a coarse
-per-cycle energy and cost estimate. **On many installs that circuit also serves
-hot water**, so it is not attributable to space heating alone — useful for
-comparing settings over matched windows, not as an absolute "€ saved".
 
 ---
 

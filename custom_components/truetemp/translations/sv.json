@@ -79,14 +79,12 @@
         "data": {
           "weather_entity": "Väderprognos",
           "nordpool_price_entity": "Elpris",
-          "power_sensor": "Eleffektmätare för värmepump",
           "enable_solar_input": "Kompensera för solsken",
           "enable_wind_input": "Kompensera för vind"
         },
         "data_description": {
           "weather_entity": "Används bara för sol- och vindprognosen. Behövs inte om båda är avstängda nedan.",
           "nordpool_price_entity": "En Nordpool-givare med dagens och morgondagens timpriser. Utan en gör prisbesparing ingenting.",
-          "power_sensor": "Används aldrig för att styra något — den lägger bara till verkliga energi- och kostnadssiffror i loggen. På de flesta installationer täcker denna mätare även varmvatten, så den avser inte enbart uppvärmning.",
           "enable_solar_input": "Backar av lite när solen värmer huset. Slå bara på detta om din inomhusgivare sitter någonstans dit solen faktiskt når. En givare i en källare, ett norrvänt rum eller en hall ser aldrig solinstrålningen, så detta skulle sänka temperaturen för en uppvärmning som din givare inte kan bekräfta.",
           "enable_wind_input": "Lägger till lite när vind drar ut värme ur huset. Låt detta vara avstängt om du inte har ett äldre, dragigt hus som du märker blir kallare i hård vind. Ett rimligt tätt hus reagerar knappt på vind, och att kompensera för en effekt som inte finns lägger bara till brus."
         }
@@ -96,11 +94,13 @@
         "description": "När elen är dyr kan TrueTemp låta huset drifta något svalare och ta igen det när priserna sjunker. Hur mycket det får drifta ställs in på zonens reglage för prisbesparing; hur försiktig den är när det är riktigt kallt ställs in på Försiktighet vid stark kyla.",
         "data": {
           "enable_price_compensation": "Spara pengar när elen är dyr",
-          "comfort_min_c": "Låt det aldrig bli kallare än"
+          "comfort_min_c": "Låt det aldrig bli kallare än",
+          "price_significance_floor": "Ignorera prissvängningar mindre än"
         },
         "data_description": {
           "enable_price_compensation": "Kräver en elprisgivare på föregående sida.",
-          "comfort_min_c": "Ett hårt golv. Ingen besparing tar huset under detta."
+          "comfort_min_c": "Ett hårt golv. Ingen besparing tar huset under detta.",
+          "price_significance_floor": "Under denna skillnad mellan dagens billigaste och dyraste timme tonas bromsning och förladdning bort istället för att reagera — skyddar en varaktigt billig period från att jaga svängningar för små för att vara värda komfortoffret. Lämna på 0 för automatiskt (skalat efter din typiska lokala prisnivå); ange ett tal i din prisgivares egen enhet för att sätta det själv."
         }
       },
       "output": {
@@ -111,7 +111,7 @@
         }
       },
       "output_spoof": {
-        "title": "Förfalska utomhusgivaren",
+        "title": "Modifiera utomhusgivaren",
         "description": "De två sätten kan kombineras, användas var för sig, eller lämnas båda tomma.",
         "sections": {
           "output_number_push": {
@@ -130,13 +130,13 @@
       },
       "output_curve": {
         "title": "Värmepumpens egen offset",
-        "description": "För pumpar som låter dig ställa in \"värmekurva eller utomhustemperatur-offset\" direkt, istället för att förfalska utomhusgivaren.",
+        "description": "För pumpar som låter dig ställa in \"värmekurva eller utomhustemperatur-offset\" direkt, istället för att modifiera utomhusgivaren.",
         "data": {
           "heat_curve_offset_entity": "Number- eller Input Number-entitet",
           "heat_curve_offset_invert": "Denna pumps offset fungerar tvärtom"
         },
         "data_description": {
-          "heat_curve_offset_invert": "Lämna avstängt om ett högre värde på din pump betyder mer värme, vilket gäller för de flesta pumpar. Slå på om det är tvärtom för din."
+          "heat_curve_offset_invert": "Lämna avstängt om ett högre värde på din pump betyder mer värme, kurvförskjutning. Slå på om det är tvärtom för din, offta vid utomhustemp."
         }
       }
     }

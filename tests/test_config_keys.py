@@ -93,6 +93,13 @@ LEGACY_OPTIONS = {
 
 
 def test_prunes_a_real_pre_rewrite_entry() -> None:
+    # "power_sensor" is captured verbatim in LEGACY_OPTIONS above (this really
+    # was in that field entry's options), but is pruned here same as the RC/MPC
+    # keys: the power sensor was removed entirely (never used for control, see
+    # its old CONF_POWER_SENSOR docstring) and dropped from KNOWN_CONFIG_KEYS
+    # alongside it. `_entry_value` only ever reads keys it has a CONF_* constant
+    # for, so a leftover "power_sensor" left in an existing install's options
+    # until the next migration runs is harmless dead weight, not a bug.
     assert prune(LEGACY_OPTIONS) == {
         "comfort_min_c": 18.0,
         "enable_data_logging": True,
@@ -102,7 +109,6 @@ def test_prunes_a_real_pre_rewrite_entry() -> None:
         "nordpool_price_entity": "sensor.nordpool_kwh_se2_sek_3_06_025",
         "ohmonwifi_host": "ohmonwifiplus.local",
         "output_number_entity": "number.nibe_ohmigo_temperature",
-        "power_sensor": "sensor.nibe_electricity_usage",
         "weather_entity": "weather.smhi_home",
     }
 

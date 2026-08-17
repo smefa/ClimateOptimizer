@@ -186,11 +186,12 @@ class TrueTempCard extends HTMLElement {
     return `${parsed.toFixed(digits)}${unit}`;
   }
 
-  _cells(pairs) {
+  _cells(pairs, t) {
     return pairs
       .map(([k, v]) => {
         const off = v === DISABLED ? " co-off" : "";
-        return `<div class="co-cell${off}"><span>${this._esc(k)}</span><b>${this._esc(v)}</b></div>`;
+        const display = v === DISABLED ? t.badgeDisabled : v;
+        return `<div class="co-cell${off}"><span>${this._esc(k)}</span><b>${this._esc(display)}</b></div>`;
       })
       .join("");
   }
@@ -303,22 +304,46 @@ class TrueTempCard extends HTMLElement {
     // live is "Publishing".
     const offsetMode = !!(heatPumpOffset && heatPumpOffset.state !== "unavailable");
 
+    // When compensation is off, the published sensors fall back to the raw
+    // outdoor temperature (see climate.py) instead of the number compensation
+    // would have chosen — so preview that number from the status sensor's
+    // recommended_* attributes instead, labeled "Would publish".
     const rows = [
       [
-        offsetMode ? t.rowPublishingOffset : t.rowPublishing,
-        offsetMode
-          ? this._num(heatPumpOffset.state, 0, " °C")
-          : this._num(compensated && compensated.state, 1, " °C"),
+        active
+          ? (offsetMode ? t.rowPublishingOffset : t.rowPublishing)
+          : (offsetMode ? t.rowWouldPublishOffset : t.rowWouldPublish),
+        active
+          ? (offsetMode
+              ? this._num(heatPumpOffset.state, 0, " °C")
+              : this._num(compensated && compensated.state, 1, " °C"))
+          : (offsetMode
+              ? this._num(attrs.recommended_heat_pump_offset, 0, " °C")
+              : this._num(attrs.recommended_compensated_outdoor_temp_c, 1, " °C")),
       ],
       [t.rowOutdoorNow, this._num(attrs.raw_outdoor_temp_c, 1, " °C")],
       [t.rowIndoorNow, this._num(attrs.indoor_temp_c, 1, " °C")],
       [t.rowTarget, this._num(attrs.effective_indoor_target_c, 1, " °C")],
     ];
 
+    // Absent rather than false, same as the sources chips below: these three
+    // attributes are only published when their input is switched on, so a
+    // missing key means the term is off — not that it's genuinely computing
+    // to zero right now.
+    const sunDisabled = attrs.cloud_sun_forecast_ok === undefined;
+    const windDisabled = attrs.wind_forecast_ok === undefined;
+    // price_ok reflects whether a price sensor is configured at all, not
+    // whether compensation is switched on, so it can't tell us this term is
+    // off. price_band_start is gated on the compensation toggle instead (see
+    // sensor.py), and stays DISABLED regardless of price now/median, which
+    // are the raw feed and read independently of this toggle — this flag is
+    // reused below for the price section header badge.
+    const priceDisabled = attrs.price_band_start === DISABLED;
+
     const terms = [
-      [t.termSun, this._num(attrs.sun_adjustment_c, 2, " °C")],
-      [t.termWind, this._num(attrs.wind_adjustment_c, 2, " °C")],
-      [t.termPrice, this._num(attrs.price_adjustment_c, 2, " °C")],
+      [t.termSun, sunDisabled ? DISABLED : this._num(attrs.sun_adjustment_c, 2, " °C")],
+      [t.termWind, windDisabled ? DISABLED : this._num(attrs.wind_adjustment_c, 2, " °C")],
+      [t.termPrice, priceDisabled ? DISABLED : this._num(attrs.price_adjustment_c, 2, " °C")],
       [t.termTotalChange, this._num(attrs.total_adjustment_c, 2, " °C")],
     ];
 
@@ -395,11 +420,6 @@ class TrueTempCard extends HTMLElement {
     const showBands = this._config.bands !== false;
     const showPrice = this._config.price !== false;
     const showSources = this._config.sources !== false;
-    // Price now/median are the raw feed and stay populated regardless of the
-    // compensation toggle or the "show price section" card option, so they
-    // can't signal "off" — the brake threshold still collapses to DISABLED,
-    // so it does (and only when the price section is actually shown).
-    const priceDisabled = attrs.price_band_start === DISABLED;
 
     this.innerHTML = `
       <ha-card header="${this._esc(title)}">
@@ -410,18 +430,18 @@ class TrueTempCard extends HTMLElement {
             ${active ? "" : `<span class="co-badge">${this._esc(t.badgeOff)}</span>`}
           </div>
 
-          <div class="co-grid">${this._cells(rows)}</div>
+          <div class="co-grid">${this._cells(rows, t)}</div>
 
           <div class="co-section">${this._esc(t.sectionAddedThisCycle)}</div>
-          <div class="co-grid">${this._cells(terms)}</div>
+          <div class="co-grid">${this._cells(terms, t)}</div>
 
           <div class="co-section">${this._esc(t.sectionPrice)}${showPrice && priceDisabled ? ` <span class="co-badge">${this._esc(t.badgeDisabled)}</span>` : ""}</div>
-          <div class="co-grid${showPrice ? "" : " co-grid-compact"}">${this._cells(showPrice ? [...priceAlways, ...price] : priceAlways)}</div>
+          <div class="co-grid${showPrice ? "" : " co-grid-compact"}">${this._cells(showPrice ? [...priceAlways, ...price] : priceAlways, t)}</div>
 
           <div class="co-section">${this._esc(t.sectionHouseKnowledge)}</div>
           <div class="co-bar"><div class="co-fill" style="width:${Number.isNaN(progress) ? 0 : progress}%"></div></div>
           <div class="co-meta">${fmt(t.metaLine, { progress: Number.isNaN(progress) ? "—" : progress, coverage: Number.isNaN(coverage) ? "—" : coverage })}</div>
-          <div class="co-grid">${this._cells(learned)}</div>
+          <div class="co-grid">${this._cells(learned, t)}</div>
 
           ${showBands ? this._bandTable(offsetAttrs, t) : ""}
 

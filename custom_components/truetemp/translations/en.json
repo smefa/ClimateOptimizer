@@ -79,14 +79,12 @@
         "data": {
           "weather_entity": "Weather forecast",
           "nordpool_price_entity": "Electricity price",
-          "power_sensor": "Heat pump power meter",
           "enable_solar_input": "Compensate for sunshine",
           "enable_wind_input": "Compensate for wind"
         },
         "data_description": {
           "weather_entity": "Only used for the sun and wind forecast. Not needed if both are switched off below.",
           "nordpool_price_entity": "A Nordpool sensor with today's and tomorrow's hourly prices. Without one, price saving does nothing.",
-          "power_sensor": "Never used to control anything — it just adds real energy and cost figures to the log. On most installs this meter also covers hot water, so it is not heating alone.",
           "enable_solar_input": "Backs off a little when the sun is warming the house. Only switch this on if your indoor sensor is somewhere the sun actually reaches. A sensor in a basement, a north-facing room or a hallway never sees the solar gain, so this would push the temperature down for a warming that your sensor cannot confirm.",
           "enable_wind_input": "Adds a little when wind is stripping heat out of the house. Leave this off unless you have an older, draughty house that you can feel getting colder in high wind. A reasonably sealed house barely responds to wind, and compensating for an effect that is not there just adds noise."
         }
@@ -96,11 +94,13 @@
         "description": "When electricity is expensive, TrueTemp can let the house drift slightly cooler and make it up when prices fall. How far it will drift is set on the zone's Price saving control; how careful it is when it is properly cold is set on Cold caution.",
         "data": {
           "enable_price_compensation": "Save money when electricity is expensive",
-          "comfort_min_c": "Never let it get colder than"
+          "comfort_min_c": "Never let it get colder than",
+          "price_significance_floor": "Ignore price swings smaller than"
         },
         "data_description": {
           "enable_price_compensation": "Needs an electricity price sensor on the previous page.",
-          "comfort_min_c": "A hard floor. No amount of saving will take the house below this."
+          "comfort_min_c": "A hard floor. No amount of saving will take the house below this.",
+          "price_significance_floor": "Below this much difference between today's cheapest and most expensive hour, braking and pre-charging fade out rather than react — protects a persistently cheap stretch from chasing swings too small to be worth the comfort trade. Leave at 0 for automatic (scaled to your typical local price level); enter a number in your price sensor's own unit to fix it yourself."
         }
       },
       "output": {
