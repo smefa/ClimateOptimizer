@@ -441,7 +441,10 @@ class StatusSensor(TrueTempEntity, SensorEntity):
                     "learning_paused": learner.frozen,
                 }
             )
-            if learner.freeze_reason:
+            if learner.freeze_reason and not (
+                learner.freeze_reason == "indoor sensor unavailable"
+                and self.coordinator.in_startup_grace_period()
+            ):
                 attrs["learning_paused_because"] = learner.freeze_reason
             if learner.close_rate_c_per_h > 0:
                 attrs["recovery_rate_c_per_h"] = round(learner.close_rate_c_per_h, 3)

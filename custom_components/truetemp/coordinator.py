@@ -413,7 +413,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         "price_unavailable",
     )
 
-    def _in_startup_grace_period(self) -> bool:
+    def in_startup_grace_period(self) -> bool:
         elapsed = dt_util.utcnow() - self._setup_at
         return elapsed < timedelta(minutes=STARTUP_GRACE_PERIOD_MINUTES)
 
@@ -425,7 +425,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         entity_id: str | None,
     ) -> None:
         issue_id = f"{key}_{self.entry.entry_id}"
-        if ok or self._in_startup_grace_period():
+        if ok or self.in_startup_grace_period():
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
             return
         ir.async_create_issue(
