@@ -237,6 +237,7 @@ class TrueTempCard extends HTMLElement {
         const cls = [
           label === current ? "co-now" : "",
           samples === 0 ? "co-empty" : "",
+          samples >= 50 ? "co-ok" : "",
         ]
           .filter(Boolean)
           .join(" ");
@@ -487,6 +488,7 @@ class TrueTempCard extends HTMLElement {
                        border-bottom:1px solid var(--divider-color); }
         .co-table th:first-child, .co-table td:first-child { text-align:left; }
         .co-table tr.co-empty td { color: var(--disabled-text-color, #999); }
+        .co-table tr.co-ok td { color: var(--success-color, #4c1); }
         .co-table tr.co-now { background: var(--secondary-background-color); }
         .co-table tr.co-now td { font-weight:600; }
         .co-spill { margin-left:4px; font-style:normal; color: var(--secondary-text-color); cursor:help; }
