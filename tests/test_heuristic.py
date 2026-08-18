@@ -1062,6 +1062,7 @@ class TestComputeAppliesSignificanceTaper:
                 enable_price_compensation=True,
                 price_comfort_tier="high",
                 cold_caution="low",
+                comfort_min_c=0.0,
             ),
         )
         half = compute(
@@ -1075,6 +1076,7 @@ class TestComputeAppliesSignificanceTaper:
                 enable_price_compensation=True,
                 price_comfort_tier="high",
                 cold_caution="low",
+                comfort_min_c=0.0,
             ),
         )
         assert half.price_shift_applied_c == pytest.approx(

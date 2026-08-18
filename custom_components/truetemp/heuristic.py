@@ -190,9 +190,9 @@ class PriceTier:
 
 
 PRICE_TIERS: dict[str, PriceTier] = {
-    PRICE_TIER_LOW: PriceTier(max_sag_c=0.5, gamma=3.0, precharge_c=0.0),
-    PRICE_TIER_MID: PriceTier(max_sag_c=1.5, gamma=2.0, precharge_c=0.0),
-    PRICE_TIER_HIGH: PriceTier(max_sag_c=3.0, gamma=1.5, precharge_c=1.0),
+    PRICE_TIER_LOW: PriceTier(max_sag_c=1.0, gamma=3.0, precharge_c=0.0),
+    PRICE_TIER_MID: PriceTier(max_sag_c=2.0, gamma=2.0, precharge_c=0.0),
+    PRICE_TIER_HIGH: PriceTier(max_sag_c=4.0, gamma=1.5, precharge_c=1.0),
 }
 
 
