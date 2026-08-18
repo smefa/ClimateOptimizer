@@ -53,7 +53,7 @@ from homeassistant.util import dt as dt_util
 from . import TrueTempConfigEntry
 from .const import DOMAIN, OUTPUT_MODE_HEAT_CURVE_OFFSET, OUTPUT_MODE_OUTDOOR_SPOOF
 from .coordinator import TrueTempCoordinator
-from .heuristic import HeuristicResult, heat_curve_offset_c
+from .heuristic import HeuristicResult, heat_curve_offset_c, heating_hard_limit_offset_c
 from .learner import bin_label
 
 # Substituted for an attribute that is None only because the feature that would
@@ -180,6 +180,13 @@ class HeatPumpOffsetSensor(TrueTempEntity, SensorEntity):
             return None
         if not self.coordinator.is_active:
             return 0
+        if result.heating_hard_limit_engaged:
+            # Same fixed value `_async_push_heat_curve_offset` sends while the
+            # hard limit holds — see `heating_hard_limit_offset_c`'s
+            # docstring. Falling through to the raw-derived formula below
+            # would flap this sensor even though the pump itself now gets a
+            # stable number.
+            return heating_hard_limit_offset_c(self.coordinator.heat_curve_offset_invert)
         return heat_curve_offset_c(
             result.compensated_outdoor_temp_c,
             result.raw_outdoor_temp_c,
@@ -388,8 +395,14 @@ class StatusSensor(TrueTempEntity, SensorEntity):
             breakdown["total_adjustment_c"] = round(
                 recommended - result.raw_outdoor_temp_c, 2
             )
-            breakdown["recommended_heat_pump_offset"] = heat_curve_offset_c(
-                recommended, result.raw_outdoor_temp_c, self.coordinator.heat_curve_offset_invert
+            breakdown["recommended_heat_pump_offset"] = (
+                heating_hard_limit_offset_c(self.coordinator.heat_curve_offset_invert)
+                if result.heating_hard_limit_engaged
+                else heat_curve_offset_c(
+                    recommended,
+                    result.raw_outdoor_temp_c,
+                    self.coordinator.heat_curve_offset_invert,
+                )
             )
             breakdown["active"] = self.coordinator.is_active
             breakdown["output_mode"] = self.coordinator.output_mode

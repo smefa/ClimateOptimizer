@@ -177,6 +177,11 @@ class TrueTempCard extends HTMLElement {
     );
   }
 
+  _tooltip(t, key) {
+    const text = t[key] || EN[key];
+    return text ? ` title="${this._esc(text)}"` : "";
+  }
+
   _num(value, digits = 1, unit = "") {
     if (value === DISABLED) return DISABLED;
     const parsed = Number(value);
@@ -188,10 +193,11 @@ class TrueTempCard extends HTMLElement {
 
   _cells(pairs, t) {
     return pairs
-      .map(([k, v]) => {
+      .map(([k, v, explanation]) => {
         const off = v === DISABLED ? " co-off" : "";
         const display = v === DISABLED ? t.badgeDisabled : v;
-        return `<div class="co-cell${off}"><span>${this._esc(k)}</span><b>${this._esc(display)}</b></div>`;
+        const title = explanation ? this._tooltip(t, explanation) : "";
+        return `<div class="co-cell${off}"${title}><span>${this._esc(k)}</span><b>${this._esc(display)}</b></div>`;
       })
       .join("");
   }
@@ -230,9 +236,9 @@ class TrueTempCard extends HTMLElement {
         const spill = !seeded && samples === 0 && offsetC !== 0;
         if (spill) extrapolated = true;
         const marker = seeded
-          ? `<i class="co-spill" title="${this._esc(t.markerSeededTitle)}">s</i>`
+          ? `<i class="co-spill"${this._tooltip(t, "markerSeededTitle")}>s</i>`
           : spill
-            ? `<i class="co-spill" title="${this._esc(t.markerSpillTitle)}">~</i>`
+            ? `<i class="co-spill"${this._tooltip(t, "markerSpillTitle")}>~</i>`
             : "";
         const cls = [
           label === current ? "co-now" : "",
@@ -320,11 +326,12 @@ class TrueTempCard extends HTMLElement {
               : this._num(compensated && compensated.state, 1, " °C"))
           : (offsetMode
               ? this._num(attrs.recommended_heat_pump_offset, 0, " °C")
-              : this._num(attrs.recommended_compensated_outdoor_temp_c, 1, " °C")),
+                    : this._num(attrs.recommended_compensated_outdoor_temp_c, 1, " °C")),
+              "explainPublishing",
       ],
-      [t.rowOutdoorNow, this._num(attrs.raw_outdoor_temp_c, 1, " °C")],
-      [t.rowIndoorNow, this._num(attrs.indoor_temp_c, 1, " °C")],
-      [t.rowTarget, this._num(attrs.effective_indoor_target_c, 1, " °C")],
+                  [t.rowOutdoorNow, this._num(attrs.raw_outdoor_temp_c, 1, " °C"), "explainOutdoorNow"],
+                  [t.rowIndoorNow, this._num(attrs.indoor_temp_c, 1, " °C"), "explainIndoorNow"],
+                  [t.rowTarget, this._num(attrs.effective_indoor_target_c, 1, " °C"), "explainTarget"],
     ];
 
     // Absent rather than false, same as the sources chips below: these three
@@ -342,37 +349,37 @@ class TrueTempCard extends HTMLElement {
     const priceDisabled = attrs.price_band_start === DISABLED;
 
     const terms = [
-      [t.termSun, sunDisabled ? DISABLED : this._num(attrs.sun_adjustment_c, 2, " °C")],
-      [t.termWind, windDisabled ? DISABLED : this._num(attrs.wind_adjustment_c, 2, " °C")],
-      [t.termPrice, priceDisabled ? DISABLED : this._num(attrs.price_adjustment_c, 2, " °C")],
-      [t.termTotalChange, this._num(attrs.total_adjustment_c, 2, " °C")],
+      [t.termSun, sunDisabled ? DISABLED : this._num(attrs.sun_adjustment_c, 2, " °C"), "explainSun"],
+      [t.termWind, windDisabled ? DISABLED : this._num(attrs.wind_adjustment_c, 2, " °C"), "explainWind"],
+      [t.termPrice, priceDisabled ? DISABLED : this._num(attrs.price_adjustment_c, 2, " °C"), "explainPriceAdjustment"],
+      [t.termTotalChange, this._num(attrs.total_adjustment_c, 2, " °C"), "explainTotalChange"],
     ];
 
     const learned = [
-      [t.learnedOffset, this._num(offset && offset.state, 2, " °C")],
-      [t.outdoorBand, offsetAttrs.outdoor_band || "—"],
-      [t.respondsIn, this._num(attrs.response_time_min, 0, " min")],
-      [t.windsDownIn, this._num(attrs.wind_down_time_min, 0, " min")],
-      [t.authorityLimit, this._num(attrs.authority_limit_c, 2, " °C")],
-      [t.settlingTime, this._num(attrs.settling_time_h, 1, " h")],
-      [t.samplesThisBand, this._num(attrs.samples_this_band, 0)],
-      [t.samplesTotal, this._num(attrs.samples_learned, 0)],
+      [t.learnedOffset, this._num(offset && offset.state, 2, " °C"), "explainLearnedOffset"],
+      [t.outdoorBand, offsetAttrs.outdoor_band || "—", "explainOutdoorBand"],
+      [t.respondsIn, this._num(attrs.response_time_min, 0, " min"), "explainRespondsIn"],
+      [t.windsDownIn, this._num(attrs.wind_down_time_min, 0, " min"), "explainWindsDownIn"],
+      [t.authorityLimit, this._num(attrs.authority_limit_c, 2, " °C"), "explainAuthorityLimit"],
+      [t.settlingTime, this._num(attrs.settling_time_h, 1, " h"), "explainSettlingTime"],
+      [t.samplesThisBand, this._num(attrs.samples_this_band, 0), "explainSamplesThisBand"],
+      [t.samplesTotal, this._num(attrs.samples_learned, 0), "explainSamplesTotal"],
     ];
 
     const priceAlways = [
-      [t.priceNow, this._num(attrs.current_price, 2)],
-      [t.todaysMedian, this._num(attrs.price_median, 2)],
+      [t.priceNow, this._num(attrs.current_price, 2), "explainPriceNow"],
+      [t.todaysMedian, this._num(attrs.price_median, 2), "explainTodaysMedian"],
     ];
 
     const price = [
-      [t.brakesFrom, this._num(attrs.price_band_start, 2)],
-      [t.fullBrakeAt, this._num(attrs.price_band_full, 2)],
-      [t.nextSpikeIn, this._num(attrs.upcoming_spike_in_min, 0, " min")],
-      [t.allowedSag, this._num(attrs.allowed_sag_c, 2, " °C")],
-      [t.coldBrake, this._num(attrs.cold_brake_factor, 2, "×")],
-      [t.savingLevel, (tier && tier.state) || "—"],
-      [t.coldCaution, (caution && caution.state) || "—"],
-      [t.preBrakeLead, this._num(attrs.lead_minutes_effective, 0, " min")],
+      [t.brakesFrom, this._num(attrs.price_band_start, 2), "explainBrakesFrom"],
+      [t.fullBrakeAt, this._num(attrs.price_band_full, 2), "explainFullBrakeAt"],
+      [t.nextSpikeIn, this._num(attrs.upcoming_spike_in_min, 0, " min"), "explainNextSpikeIn"],
+      [t.allowedSag, this._num(attrs.allowed_sag_c, 2, " °C"), "explainAllowedSag"],
+      [t.coldBrake, this._num(attrs.cold_brake_factor, 2, "×"), "explainColdBrake"],
+      [t.savingLevel, (tier && tier.state) || "—", "explainSavingLevel"],
+      [t.coldCaution, (caution && caution.state) || "—", "explainColdCaution"],
+      [t.preBrakeLead, this._num(attrs.lead_minutes_effective, 0, " min"), "explainPreBrakeLead"],
     ];
 
     // Absent rather than false: the status sensor only publishes a source's
@@ -387,7 +394,7 @@ class TrueTempCard extends HTMLElement {
     ].map(([label, ok]) => {
       const cls = ok === undefined ? "co-off" : ok ? "co-good" : "co-bad";
       const text = ok === undefined ? t.srcOff : ok ? t.srcOk : t.srcUnavailable;
-      return `<span class="co-chip ${cls}">${this._esc(label)}<b>${this._esc(text)}</b></span>`;
+      return `<span class="co-chip ${cls}"${this._tooltip(t, "explainSource")}>${this._esc(label)}<b>${this._esc(text)}</b></span>`;
     });
 
     const notes = [];
@@ -425,7 +432,7 @@ class TrueTempCard extends HTMLElement {
     this.innerHTML = `
       <ha-card header="${this._esc(title)}">
         <div class="co-body">
-          <div class="co-status co-${this._esc(statusKey)}">
+          <div class="co-status co-${this._esc(statusKey)}"${this._tooltip(t, "explainStatus")}>
             <span class="co-dot"></span>
             <span>${this._esc(t["status" + statusKey.charAt(0).toUpperCase() + statusKey.slice(1)] || statusKey)}</span>
             ${active ? "" : `<span class="co-badge">${this._esc(t.badgeOff)}</span>`}
@@ -440,7 +447,10 @@ class TrueTempCard extends HTMLElement {
           <div class="co-grid${showPrice ? "" : " co-grid-compact"}">${this._cells(showPrice ? [...priceAlways, ...price] : priceAlways, t)}</div>
 
           <div class="co-section">${this._esc(t.sectionHouseKnowledge)}</div>
-          <div class="co-bar"><div class="co-fill" style="width:${Number.isNaN(progress) ? 0 : progress}%"></div></div>
+          <div class="co-bar-group">
+            <div class="co-bar co-bar-coverage"${this._tooltip(t, "coverageBarTitle")}><div class="co-fill co-fill-coverage" style="width:${Number.isNaN(coverage) ? 0 : coverage}%"></div></div>
+            <div class="co-bar"${this._tooltip(t, "progressBarTitle")}><div class="co-fill" style="width:${Number.isNaN(progress) ? 0 : progress}%"></div></div>
+          </div>
           <div class="co-meta">${fmt(t.metaLine, { progress: Number.isNaN(progress) ? "—" : progress, coverage: Number.isNaN(coverage) ? "—" : coverage })}</div>
           <div class="co-grid">${this._cells(learned, t)}</div>
 
@@ -475,8 +485,10 @@ class TrueTempCard extends HTMLElement {
         .co-cell.co-off b { font-size:12px; font-style:italic; color: var(--disabled-text-color, #999); }
         .co-section { margin:18px 0 8px; font-size:11px; text-transform:uppercase; letter-spacing:.08em;
                       color: var(--secondary-text-color); }
+        .co-bar-group { display:flex; flex-direction:column; gap:3px; }
         .co-bar { height:5px; border-radius:3px; background: var(--divider-color); overflow:hidden; }
         .co-fill { height:100%; background: var(--primary-color); transition: width .4s ease; }
+        .co-fill-coverage { background: var(--success-color, #4c1); }
         .co-meta { font-size:11px; color: var(--secondary-text-color); margin:6px 0 10px; }
         /* Five columns will not fit a phone; scroll the table, never the page. */
         .co-scroll { overflow-x:auto; }
