@@ -176,4 +176,4 @@ STARTUP_GRACE_PERIOD_MINUTES = 5
 # changes — the main file or any of the language files.
 FRONTEND_STATIC_URL_PREFIX = "/truetemp"
 FRONTEND_CARD_URL = f"{FRONTEND_STATIC_URL_PREFIX}/truetemp-card.js"
-FRONTEND_JS_VERSION = "11"
+FRONTEND_JS_VERSION = "12"

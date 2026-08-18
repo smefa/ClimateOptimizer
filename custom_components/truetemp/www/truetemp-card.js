@@ -290,14 +290,38 @@ class TrueTempCard extends HTMLElement {
   _render() {
     if (!this._hass || !this._entities) return;
 
-    const t = STRINGS[pickLang(this._hass)];
-    const status = this._state(this._entities.status);
-    const compensated = this._state(this._entities.compensated);
-    const heatPumpOffset = this._state(this._entities.heatPumpOffset);
-    const offset = this._state(this._entities.offset);
-    const climate = this._state(this._entities.climate);
-    const tier = this._state(this._entities.tier);
-    const caution = this._state(this._entities.caution);
+    // hass.states is a single object HA replaces (and pushes to every card's
+    // hass setter) on *any* entity changing anywhere, not just this zone's —
+    // so without this guard, this.innerHTML below gets torn down and rebuilt
+    // many times a minute. That's harmless for the numbers, but it destroys
+    // whatever element the mouse happens to be over, resetting the browser's
+    // hover-tooltip timer before it ever gets to fire — which is why the
+    // title="" tooltips added for card rows/terms never visibly appear.
+    const watched = [
+      this._entities.status,
+      this._entities.compensated,
+      this._entities.heatPumpOffset,
+      this._entities.offset,
+      this._entities.climate,
+      this._entities.tier,
+      this._entities.caution,
+    ].map((id) => this._state(id));
+    const lang = pickLang(this._hass);
+    const configKey = JSON.stringify(this._config);
+    if (
+      this._lastWatched &&
+      watched.every((s, i) => s === this._lastWatched[i]) &&
+      this._lastLang === lang &&
+      this._lastConfigKey === configKey
+    ) {
+      return;
+    }
+    this._lastWatched = watched;
+    this._lastLang = lang;
+    this._lastConfigKey = configKey;
+
+    const t = STRINGS[lang];
+    const [status, compensated, heatPumpOffset, offset, climate, tier, caution] = watched;
     const attrs = (status && status.attributes) || {};
     const offsetAttrs = (offset && offset.attributes) || {};
 

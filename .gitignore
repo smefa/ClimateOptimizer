@@ -9,3 +9,5 @@ venv/
 .vscode/
 .idea/
 *.log
+CLAUDE.md
+.claude/
