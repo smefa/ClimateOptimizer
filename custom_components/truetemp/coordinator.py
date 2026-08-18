@@ -87,6 +87,7 @@ from .heuristic import (
     PriceSpreadHistory,
     compute,
     heat_curve_offset_c,
+    heating_hard_limit_offset_c,
     initial_price_spread_history,
     price_significance,
     resolve_heating_hard_limit_engaged,
@@ -980,15 +981,21 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         entity_id = self.heat_curve_offset_entity_id
         if not entity_id:
             return
-        value = (
-            0
-            if not self.is_active
-            else heat_curve_offset_c(
+        if not self.is_active:
+            value = 0
+        elif result.heating_hard_limit_engaged:
+            # Fixed rather than derived from `compensated - raw`: raw keeps
+            # drifting with ordinary weather noise while the hard limit
+            # holds, and `compensated_outdoor_temp_c` is pinned to a fixed
+            # ceiling during it — see `heating_hard_limit_offset_c`'s
+            # docstring for why that combination flaps.
+            value = heating_hard_limit_offset_c(self.heat_curve_offset_invert)
+        else:
+            value = heat_curve_offset_c(
                 result.compensated_outdoor_temp_c,
                 result.raw_outdoor_temp_c,
                 self.heat_curve_offset_invert,
             )
-        )
         if (
             self._last_heat_curve_offset_value_c is not None
             and abs(value - self._last_heat_curve_offset_value_c)

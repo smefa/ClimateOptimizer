@@ -726,6 +726,35 @@ class TestHeatCurveOffset:
         assert isinstance(value, int)
 
 
+class TestHeatingHardLimitOffset:
+    """`heating_hard_limit_offset_c` is the fixed value pushed to the native
+    curve-offset entity while the hard limit is engaged — deliberately NOT
+    `heat_curve_offset_c(compensated, raw, invert)`, because raw keeps
+    drifting with ordinary weather noise while the hard limit holds and
+    `compensated_outdoor_temp_c` is pinned to a fixed ceiling during it. Using
+    the live raw reading there reintroduced the exact flapping (offset
+    hopping between +3 and +5 as raw idled a couple of degrees) the hard
+    limit's own hysteresis was supposed to prevent.
+    """
+
+    def test_stable_regardless_of_raw(self):
+        # Same call every time: nothing here depends on the actual outdoor
+        # reading, which is the whole point.
+        assert heuristic.heating_hard_limit_offset_c(
+            invert=False
+        ) == heuristic.heating_hard_limit_offset_c(invert=False)
+
+    def test_matches_the_threshold_derived_delta_by_default(self):
+        assert heuristic.heating_hard_limit_offset_c(invert=False) == -round(
+            heuristic.OUTPUT_SANITY_MAX_C - heuristic.HEATING_HARD_LIMIT_C
+        )
+
+    def test_invert_flips_the_sign(self):
+        assert heuristic.heating_hard_limit_offset_c(
+            invert=True
+        ) == -heuristic.heating_hard_limit_offset_c(invert=False)
+
+
 class TestTodayPriceSpreadAndMedian:
     """`today_price_spread_and_median_c` — the one function both the seasonal
     history and `compute()`'s own braking-band logic read the day's spread

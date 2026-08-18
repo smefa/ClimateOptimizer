@@ -1028,3 +1028,27 @@ def heat_curve_offset_c(
     """
     delta_c = compensated_outdoor_temp_c - raw_outdoor_temp_c
     return round(delta_c if invert else -delta_c)
+
+
+# The delta `heat_curve_offset_c` would compute while the hard limit is
+# engaged, using the THRESHOLD rather than the actual (fluctuating) raw
+# reading. During the hard limit `compensated_outdoor_temp_c` is pinned to
+# `OUTPUT_SANITY_MAX_C` regardless of raw — a stable absolute value in
+# outdoor-spoof output mode, which pushes that absolute number straight to the
+# device. But `heat_curve_offset_c` publishes a DELTA against raw, so feeding
+# it the fixed ceiling alongside a raw reading that keeps drifting with
+# ordinary weather noise reintroduces exactly the flapping the hard limit's
+# hysteresis was meant to prevent — e.g. raw idling between 20.0°C and 21.6°C
+# pushed the offset entity between +5 and +3 every cycle. Using the threshold
+# instead of raw keeps the pushed value fixed for as long as the hard limit
+# holds, and it is never smaller in magnitude than what raw would have given
+# (raw is at or above `HEATING_HARD_LIMIT_C` whenever this applies), so it is
+# still guaranteed to be warm enough to prevent a heat call.
+HEATING_HARD_LIMIT_OFFSET_C = OUTPUT_SANITY_MAX_C - HEATING_HARD_LIMIT_C
+
+
+def heating_hard_limit_offset_c(invert: bool) -> int:
+    """The fixed heat-curve-offset value to push while the hard limit is
+    engaged. See `HEATING_HARD_LIMIT_OFFSET_C` for why this does not simply
+    call `heat_curve_offset_c` with the live raw reading."""
+    return round(HEATING_HARD_LIMIT_OFFSET_C if invert else -HEATING_HARD_LIMIT_OFFSET_C)
