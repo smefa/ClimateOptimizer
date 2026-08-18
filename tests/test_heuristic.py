@@ -437,6 +437,77 @@ class TestPriceBraking:
         assert slab.price_adjustment_c > 0
 
 
+class TestPriceCatchup:
+    """Feedforward-only push added on top of the steady-state price shift so
+    the target sag/precharge is actually reached quickly rather than merely
+    asked for. See `PRICE_CATCHUP_GAIN`'s docstring in heuristic.py."""
+
+    def _braking(self, **overrides):
+        params = dict(
+            enable_price_compensation=True,
+            price_comfort_tier="high",
+            cold_caution="low",
+        )
+        params.update(overrides.pop("params", {}))
+        inputs = dict(
+            raw_outdoor_temp_c=3.0,
+            current_price=5.0,
+            price_data_available=True,
+            price_forecast=spiky_forecast(spike_at=0),
+        )
+        inputs.update(overrides)
+        return compute(make_inputs(**inputs), make_params(**params))
+
+    def test_pushes_harder_before_indoor_has_sagged(self):
+        """Indoor still sitting at target: the whole gap is still ahead, so
+        the sent value exceeds the steady-state shift alone."""
+        result = self._braking(indoor_temp_c=21.0)
+        assert result.price_catchup_c > 0.0
+        assert result.price_adjustment_c > result.price_shift_applied_c
+
+    def test_settles_once_the_target_sag_is_reached(self):
+        """Once indoor has actually sagged as far as the target, there is no
+        remaining gap to push for — the published value settles back to the
+        plain steady-state shift."""
+        probe = self._braking(indoor_temp_c=21.0)
+        reached = self._braking(indoor_temp_c=21.0 - probe.price_shift_applied_c)
+        assert reached.price_catchup_c == pytest.approx(0.0, abs=1e-9)
+        assert reached.price_adjustment_c == pytest.approx(reached.price_shift_applied_c)
+
+    def test_never_reverses_once_overshot(self):
+        """Indoor already sagged further than the target: catch-up must not
+        claw the offset back the other way, only ever stop adding."""
+        result = self._braking(indoor_temp_c=10.0)
+        assert result.price_catchup_c == pytest.approx(0.0, abs=1e-9)
+
+    def test_requires_indoor_data(self):
+        result = self._braking(indoor_temp_c=None, indoor_data_available=False)
+        assert result.price_catchup_c == 0.0
+
+    def test_capped(self):
+        result = self._braking(indoor_temp_c=21.0)
+        assert result.price_catchup_c <= heuristic.PRICE_CATCHUP_MAX_C
+
+    def test_precharge_direction_pushes_more_heat_while_catching_up(self):
+        result = compute(
+            make_inputs(
+                current_price=1.0,
+                price_data_available=True,
+                price_forecast=spiky_forecast(spike_at=1),
+                rise_minutes=120.0,
+                indoor_temp_c=21.0,
+            ),
+            make_params(
+                enable_price_compensation=True,
+                price_comfort_tier="high",
+                cold_caution="low",
+            ),
+        )
+        assert result.precharge_active
+        assert result.price_catchup_c < 0.0
+        assert result.price_adjustment_c < result.price_shift_applied_c
+
+
 class TestPreCharge:
     def test_high_tier_banks_heat_while_it_is_cheap(self):
         result = compute(

@@ -105,6 +105,25 @@ WIND_GAIN_C_PER_MS = 0.3
 # not freeze the learner.
 PRICE_BRAKING_EPS_C = 0.05
 
+# --- Price catch-up (feedforward kick) --------------------------------------
+# `max_sag_c`/`precharge_c` above are a comfort bound: how far indoor is
+# actually allowed to drift, applied verbatim to `effective_indoor_target_c`.
+# But the outdoor-spoof delta and the real indoor response are related by the
+# house's thermal lag, not a fast controller — sending exactly the
+# steady-state degree count takes as long to reach that sag as the house's own
+# time constant does, often hours, which can leave a spike half over before
+# the pump ever throttles back.
+#
+# `price_catchup_c` (computed in `compute()`) is a separate feedforward push
+# added ON TOP of the steady-state price adjustment — never onto the target
+# itself, which stays the comfort bound above — sized to how far indoor still
+# has left to go. It decays to zero as indoor actually reaches the target sag,
+# so the published value settles back at the plain steady-state shift rather
+# than holding an inflated push indefinitely (which would just keep driving
+# indoor further than the tier's comfort bound intends).
+PRICE_CATCHUP_GAIN = 2.0
+PRICE_CATCHUP_MAX_C = 6.0
+
 # Fixed (not target-relative) hard limit: at or above this raw outdoor
 # temperature, no plausible combination of learned offset, wind, sun or price
 # terms is allowed to call for heat, however each one individually resolves.
@@ -717,6 +736,10 @@ class HeuristicResult:
     price_response: float = 0.0
     cold_brake_factor: float = 1.0
     allowed_sag_c: float = 0.0
+    # Feedforward-only push added on top of `price_adjustment_c` while indoor
+    # hasn't yet reached the target sag/precharge — see `PRICE_CATCHUP_GAIN`'s
+    # docstring. Zero once indoor gets there, or whenever price isn't braking.
+    price_catchup_c: float = 0.0
     upcoming_spike_in_min: float | None = None
     precharge_active: bool = False
     # True while price compensation is deliberately holding the house away from
@@ -895,6 +918,31 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
     applied_shift_c = params.indoor_target_c - effective_indoor_target_c
     price_adjustment_c = applied_shift_c * params.spoof_per_indoor_c
 
+    # Catch-up: push harder than the steady-state shift while indoor hasn't
+    # sagged/precharged as far as `applied_shift_c` intends yet, so the target
+    # sag is actually reached before the spike passes rather than merely being
+    # asked for. Gated on `applied_shift_c`'s own sign so it only ever pushes
+    # further IN the direction already chosen above, never against it — a
+    # remaining gap of 0 or the wrong sign (already there, or overshot) yields
+    # zero, so this never adds a second, independent excursion of its own.
+    price_catchup_c = 0.0
+    if (
+        applied_shift_c != 0.0
+        and inputs.indoor_data_available
+        and inputs.indoor_temp_c is not None
+    ):
+        actual_shift_so_far_c = params.indoor_target_c - inputs.indoor_temp_c
+        remaining_c = applied_shift_c - actual_shift_so_far_c
+        if applied_shift_c > 0.0:
+            price_catchup_c = _clamp(
+                PRICE_CATCHUP_GAIN * remaining_c, 0.0, PRICE_CATCHUP_MAX_C
+            )
+        else:
+            price_catchup_c = _clamp(
+                PRICE_CATCHUP_GAIN * remaining_c, -PRICE_CATCHUP_MAX_C, 0.0
+            )
+    price_adjustment_c += price_catchup_c * params.spoof_per_indoor_c
+
     compensated_outdoor_temp_c = _clamp(
         inputs.raw_outdoor_temp_c
         + inputs.learned_offset_c
@@ -949,6 +997,8 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
             and not price_flat_day
         ):
             reason += f", low significance ×{inputs.price_significance_factor:.2f}"
+        if price_catchup_c != 0.0:
+            reason += f", catch-up {price_catchup_c:+.1f}°C until sag reached"
         if precharge_active:
             reason += (
                 f", pre-charging ahead of spike in {upcoming_spike_in_min:.0f} min "
@@ -978,6 +1028,7 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         wind_adjustment_c=wind_adjustment_c,
         sun_adjustment_c=sun_adjustment_c,
         price_adjustment_c=price_adjustment_c,
+        price_catchup_c=price_catchup_c,
         wind_speed_ms=inputs.wind_speed_ms,
         wind_data_available=inputs.wind_data_available,
         cloud_coverage_pct=inputs.cloud_coverage_pct,
