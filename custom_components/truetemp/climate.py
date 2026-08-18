@@ -129,15 +129,15 @@ class TrueTempThermostat(TrueTempEntity, ClimateEntity, RestoreEntity):
 
         Reports the optimizer's own state, not the heat pump's — this
         integration publishes a compensated outdoor temperature and never learns
-        whether the compressor actually ran. IDLE is the summer cutoff: active,
-        but deliberately holding off.
+        whether the compressor actually ran. IDLE is the hard heating limit:
+        active, but forced to publish the warm ceiling regardless.
         """
         if not self.coordinator.is_active:
             return HVACAction.OFF
         result: HeuristicResult | None = self.coordinator.data
         if result is None:
             return None
-        return HVACAction.IDLE if result.heating_cutoff_engaged else HVACAction.HEATING
+        return HVACAction.IDLE if result.heating_hard_limit_engaged else HVACAction.HEATING
 
     @property
     def preset_mode(self) -> str:

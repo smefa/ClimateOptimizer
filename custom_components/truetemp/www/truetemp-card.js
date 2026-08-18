@@ -403,8 +403,8 @@ class TrueTempCard extends HTMLElement {
     if (attrs.response_time_measured === false) {
       notes.push(t.noteResponseNotMeasured);
     }
-    if (attrs.heating_cutoff_engaged) {
-      notes.push(t.noteHeatingCutoff);
+    if (attrs.heating_hard_limit_engaged) {
+      notes.push(t.noteHeatingHardLimit);
     }
     if (attrs.precharge_active) {
       notes.push(t.notePrecharge);

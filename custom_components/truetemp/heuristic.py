@@ -105,38 +105,44 @@ WIND_GAIN_C_PER_MS = 0.3
 # not freeze the learner.
 PRICE_BRAKING_EPS_C = 0.05
 
-# Re-entry margin below `heating_cutoff_c` before the summer guardrail lets
-# go again. Without this, an outdoor reading idling within noise of the
-# threshold flips the published output between the full learned offset and a
-# hard zero every cycle it crosses back and forth — see
-# `resolve_heating_cutoff_engaged`.
-HEATING_CUTOFF_HYSTERESIS_C = 2.0
+# Fixed (not target-relative) hard limit: at or above this raw outdoor
+# temperature, no plausible combination of learned offset, wind, sun or price
+# terms is allowed to call for heat, however each one individually resolves.
+# A bad indoor reading or a windy afternoon could otherwise still push the
+# published value below raw even when it is plainly warm outside, e.g. asking
+# the pump to fight an AC unit that has no way to explain itself to this
+# integration. Deliberately absolute rather than derived from the indoor
+# target: the target says nothing about whether the house has separate
+# cooling.
+HEATING_HARD_LIMIT_C = 20.0
+
+# Re-entry margin below `HEATING_HARD_LIMIT_C` before the guardrail lets go
+# again — same flapping fix as `HEATING_CUTOFF_HYSTERESIS_C` used to be, for
+# the same reason: a raw reading idling within noise of a bare threshold would
+# otherwise cross back and forth every cycle. See
+# `resolve_heating_hard_limit_engaged`.
+HEATING_HARD_LIMIT_HYSTERESIS_C = 2.0
 
 
 def _clamp(value: float, minimum: float, maximum: float) -> float:
     return max(minimum, min(maximum, value))
 
 
-def resolve_heating_cutoff_engaged(
-    raw_outdoor_temp_c: float, heating_cutoff_c: float, prev_engaged: bool
+def resolve_heating_hard_limit_engaged(
+    raw_outdoor_temp_c: float, prev_engaged: bool
 ) -> bool:
-    """Whether the summer heating-cutoff guardrail is active this cycle.
+    """Whether the hard heating limit is active this cycle.
 
-    Hysteresis, not a bare `>=`: a raw outdoor reading that idles within a
-    fraction of a degree of `heating_cutoff_c` — routine sensor noise, or
-    just the weather sitting on the boundary — would otherwise cross back and
-    forth every cycle, snapping the published offset between the full
-    learned value and a hard zero each time (that is what
-    `sensor.*_heat_pump_offset` "flipping between 4 and 0" looks like from
-    the outside). Once engaged, the reading has to drop
-    `HEATING_CUTOFF_HYSTERESIS_C` below the threshold, not just below it,
-    before compensation resumes. `prev_engaged` defaults to `False` for a
-    fresh install or an unavailable previous cycle, which reproduces the old
-    bare-`>=` behaviour on the very first call.
+    Hysteresis, not a bare `>=`, for the same reason the old heating-cutoff
+    guardrail needed it: a raw outdoor reading idling within a fraction of a
+    degree of `HEATING_HARD_LIMIT_C` would otherwise snap the published value
+    between the forced ceiling and a normally-computed one every cycle. Once
+    engaged, the reading has to drop `HEATING_HARD_LIMIT_HYSTERESIS_C` below
+    the threshold, not just below it, before normal compensation resumes.
     """
     if prev_engaged:
-        return raw_outdoor_temp_c >= heating_cutoff_c - HEATING_CUTOFF_HYSTERESIS_C
-    return raw_outdoor_temp_c >= heating_cutoff_c
+        return raw_outdoor_temp_c >= HEATING_HARD_LIMIT_C - HEATING_HARD_LIMIT_HYSTERESIS_C
+    return raw_outdoor_temp_c >= HEATING_HARD_LIMIT_C
 
 
 def solar_effect_of(sun_elevation_deg: float, cloud_coverage_pct: float | None) -> float:
@@ -651,11 +657,11 @@ class HeuristicInputs:
     price_significance_factor: float = 1.0
     today_price_spread_c: float | None = None
     seasonal_reference_spread_c: float | None = None
-    # Last cycle's `HeuristicResult.heating_cutoff_engaged`, for
-    # `resolve_heating_cutoff_engaged`'s hysteresis. Threaded in by the
+    # Last cycle's `HeuristicResult.heating_hard_limit_engaged`, for
+    # `resolve_heating_hard_limit_engaged`'s hysteresis. Threaded in by the
     # coordinator the same way `previous.price_braking` is; see that field's
     # docstring in coordinator.py.
-    prev_heating_cutoff_engaged: bool = False
+    prev_heating_hard_limit_engaged: bool = False
 
 
 @dataclass(frozen=True)
@@ -671,7 +677,6 @@ class HeuristicParams:
     # Absolute indoor floor for price compensation — the only comfort bound
     # left, and it applies to nothing else.
     comfort_min_c: float
-    heating_cutoff_c: float
     enable_price_compensation: bool
     price_comfort_tier: str = PRICE_TIER_MID
     cold_caution: str = COLD_CAUTION_MID
@@ -705,7 +710,7 @@ class HeuristicResult:
     current_price: float | None
     price_shift_applied_c: float
     price_data_available: bool
-    heating_cutoff_engaged: bool
+    heating_hard_limit_engaged: bool
     reason: str
     price_comfort_tier: str = PRICE_TIER_MID
     cold_caution: str = COLD_CAUTION_MID
@@ -734,19 +739,20 @@ class HeuristicResult:
 def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult:
     """Compose the compensated outdoor temperature and its explanation."""
     # Solar effect is a physical fact, not a control decision, so it is computed
-    # unconditionally — before the cutoff branch — because the learner and the
-    # logs want reality rather than a zeroed value on warm days.
+    # unconditionally — before the hard-limit branch — because the learner and
+    # the logs want reality rather than a zeroed value on warm days.
     solar_effect = solar_effect_of(inputs.sun_elevation_deg, inputs.cloud_coverage_pct)
 
-    if resolve_heating_cutoff_engaged(
-        inputs.raw_outdoor_temp_c, params.heating_cutoff_c, inputs.prev_heating_cutoff_engaged
+    if resolve_heating_hard_limit_engaged(
+        inputs.raw_outdoor_temp_c, inputs.prev_heating_hard_limit_engaged
     ):
-        # Summer guardrail: above the cutoff, suppress everything rather than
-        # letting a cold indoor reading or a windy afternoon push the published
-        # value below the raw one and trick the pump's curve into calling for
-        # heat on a warm day. Full passthrough, no partial credit.
+        # Hard limit: force the published value to the system's warmest
+        # possible reading rather than merely passing raw through, so no
+        # combination of learned offset, wind, sun or price can still leave
+        # the pump calling for a trickle of heat this close to (or above) the
+        # outdoor temperature it is supposedly holding. No partial credit.
         return HeuristicResult(
-            compensated_outdoor_temp_c=inputs.raw_outdoor_temp_c,
+            compensated_outdoor_temp_c=OUTPUT_SANITY_MAX_C,
             raw_outdoor_temp_c=inputs.raw_outdoor_temp_c,
             indoor_temp_c=inputs.indoor_temp_c,
             indoor_data_available=inputs.indoor_data_available,
@@ -762,31 +768,22 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
             cloud_data_available=inputs.cloud_data_available,
             solar_effect=solar_effect,
             # Informational, like the normal path below: a house above the
-            # cutoff can still ask what power costs right now.
+            # hard limit can still ask what power costs right now.
             current_price=inputs.current_price if inputs.price_data_available else None,
             price_shift_applied_c=0.0,
             price_data_available=inputs.price_data_available,
-            heating_cutoff_engaged=True,
+            heating_hard_limit_engaged=True,
             price_comfort_tier=params.price_comfort_tier,
             cold_caution=params.cold_caution,
-            # Also informational and also unaffected by the cutoff, same as
+            # Also informational and also unaffected by the hard limit, same as
             # current_price above.
             price_significance_factor=inputs.price_significance_factor,
             today_price_spread_c=inputs.today_price_spread_c,
             seasonal_reference_spread_c=inputs.seasonal_reference_spread_c,
             reason=(
-                (
-                    f"Raw outdoor {inputs.raw_outdoor_temp_c:.1f}°C ≥ heating cutoff "
-                    f"{params.heating_cutoff_c:.1f}°C; compensation suppressed, "
-                    f"publishing raw temperature unmodified"
-                )
-                if inputs.raw_outdoor_temp_c >= params.heating_cutoff_c
-                else (
-                    f"Raw outdoor {inputs.raw_outdoor_temp_c:.1f}°C below heating cutoff "
-                    f"{params.heating_cutoff_c:.1f}°C but within "
-                    f"{HEATING_CUTOFF_HYSTERESIS_C:.1f}°C hysteresis margin of it; "
-                    f"compensation still suppressed, publishing raw temperature unmodified"
-                )
+                f"Raw outdoor {inputs.raw_outdoor_temp_c:.1f}°C at or above the "
+                f"{HEATING_HARD_LIMIT_C:.1f}°C hard limit; publishing "
+                f"{OUTPUT_SANITY_MAX_C:.1f}°C to guarantee no heat call"
             ),
         )
 
@@ -989,7 +986,7 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         current_price=current_price,
         price_shift_applied_c=applied_shift_c,
         price_data_available=inputs.price_data_available,
-        heating_cutoff_engaged=False,
+        heating_hard_limit_engaged=False,
         reason=reason,
         price_comfort_tier=params.price_comfort_tier,
         cold_caution=params.cold_caution,

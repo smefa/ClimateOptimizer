@@ -292,7 +292,7 @@ again, and on unload/reload so nothing outlives the entry. See `TrueTempCoordina
 | `solar_effect` | Fraction (0–1) of full solar gain available right now — pure geometry and cloud cover, computed regardless of whether the sun term is enabled (see `solar_effect_of` in `heuristic.py`). |
 | `current_price` | Current price from the configured price sensor. Read regardless of whether price compensation is switched on. |
 | `price_shift_applied_c` | How far price compensation is currently holding indoor away from target. |
-| `heating_cutoff_engaged` | `True` above the configured heating cutoff — everything except passthrough is suppressed (the summer guardrail). |
+| `heating_hard_limit_engaged` | `True` at or above the fixed 20°C hard limit — the published value is forced to the warm ceiling (`OUTPUT_SANITY_MAX_C`) regardless of what the learned offset, wind, sun or price terms would otherwise produce. |
 | `reason` | Plain-language explanation of the cycle's output, shown on the card. |
 | `price_comfort_tier` | Current price-saving preset (`low`/`mid`/`high`), mirroring `select.<name>_price_saving`. |
 | `cold_caution` | Current cold-caution preset, mirroring `select.<name>_cold_caution`. |

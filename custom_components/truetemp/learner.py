@@ -315,7 +315,10 @@ class LearnerInputs:
     indoor_data_available: bool
     target_c: float
     outdoor_temp_c: float
-    heating_cutoff_engaged: bool
+    # True while the hard heating limit is forcing the published value to the
+    # warm ceiling instead of the learner's own offset. See `heuristic.
+    # resolve_heating_hard_limit_engaged`.
+    heating_hard_limit_engaged: bool
     is_active: bool
     # True while price compensation is deliberately holding the house below
     # target. The integrator freezes rather than fighting it — see `step`.
@@ -466,8 +469,8 @@ def _freeze_reason(inputs: LearnerInputs, state: LearnerState) -> str | None:
         return "compensation is off, so nothing is actually being applied"
     if not inputs.indoor_data_available or inputs.indoor_temp_c is None:
         return "indoor sensor unavailable"
-    if inputs.heating_cutoff_engaged:
-        return "heating cutoff engaged, no compensation is being applied"
+    if inputs.heating_hard_limit_engaged:
+        return "heating hard limit engaged, output is forced rather than learned"
     if inputs.price_braking:
         return "price compensation is deliberately holding below target"
     if state.holdoff_until_s is not None and inputs.now_s < state.holdoff_until_s:
@@ -511,10 +514,11 @@ def _observe_baseline(
     """
     if not inputs.indoor_data_available or inputs.indoor_temp_c is None:
         return baseline_bins, "indoor sensor unavailable"
-    if inputs.heating_cutoff_engaged:
-        # Above the cutoff the pump is not heating at all, so where the house
-        # sits says nothing about the heat curve — it is just free-floating.
-        return baseline_bins, "heating cutoff engaged, nothing to measure"
+    if inputs.heating_hard_limit_engaged:
+        # This far above the hard limit the raw curve is not heating either,
+        # so where the house sits is free-floating (solar, venting, an AC
+        # unit) rather than evidence about the heat curve.
+        return baseline_bins, "heating hard limit engaged, nothing to measure"
 
     required_dwell_h = max(
         BASELINE_MIN_DWELL_H, inputs.rise_hours * BASELINE_DWELL_LAG_MULTIPLE

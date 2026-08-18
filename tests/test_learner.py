@@ -33,7 +33,7 @@ def make_inputs(**overrides) -> LearnerInputs:
         indoor_data_available=True,
         target_c=21.0,
         outdoor_temp_c=0.0,
-        heating_cutoff_engaged=False,
+        heating_hard_limit_engaged=False,
         is_active=True,
         price_braking=False,
         rise_hours=1.0,
@@ -176,7 +176,7 @@ class TestFreezing:
         [
             ({"is_active": False}, "compensation is off"),
             ({"indoor_data_available": False, "indoor_temp_c": None}, "unavailable"),
-            ({"heating_cutoff_engaged": True}, "cutoff"),
+            ({"heating_hard_limit_engaged": True}, "hard limit"),
             ({"price_braking": True}, "price"),
             ({"dt_hours": 0.0}, "elapsed"),
         ],
@@ -465,11 +465,11 @@ class TestBaselineObservation:
         # 1.0 degC over 0.25 h is 4 degC/h — a transient, not an equilibrium.
         assert state.baseline_bins[4].samples == 0
 
-    def test_it_rejects_samples_above_the_heating_cutoff(self):
-        """With the pump not heating at all, where the house sits says nothing
-        about the heat curve."""
+    def test_it_rejects_samples_above_the_heating_hard_limit(self):
+        """With the raw curve not heating either, where the house sits says
+        nothing about the heat curve."""
         state, _ = learner.step(
-            settled_off_state(), off_inputs(heating_cutoff_engaged=True)
+            settled_off_state(), off_inputs(heating_hard_limit_engaged=True)
         )
         assert state.baseline_bins[4].samples == 0
 

@@ -29,9 +29,6 @@ def make_params(**overrides) -> HeuristicParams:
     defaults = dict(
         indoor_target_c=21.0,
         comfort_min_c=18.0,
-        # High enough that the default raw_outdoor_temp_c never trips it;
-        # cutoff tests override it explicitly.
-        heating_cutoff_c=100.0,
         enable_price_compensation=False,
     )
     defaults.update(overrides)
@@ -174,8 +171,10 @@ class TestComposition:
         )
         assert low.compensated_outdoor_temp_c == heuristic.OUTPUT_SANITY_MIN_C
         high = compute(
-            make_inputs(raw_outdoor_temp_c=20.0, learned_offset_c=50.0),
-            make_params(heating_cutoff_c=100.0),
+            # Below the hard limit, so this exercises the sanity clamp on the
+            # normal compute path rather than the hard-limit override.
+            make_inputs(raw_outdoor_temp_c=10.0, learned_offset_c=50.0),
+            make_params(),
         )
         assert high.compensated_outdoor_temp_c == heuristic.OUTPUT_SANITY_MAX_C
 
@@ -190,11 +189,11 @@ class TestComposition:
         assert "Indoor sensor unavailable" in result.reason
 
 
-class TestHeatingCutoff:
-    def test_above_cutoff_everything_is_suppressed(self):
+class TestHeatingHardLimit:
+    def test_at_or_above_the_limit_forces_the_warm_ceiling(self):
         result = compute(
             make_inputs(
-                raw_outdoor_temp_c=18.0,
+                raw_outdoor_temp_c=20.0,
                 learned_offset_c=-3.0,
                 wind_speed_ms=10.0,
                 sun_elevation_deg=45.0,
@@ -202,75 +201,74 @@ class TestHeatingCutoff:
                 price_data_available=True,
                 price_forecast=spiky_forecast(),
             ),
-            make_params(heating_cutoff_c=18.0, enable_price_compensation=True),
+            make_params(enable_price_compensation=True),
         )
-        assert result.heating_cutoff_engaged
-        assert result.compensated_outdoor_temp_c == 18.0
+        assert result.heating_hard_limit_engaged
+        assert result.compensated_outdoor_temp_c == heuristic.OUTPUT_SANITY_MAX_C
         assert result.learned_offset_c == 0.0
         assert result.wind_adjustment_c == 0.0
         assert result.sun_adjustment_c == 0.0
         assert result.price_adjustment_c == 0.0
         assert result.current_price == 9.0
 
-    def test_just_below_cutoff_still_compensates(self):
+    def test_just_below_the_limit_still_compensates(self):
         result = compute(
-            make_inputs(raw_outdoor_temp_c=17.9, learned_offset_c=-1.0),
-            make_params(heating_cutoff_c=18.0),
+            make_inputs(raw_outdoor_temp_c=19.9, learned_offset_c=-1.0),
+            make_params(),
         )
-        assert not result.heating_cutoff_engaged
-        assert result.compensated_outdoor_temp_c == pytest.approx(16.9)
+        assert not result.heating_hard_limit_engaged
+        assert result.compensated_outdoor_temp_c == pytest.approx(18.9)
 
 
-class TestHeatingCutoffHysteresis:
-    """Reproduces the reported symptom: `sensor.*_heat_pump_offset` flipping
-    between its full value and 0 because raw outdoor temperature idles right
-    on `heating_cutoff_c`. Without hysteresis, `test_just_below_cutoff_still_
-    compensates` above and `test_above_cutoff_everything_is_suppressed` would
-    both fire, alternately, on every cycle the reading crosses back and
-    forth — that flip is exactly what these tests close off."""
+class TestHeatingHardLimitHysteresis:
+    """Same flapping symptom the old heating-cutoff guardrail closed off,
+    reproduced against the fixed 20°C hard limit: `test_just_below_the_limit_
+    still_compensates` above and `test_at_or_above_the_limit_forces_the_warm_
+    ceiling` would both fire, alternately, on every cycle a raw reading
+    idling near the threshold crosses back and forth."""
 
     def test_resolve_engaged_is_a_bare_threshold_when_not_previously_engaged(self):
-        engaged = heuristic.resolve_heating_cutoff_engaged
-        assert not engaged(17.9, 18.0, prev_engaged=False)
-        assert engaged(18.0, 18.0, prev_engaged=False)
+        engaged = heuristic.resolve_heating_hard_limit_engaged
+        assert not engaged(19.9, prev_engaged=False)
+        assert engaged(20.0, prev_engaged=False)
 
     def test_resolve_engaged_requires_the_margin_to_release(self):
-        engaged = heuristic.resolve_heating_cutoff_engaged
-        margin = heuristic.HEATING_CUTOFF_HYSTERESIS_C
-        # Still within the margin below cutoff: stays engaged.
-        assert engaged(18.0 - margin + 0.1, 18.0, prev_engaged=True)
+        engaged = heuristic.resolve_heating_hard_limit_engaged
+        margin = heuristic.HEATING_HARD_LIMIT_HYSTERESIS_C
+        # Still within the margin below the limit: stays engaged.
+        assert engaged(20.0 - margin + 0.1, prev_engaged=True)
         # Past the margin: releases.
-        assert not engaged(18.0 - margin - 0.1, 18.0, prev_engaged=True)
+        assert not engaged(20.0 - margin - 0.1, prev_engaged=True)
 
-    def test_previously_engaged_stays_suppressed_just_below_cutoff(self):
-        """Same 17.9°C reading as `test_just_below_cutoff_still_compensates`,
-        but arriving with last cycle's cutoff already engaged — the case
+    def test_previously_engaged_stays_forced_just_below_the_limit(self):
+        """Same 19.9°C reading as `test_just_below_the_limit_still_compensates`,
+        but arriving with last cycle's hard limit already engaged — the case
         that formula-only comparison got wrong."""
         result = compute(
             replace(
-                make_inputs(raw_outdoor_temp_c=17.9, learned_offset_c=-1.0),
-                prev_heating_cutoff_engaged=True,
+                make_inputs(raw_outdoor_temp_c=19.9, learned_offset_c=-1.0),
+                prev_heating_hard_limit_engaged=True,
             ),
-            make_params(heating_cutoff_c=18.0),
+            make_params(),
         )
-        assert result.heating_cutoff_engaged
-        assert result.compensated_outdoor_temp_c == 17.9
+        assert result.heating_hard_limit_engaged
+        assert result.compensated_outdoor_temp_c == heuristic.OUTPUT_SANITY_MAX_C
         assert result.learned_offset_c == 0.0
 
     def test_releases_once_past_the_hysteresis_margin(self):
-        margin = heuristic.HEATING_CUTOFF_HYSTERESIS_C
+        margin = heuristic.HEATING_HARD_LIMIT_HYSTERESIS_C
         result = compute(
             replace(
                 make_inputs(
-                    raw_outdoor_temp_c=18.0 - margin - 0.1, learned_offset_c=-1.0
+                    raw_outdoor_temp_c=20.0 - margin - 0.1, learned_offset_c=-1.0
                 ),
-                prev_heating_cutoff_engaged=True,
+                prev_heating_hard_limit_engaged=True,
             ),
-            make_params(heating_cutoff_c=18.0),
+            make_params(),
         )
-        assert not result.heating_cutoff_engaged
+        assert not result.heating_hard_limit_engaged
         assert result.compensated_outdoor_temp_c == pytest.approx(
-            18.0 - margin - 0.1 - 1.0
+            20.0 - margin - 0.1 - 1.0
         )
 
 
@@ -666,7 +664,7 @@ class TestExplainability:
         ):
             result = compute(inputs, make_params(enable_price_compensation=True))
             assert result.reason
-            assert "total" in result.reason or "suppressed" in result.reason
+            assert "total" in result.reason or "hard limit" in result.reason
 
     def test_band_thresholds_are_published_for_troubleshooting(self):
         result = compute(
@@ -1133,23 +1131,6 @@ class TestComputeAppliesSignificanceTaper:
             ),
             make_params(),
         )
-        assert result.price_significance_factor == pytest.approx(0.42)
-        assert result.today_price_spread_c == pytest.approx(1.23)
-        assert result.seasonal_reference_spread_c == pytest.approx(0.87)
-
-    def test_significance_fields_survive_the_heating_cutoff(self):
-        """Informational, like current_price — a house above the cutoff can
-        still see how significant today's price swing is."""
-        result = compute(
-            make_inputs(
-                raw_outdoor_temp_c=18.0,
-                price_significance_factor=0.42,
-                today_price_spread_c=1.23,
-                seasonal_reference_spread_c=0.87,
-            ),
-            make_params(heating_cutoff_c=18.0),
-        )
-        assert result.heating_cutoff_engaged
         assert result.price_significance_factor == pytest.approx(0.42)
         assert result.today_price_spread_c == pytest.approx(1.23)
         assert result.seasonal_reference_spread_c == pytest.approx(0.87)

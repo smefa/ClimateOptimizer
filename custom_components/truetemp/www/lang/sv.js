@@ -53,7 +53,7 @@ export const STRINGS = {
   noteLearningPaused: "Inlärning pausad: {value}",
   notePumpAtCapacity: "Värmepumpen verkar gå för fullt vid denna utomhustemperatur.",
   noteResponseNotMeasured: "Mäter fortfarande hur snabbt huset reagerar — använder standardvärden tills vidare.",
-  noteHeatingCutoff: "Varmare ute än värmegränsen — kompensation avstängd tills det svalnar.",
+  noteHeatingHardLimit: "Varmare ute än den hårda värmegränsen — publicerar värmetaket för att förhindra all värmebegäran.",
   notePrecharge: "Lagrar värme nu, inför en pristopp.",
   notePriceBraking: "Driver under målet för att rida ut en dyr timme.",
   noteLastError: "Senaste fel: {value}",

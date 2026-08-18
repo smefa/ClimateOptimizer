@@ -53,7 +53,7 @@ export const STRINGS = {
   noteLearningPaused: "Lernen pausiert: {value}",
   notePumpAtCapacity: "Die Wärmepumpe scheint bei dieser Außentemperatur mit voller Leistung zu laufen.",
   noteResponseNotMeasured: "Misst noch, wie schnell das Haus reagiert — verwendet vorerst Standardwerte.",
-  noteHeatingCutoff: "Wärmer draußen als die Heizgrenze — Kompensation unterdrückt, bis es abkühlt.",
+  noteHeatingHardLimit: "Wärmer draußen als die harte Heizgrenze — veröffentlicht die Wärmeobergrenze, um jede Heizanforderung zu verhindern.",
   notePrecharge: "Speichert jetzt Wärme, vor einer Preisspitze.",
   notePriceBraking: "Driftet unter das Ziel, um eine teure Stunde zu überstehen.",
   noteLastError: "Letzter Fehler: {value}",

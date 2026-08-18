@@ -97,7 +97,6 @@ async def async_get_config_entry_diagnostics(
             "output_mode": coordinator.output_mode,
             "heat_curve_offset_invert": coordinator.heat_curve_offset_invert,
             "indoor_target_c": coordinator.indoor_target_c,
-            "heating_cutoff_c": coordinator.heating_cutoff_c,
             "price_comfort_tier": coordinator.price_comfort_tier,
             "cold_caution": coordinator.cold_caution,
             "price_configured": coordinator.price_configured,

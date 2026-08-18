@@ -70,7 +70,6 @@ from .const import (
     DEFAULT_OUTPUT_MODE,
     DEFAULT_PRICE_SIGNIFICANCE_FLOOR,
     DOMAIN,
-    HEATING_CUTOFF_MARGIN_C,
     LEARNER_STEP_SECONDS,
     OUTPUT_MODE_HEAT_CURVE_OFFSET,
     OUTPUT_MODE_OUTDOOR_SPOOF,
@@ -90,7 +89,7 @@ from .heuristic import (
     heat_curve_offset_c,
     initial_price_spread_history,
     price_significance,
-    resolve_heating_cutoff_engaged,
+    resolve_heating_hard_limit_engaged,
     solar_effect_of,
     today_price_spread_and_median_c,
     update_price_spread_history,
@@ -369,17 +368,6 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         forecast service calls are skipped entirely."""
         return self.solar_input_enabled or self.wind_input_enabled
 
-    @property
-    def heating_cutoff_c(self) -> float:
-        """Outdoor temperature at or above which compensation is suppressed.
-
-        Derived from the target rather than configured: heating is not wanted
-        once it is nearly as warm outside as the temperature being held inside,
-        and the margin is what stops a cold indoor reading or a windy afternoon
-        from calling for heat on a warm day.
-        """
-        return self.indoor_target_c - HEATING_CUTOFF_MARGIN_C
-
     def _params(self) -> HeuristicParams:
         """This cycle's occupant preferences. No control gains live here."""
         return HeuristicParams(
@@ -387,7 +375,6 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             comfort_min_c=_entry_value(
                 self.entry, CONF_COMFORT_MIN_C, DEFAULT_COMFORT_MIN_C
             ),
-            heating_cutoff_c=self.heating_cutoff_c,
             enable_price_compensation=self.price_enabled,
             price_comfort_tier=self.price_comfort_tier,
             cold_caution=self.cold_caution,
@@ -685,14 +672,15 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         Wrapped so a bug in either can never break the published output: on
         failure the previous result stands, which is a held offset.
 
-        The heating-cutoff and price-braking flags the learner needs come from
-        `heuristic.compute`, which needs the learner's offset — so cutoff is
-        recomputed directly here via `resolve_heating_cutoff_engaged` (reading
-        this same PREVIOUS cycle's engaged flag for its hysteresis) and price
-        braking is read from the PREVIOUS cycle too. One cycle of staleness on
-        a 15-minute clock is immaterial against lags measured in hours, and it
-        avoids an ordering cycle between the two. `compute()` below recomputes
-        the identical value off the identical previous cycle, so the two never
+        The heating-hard-limit and price-braking flags the learner needs come
+        from `heuristic.compute`, which needs the learner's offset — so the
+        hard limit is recomputed directly here via
+        `resolve_heating_hard_limit_engaged` (reading this same PREVIOUS
+        cycle's engaged flag for its hysteresis) and price braking is read
+        from the PREVIOUS cycle too. One cycle of staleness on a 15-minute
+        clock is immaterial against lags measured in hours, and it avoids an
+        ordering cycle between the two. `compute()` below recomputes the
+        identical value off the identical previous cycle, so the two never
         disagree.
         """
         now = time.monotonic()
@@ -739,10 +727,9 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                     indoor_data_available=indoor_ok,
                     target_c=self.indoor_target_c,
                     outdoor_temp_c=raw_outdoor_temp_c,
-                    heating_cutoff_engaged=resolve_heating_cutoff_engaged(
+                    heating_hard_limit_engaged=resolve_heating_hard_limit_engaged(
                         raw_outdoor_temp_c,
-                        self.heating_cutoff_c,
-                        bool(previous and previous.heating_cutoff_engaged),
+                        bool(previous and previous.heating_hard_limit_engaged),
                     ),
                     is_active=self.is_active,
                     price_braking=bool(previous and previous.price_braking),
@@ -937,8 +924,8 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 price_significance_factor=price_significance_factor,
                 today_price_spread_c=today_spread,
                 seasonal_reference_spread_c=seasonal_reference_spread_c,
-                prev_heating_cutoff_engaged=bool(
-                    self.data and self.data.heating_cutoff_engaged
+                prev_heating_hard_limit_engaged=bool(
+                    self.data and self.data.heating_hard_limit_engaged
                 ),
             ),
             self._params(),
@@ -1198,7 +1185,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             "seasonal_reference_spread_c": result.seasonal_reference_spread_c,
             "price_braking": result.price_braking,
             "precharge_active": result.precharge_active,
-            "heating_cutoff_engaged": result.heating_cutoff_engaged,
+            "heating_hard_limit_engaged": result.heating_hard_limit_engaged,
             "lead_minutes_effective": result.lead_minutes_effective,
         }
         if learner is not None:

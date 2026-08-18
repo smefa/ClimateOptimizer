@@ -169,13 +169,6 @@ LEARNER_STEP_SECONDS = UPDATE_INTERVAL_MINUTES * 60
 # passes.
 STARTUP_GRACE_PERIOD_MINUTES = 5
 
-# Above this outdoor temperature, compensation is suppressed entirely and the
-# raw outdoor temperature is published unmodified. Derived from the target
-# rather than configured: heating is not wanted once it is nearly as warm
-# outside as the temperature being held indoors, and the margin is what stops a
-# cold indoor reading from calling for heat on a warm day.
-HEATING_CUTOFF_MARGIN_C = 3.0
-
 # Bundled Lovelace card. The whole www/ directory is served under this
 # prefix (see _async_register_frontend) so the card can `import` its
 # per-language files out of www/lang/ alongside the main script. The version
@@ -183,4 +176,4 @@ HEATING_CUTOFF_MARGIN_C = 3.0
 # changes — the main file or any of the language files.
 FRONTEND_STATIC_URL_PREFIX = "/truetemp"
 FRONTEND_CARD_URL = f"{FRONTEND_STATIC_URL_PREFIX}/truetemp-card.js"
-FRONTEND_JS_VERSION = "8"
+FRONTEND_JS_VERSION = "10"
