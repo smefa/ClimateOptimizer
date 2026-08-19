@@ -118,7 +118,7 @@ export const STRINGS = {
   holidayPhaseSetback: "Absenkung",
   holidayPhaseRamping: "Rückkehr zur Zieltemperatur",
   holidayPhaseDone: "Abgeschlossen",
-  holidayRowRampStarts: "Startzeit",
+  holidayRowStartAt: "Startzeit",
   holidayRowBackBy: "Zieltemperatur erreicht bis",
   holidayNoteOffTrack: "Zu wenig Zeit zwischen den beiden Daten für eine sanfte Rückkehr — die Rückkehr begann sofort ab dem Abreisedatum.",
   holidaySetEntityError: "Entität angeben, z. B. sensor.<name>_holiday_status",

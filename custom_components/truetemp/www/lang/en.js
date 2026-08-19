@@ -119,7 +119,7 @@ export const STRINGS = {
   holidayPhaseSetback: "Setback",
   holidayPhaseRamping: "Ramping back up",
   holidayPhaseDone: "Done",
-  holidayRowRampStarts: "Starting time",
+  holidayRowStartAt: "Starting time",
   holidayRowBackBy: "Back to normal by",
   holidayNoteOffTrack: "Not enough time between the two dates to ramp back gently — ramping started immediately at the leave date instead.",
   holidaySetEntityError: "Set an entity, e.g. sensor.<name>_holiday_status",

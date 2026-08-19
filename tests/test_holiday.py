@@ -64,6 +64,7 @@ class TestInactive:
         )
         assert same_day.phase == holiday.HOLIDAY_PHASE_INVALID
         assert same_day.target_c == 21.0
+        assert same_day.start_at is None
 
         backwards = resolve(
             now=datetime(2026, 1, 5, 12, 0),
@@ -112,6 +113,10 @@ class TestScheduledAndSetback:
             assert result.phase == holiday.HOLIDAY_PHASE_SETBACK, hours_in
             assert result.target_c == 17.0, hours_in
             assert result.on_track is True
+            # start_at is the fixed instant the setback stepped down — it
+            # never moves within a cycle, unlike ramp_start_at which tracks
+            # the *return* ramp near the other end of the trip.
+            assert result.start_at == start_at, hours_in
 
 
 class TestRamp:
@@ -132,6 +137,11 @@ class TestRamp:
         assert ramp_start_at is not None and return_at is not None
         window = (return_at - ramp_start_at).total_seconds()
         assert window > 0
+        # start_at (the setback's step-down instant, at the leave date) is
+        # distinct from ramp_start_at (the return ramp's start, near the
+        # return date) whenever there's a real plateau between them.
+        assert probe.start_at == datetime.combine(start_date, time.min)
+        assert probe.start_at != ramp_start_at
 
         samples = [
             resolve(now=ramp_start_at + timedelta(seconds=window * frac), **kwargs)
@@ -190,6 +200,8 @@ class TestInsufficientRunway:
         assert at_start.phase == holiday.HOLIDAY_PHASE_RAMPING
         assert at_start.target_c == 10.0
         assert at_start.ramp_start_at == start_at
+        # No plateau at all here, so start_at and ramp_start_at coincide.
+        assert at_start.start_at == start_at
 
         # And it still reaches the normal target by the return deadline —
         # late relative to the requested ramp size, but not unbounded.

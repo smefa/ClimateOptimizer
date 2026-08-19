@@ -8,6 +8,7 @@ to move the heat pump further than its earned authority.
 
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -389,13 +390,42 @@ class TestInvariants:
     @pytest.mark.parametrize("indoor", [-40.0, 0.0, 19.0, 21.0, 25.0, 60.0])
     @pytest.mark.parametrize("outdoor", [-40.0, -12.0, 0.0, 8.0, 30.0])
     def test_offset_never_exceeds_earned_authority(self, indoor, outdoor):
+        """Only the negative (more-heat) direction has to earn its authority —
+        see learner.py's clamp sites. The positive side is deliberately
+        unbounded here, so it is only checked for sanity, not for a ceiling."""
         state = mature_state()
         for _ in range(200):
             state, result = learner.step(
                 state, make_inputs(indoor_temp_c=indoor, outdoor_temp_c=outdoor)
             )
-            assert abs(result.offset_c) <= result.authority_c + 1e-9
-            assert abs(result.hold_offset_c) <= result.authority_c + 1e-9
+            assert result.offset_c >= -result.authority_c - 1e-9
+            assert result.hold_offset_c >= -result.authority_c - 1e-9
+            assert math.isfinite(result.offset_c)
+            assert math.isfinite(result.hold_offset_c)
+
+    def test_positive_side_is_not_capped_at_authority_when_holiday_style_error_is_large(
+        self,
+    ):
+        """The bug this asymmetry fixes: a mature bin already sitting at the old
+        symmetric ceiling (+MAX_AUTHORITY_C) must still be able to move further
+        positive in response to a large positive error (e.g. a holiday setback
+        dropping the target far below indoor) instead of being silently
+        absorbed at +5 degC."""
+        index = learner.bin_index_for(0.0)
+        bins = list(learner.initial_state().bins)
+        bins[index] = OutdoorBin(hold_offset_c=learner.MAX_AUTHORITY_C, samples=50)
+        # prev_target_c already matches the (dropped) target, so this cycle is
+        # not a fresh target step and the holdoff guard does not mask the
+        # effect under test.
+        state = mature_state(
+            bins=tuple(bins), prev_indoor_c=25.0, prev_target_c=10.0
+        )
+        _, result = learner.step(
+            state,
+            make_inputs(outdoor_temp_c=0.0, indoor_temp_c=25.0, target_c=10.0),
+        )
+        assert result.hold_offset_c > learner.MAX_AUTHORITY_C
+        assert result.offset_c > learner.MAX_AUTHORITY_C
 
     def test_step_never_raises_on_hostile_input(self):
         for inputs in (

@@ -552,6 +552,7 @@ class HolidayStatusSensor(TrueTempEntity, SensorEntity):
             return attrs
         attrs.update(
             {
+                "start_at": result.start_at.isoformat() if result.start_at else None,
                 "ramp_start_at": (
                     result.ramp_start_at.isoformat() if result.ramp_start_at else None
                 ),

@@ -194,7 +194,7 @@ class TrueTempHolidayCard extends HTMLElement {
           </div>
           <div class="ho-status"><span class="ho-dot"></span><span class="ho-phase"></span></div>
           <div class="ho-grid">
-            <div class="ho-cell"><span>${this._esc(t.holidayRowRampStarts)}</span><b class="ho-ramp-start">—</b></div>
+            <div class="ho-cell"><span>${this._esc(t.holidayRowStartAt)}</span><b class="ho-start-at">—</b></div>
             <div class="ho-cell"><span>${this._esc(t.holidayRowBackBy)}</span><b class="ho-return-at">—</b></div>
           </div>
           <div class="ho-off-track" hidden></div>
@@ -241,7 +241,7 @@ class TrueTempHolidayCard extends HTMLElement {
       armed: this.querySelector(".ho-armed"),
       status: this.querySelector(".ho-status"),
       phase: this.querySelector(".ho-phase"),
-      rampStart: this.querySelector(".ho-ramp-start"),
+      startAt: this.querySelector(".ho-start-at"),
       returnAt: this.querySelector(".ho-return-at"),
       offTrack: this.querySelector(".ho-off-track"),
       reason: this.querySelector(".ho-reason"),
@@ -314,7 +314,7 @@ class TrueTempHolidayCard extends HTMLElement {
     els.status.className = `ho-status ho-${this._esc(phaseKey)}`;
     els.phase.textContent = t[PHASE_KEYS[phaseKey]] || phaseKey;
 
-    els.rampStart.textContent = this._fmtDateTime(attrs.ramp_start_at);
+    els.startAt.textContent = this._fmtDateTime(attrs.start_at);
     els.returnAt.textContent = this._fmtDateTime(attrs.return_at);
 
     const offTrack = attrs.on_track === false && OFF_TRACK_PHASES.has(phaseKey);

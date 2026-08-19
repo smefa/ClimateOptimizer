@@ -37,6 +37,9 @@ skruva på.
   märker någon skillnad i huset. Som standard sänker den också värmen om det inte behövs och du sparar även på det.
 - ☀️💨 **Tar hänsyn till sol och vind** (valfritt) — för hus där solen
   faktiskt värmer rummet, eller där drag är ett riktigt problem.
+- 🧳 **[Semesterläge](#semesterläge)** (valfritt) — sänk värmen automatiskt
+  medan du är bortrest och låt TrueTemp räkna ut exakt när den ska börja
+  värma igen, så att huset är varmt precis till att du kommer hem.
 - 📊 **[Egen kontrollpanel](docs/card.png)** — ett färdigt kort som visar vad
   tillägget gör och varför.
 - 🔌 **Fungerar med de flesta värmepumpar** — allt som krävs är en pump som
@@ -123,6 +126,41 @@ Allt nedan är valfritt och kan hoppas över helt:
   den har en sådan (se ovan).
 - **Lokal loggning** — en detaljerad loggfil på din egen dator, för den som
   vill gräva i siffrorna. Inget skickas någonstans.
+
+---
+
+## Semesterläge
+
+Ska du resa bort? Semesterläge sänker värmen medan du är borta och räknar
+sedan själv ut exakt när återuppvärmningen måste börja, så att huset är
+varmt precis till att du kommer hem — inte en timme för tidigt eller för
+sent.
+
+Läget slås på separat från själva tillägget, som fyra nya entiteter:
+
+- **Semesterläge** (brytare) — slår på/av hela funktionen.
+- **Avresedatum** och **Hemkomstdatum**.
+- **Sänkningstemperatur** — vilken temperatur huset ska hålla under resan.
+
+Så fungerar det:
+
+1. Vid midnatt på avresedagen sänks målet till sänkningstemperaturen i ett
+   enda steg.
+2. TrueTemp räknar ut när återuppvärmningen måste starta utifrån hur
+   snabbt just ditt hus historiskt har värmts upp — samma mätning som
+   resten av tillägget bygger på — istället för att gissa på en fast
+   uppvärmningstid. Det gör att huset hinner bli varmt utan att tvinga
+   fram tilläggsvärme i värmepumpen.
+3. Huset är tillbaka på din vanliga temperatur klockan 15:00 på
+   hemkomstdagen. Räcker inte tiden mellan datumen till en skonsam
+   återuppvärmning börjar den istället direkt vid avresan, och en
+   statusentitet ("Semesterstatus") talar om att det hände.
+4. Sänkningen går aldrig under komfortgolvet du ställt in
+   (**"Låt det aldrig bli kallare än"**).
+
+Det finns även ett eget, separat kontrollkort för semesterläge — utöver
+huvudkortet — som visar status, datum och hur långt återuppvärmningen
+kommit.
 
 ---
 

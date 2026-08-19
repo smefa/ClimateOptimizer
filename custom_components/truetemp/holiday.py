@@ -85,6 +85,11 @@ class HolidayResult:
     # scheduled/done), so a caller that always wires this through gets zero
     # behaviour change when holiday mode is unused.
     target_c: float
+    # When the target steps down to `holiday_target_c` — midnight on
+    # `start_date`. This is the "true" start of the holiday setback (a single
+    # sharp drop, see module docstring), distinct from `ramp_start_at` below,
+    # which is when the *return* ramp begins near the other end of the trip.
+    start_at: datetime | None
     ramp_start_at: datetime | None
     return_at: datetime | None
     hours_needed: float
@@ -96,6 +101,7 @@ def _inactive(target_c: float, phase: str, reason: str) -> HolidayResult:
     return HolidayResult(
         phase=phase,
         target_c=target_c,
+        start_at=None,
         ramp_start_at=None,
         return_at=None,
         hours_needed=0.0,
@@ -167,6 +173,7 @@ def resolve(
         return HolidayResult(
             phase=HOLIDAY_PHASE_SCHEDULED,
             target_c=normal_target_c,
+            start_at=start_at,
             ramp_start_at=ramp_start_at,
             return_at=return_at,
             hours_needed=hours_needed,
@@ -177,6 +184,7 @@ def resolve(
         return HolidayResult(
             phase=HOLIDAY_PHASE_SETBACK,
             target_c=holiday_target_c,
+            start_at=start_at,
             ramp_start_at=ramp_start_at,
             return_at=return_at,
             hours_needed=hours_needed,
@@ -194,6 +202,7 @@ def resolve(
         return HolidayResult(
             phase=HOLIDAY_PHASE_RAMPING,
             target_c=target_c,
+            start_at=start_at,
             ramp_start_at=ramp_start_at,
             return_at=return_at,
             hours_needed=hours_needed,
@@ -204,6 +213,7 @@ def resolve(
     return HolidayResult(
         phase=HOLIDAY_PHASE_DONE,
         target_c=normal_target_c,
+        start_at=start_at,
         ramp_start_at=ramp_start_at,
         return_at=return_at,
         hours_needed=hours_needed,

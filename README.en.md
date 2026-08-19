@@ -36,6 +36,9 @@ house, over a few days — there are no settings to fiddle with.
   the difference.
 - ☀️💨 **Accounts for sun and wind** (optional) — for homes where sunlight
   genuinely warms the room, or where draughts are a real issue.
+- 🧳 **[Holiday mode](#holiday-mode)** (optional) — automatically turns the
+  heat down while you're away, and works out exactly when to start warming
+  the house back up so it's warm right as you get home.
 - 📊 **[A dashboard card is included](docs/card.png)**, showing what it's
   doing and why.
 - 🔌 **Works with most heat pumps** — all it needs is a pump that reads an
@@ -105,6 +108,42 @@ Everything below is optional and can be skipped:
   connection to an Ohm on WiFi / Ohmigo device (see above).
 - **Local logging** — a detailed log file on your own machine, for anyone who
   wants to dig into the numbers. Nothing is sent anywhere.
+
+---
+
+## Holiday mode
+
+Going away? Holiday mode turns the heat down while you're gone and works
+out exactly when the house needs to start warming back up, so it's warm
+right as you get home — not an hour too early or too late.
+
+It's switched on separately from the rest of the integration, as four new
+entities:
+
+- **Holiday mode** (switch) — turns the whole feature on/off.
+- **Holiday start** and **Holiday end** dates.
+- **Holiday setback temperature** — what temperature the house should hold
+  while you're away.
+
+How it works:
+
+1. At midnight on the start date, the target drops to the setback
+   temperature in one sharp step.
+2. TrueTemp works out when the ramp back up needs to start based on how
+   fast your specific house has historically warmed up — the same
+   measurement the rest of the integration is built on — instead of
+   guessing a fixed recovery time. That way the house has time to warm up
+   without forcing the heat pump's backup heat to kick in.
+3. The house is back at your normal target by 15:00 on the end date. If
+   there isn't enough time between the two dates for a gentle ramp, it
+   starts ramping immediately at the leave date instead, and a status
+   entity ("Holiday status") tells you that happened.
+4. The setback never drops below the comfort floor you've configured
+   (**"Never let it get colder than"**).
+
+There's also a separate, dedicated dashboard card for holiday mode — in
+addition to the main card — showing status, dates, and how far the
+ramp-up has progressed.
 
 ---
 

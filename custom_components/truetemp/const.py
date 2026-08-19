@@ -176,10 +176,10 @@ STARTUP_GRACE_PERIOD_MINUTES = 5
 # changes — the main file or any of the language files.
 FRONTEND_STATIC_URL_PREFIX = "/truetemp"
 FRONTEND_CARD_URL = f"{FRONTEND_STATIC_URL_PREFIX}/truetemp-card.js"
-FRONTEND_JS_VERSION = "13"
+FRONTEND_JS_VERSION = "14"
 
 # The holiday-mode card is a second, independent bundle (see
 # www/truetemp-holiday-card.js's module docstring for why) with its own
 # cache-busting version, bumped independently of FRONTEND_JS_VERSION above.
 FRONTEND_HOLIDAY_CARD_URL = f"{FRONTEND_STATIC_URL_PREFIX}/truetemp-holiday-card.js"
-FRONTEND_HOLIDAY_JS_VERSION = "2"
+FRONTEND_HOLIDAY_JS_VERSION = "3"

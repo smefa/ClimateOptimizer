@@ -121,6 +121,7 @@ global gain that never converged.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, replace
 
 MODEL_VERSION = "offset_learner_v1"
@@ -166,6 +167,9 @@ KP_MAX_C = 1.5
 # ACTIVE without shipping a controller that can do much. Day one the worst case
 # is a 1 degC spoof, which is inside the noise of any weather curve; full
 # authority arrives after roughly three days at a 15-minute cadence.
+# These bound the negative (more-heat) direction only — asking for less heat
+# has no equivalent runaway risk, so it does not need to earn trust the same
+# way; see the clamp sites in `step`.
 MIN_AUTHORITY_C = 1.0
 MAX_AUTHORITY_C = 5.0
 AUTHORITY_RAMP_SAMPLES = 288
@@ -692,10 +696,13 @@ def step(state: LearnerState, inputs: LearnerInputs) -> tuple[LearnerState, Lear
     )
 
     # Heating is the negative direction, so the bin's ceiling binds there; the
-    # positive (back off heat) side is limited by the authority ramp alone,
-    # since there is no capacity limit on doing less.
+    # positive (back off heat) side is unbounded here, since there is no
+    # capacity limit on doing less — worst case the house coasts cooler, and
+    # the same error term pulls it back if that was wrong. The real backstop
+    # for how far positive can go lives downstream, in heuristic.py's sanity
+    # clamp.
     lower = -min(authority, ceiling)
-    upper = authority
+    upper = math.inf
 
     hold = _clamp(effective_hold_offset(bins, index), lower, upper)
 
@@ -808,7 +815,9 @@ def step(state: LearnerState, inputs: LearnerInputs) -> tuple[LearnerState, Lear
             -KP * error_c * SPOOF_PER_INDOOR_C, -KP_MAX_C, KP_MAX_C
         )
 
-    offset_c = _clamp(hold + proportional_c, -authority, authority)
+    # Same asymmetry as the lower/upper clamp above: the negative (more-heat)
+    # side still earns its authority, the positive side does not need to.
+    offset_c = _clamp(hold + proportional_c, -authority, math.inf)
 
     final_bin = new_bins[index]
     final_baseline = baseline_bins[index]
