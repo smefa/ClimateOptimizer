@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import sys
 from collections import deque
+from datetime import date, datetime, timedelta
+from datetime import time as dtime
 from pathlib import Path
 
 import pytest
@@ -24,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from loader import load  # noqa: E402
 
 heuristic = load("heuristic")
+holiday = load("holiday")
 lag = load("lag")
 learner = load("learner")
 
@@ -87,6 +90,12 @@ def run(
     params_overrides: dict | None = None,
     inputs_overrides: dict | None = None,
     active_at=None,
+    target_at=None,
+    learner_state=None,
+    lag_state=None,
+    now: float = 0.0,
+    return_state: bool = False,
+    on_output=None,
 ):
     """Drive the full loop and return (trace, final learner result, final output).
 
@@ -96,22 +105,43 @@ def run(
     (the raw outdoor reading, to every output channel) — so the simulated pump
     really does run its own untouched curve, which is the whole premise the
     baseline table rests on.
+
+    `target_at(i)`, if given, overrides `target_c` per step — the same shape
+    as `active_at`/`price_at`, for scenarios (e.g. a holiday setback/ramp)
+    where the effective target itself moves during the run. Every call site
+    that reads the target reads this same per-step value, mirroring
+    `coordinator.py`'s `_effective_target_c` wiring: this is what makes the
+    test exercise "the three call sites agree" rather than just `holiday.py`
+    in isolation.
+
+    `learner_state`/`lag_state`/`now` may be seeded from a prior `run()` call
+    (with `return_state=True`) to continue one simulated house across two
+    back-to-back scenarios — e.g. settle first, then run a holiday — without
+    losing what was already learned. Defaults to a cold start, as before.
+
+    `on_output(output)`, if given, is called with every cycle's
+    `HeuristicResult` — for a test that needs to see every step's published
+    value (e.g. `effective_indoor_target_c`), not just the final one `run()`
+    itself returns.
     """
-    learner_state = learner.initial_state()
-    lag_state = lag.initial_state(STEP_MINUTES)
+    if learner_state is None:
+        learner_state = learner.initial_state()
+    if lag_state is None:
+        lag_state = lag.initial_state(STEP_MINUTES)
     offset = 0.0
-    now = 0.0
     trace = []
     previous_output = None
     result = None
     output = None
+    lag_result = None
 
     for i in range(steps):
+        current_target = target_c if target_at is None else target_at(i)
         is_active = True if active_at is None else active_at(i)
         indoor = house.advance(offset)
         now += STEP_HOURS * 3600.0
 
-        lag_state = lag.push(lag_state, offset, indoor, target_c)
+        lag_state = lag.push(lag_state, offset, indoor, current_target)
         lag_result = lag.estimate(lag_state, "radiators")
 
         price, forecast = (None, None) if price_at is None else price_at(i)
@@ -123,7 +153,7 @@ def run(
                 dt_hours=STEP_HOURS,
                 indoor_temp_c=indoor,
                 indoor_data_available=True,
-                target_c=target_c,
+                target_c=current_target,
                 outdoor_temp_c=outdoor_c,
                 heating_hard_limit_engaged=False,
                 is_active=is_active,
@@ -133,7 +163,7 @@ def run(
         )
 
         params = dict(
-            indoor_target_c=target_c,
+            indoor_target_c=current_target,
             comfort_min_c=18.0,
             enable_price_compensation=price_at is not None,
             price_comfort_tier="high",
@@ -169,6 +199,8 @@ def run(
         output = heuristic.compute(
             heuristic.HeuristicInputs(**inputs), heuristic.HeuristicParams(**params)
         )
+        if on_output is not None:
+            on_output(output)
         previous_output = output
         # What the pump actually sees, relative to the real outdoor reading.
         # Zero while compensation is off: the coordinator publishes the raw
@@ -176,6 +208,8 @@ def run(
         offset = (output.compensated_outdoor_temp_c - outdoor_c) if is_active else 0.0
         trace.append((indoor, offset, result.hold_offset_c))
 
+    if return_state:
+        return trace, result, output, learner_state, lag_state, now
     return trace, result, output
 
 
@@ -474,3 +508,137 @@ class TestBaselineSeeding:
             return abs(trace[-1][0] - 21.0)
 
         assert error_after(120, seeded=True) < error_after(120, seeded=False)
+
+
+class TestHolidaySetback:
+    """Closed-loop regression guard for the coordinator's holiday wiring.
+
+    `test_holiday.py` proves `holiday.resolve()`'s own math in isolation.
+    What that cannot catch is a wiring mistake in coordinator.py — e.g. one
+    of the three call sites (`_params()`, and the two inside
+    `_advance_learning()`) still reading the raw `indoor_target_c` instead of
+    the holiday-adjusted `_effective_target_c` — because the learner, the lag
+    estimator and the price logic would then quietly disagree about what
+    target is actually being asked for. `target_at(i)` below drives the same
+    per-step value into all three call sites `run()` has, the same shape
+    `coordinator.py` does, so this is the test that would have caught that
+    class of bug.
+    """
+
+    def test_a_full_setback_and_ramp_cycle_sags_and_recovers(self):
+        house = House(curve_error_c=-2.0, delay_steps=4, inertia=0.15, indoor_c=19.0)
+        # Settle first, so there is a real learned offset to protect and
+        # recover — same settle-first pattern TestPriceInteraction uses.
+        _, settled, _, learner_state, lag_state, now = run(
+            house, 900, return_state=True
+        )
+        settled_offset = settled.hold_offset_c
+        # The flat pre-holiday history never gives the estimator a confident
+        # measurement (see test_lag.py's TestFallbacks), so this sits on the
+        # "radiators" fallback constant. Fixed for the whole holiday run
+        # rather than re-measured live like the coordinator does every cycle
+        # — with no confident measurement available it would stay on this
+        # same fallback throughout anyway, so fixing it keeps the test's
+        # control flow simple without changing what's under test.
+        rise_hours = lag.estimate(lag_state, "radiators").rise_hours
+
+        normal_target = 21.0
+        holiday_target = 19.0
+        start_date = date(2026, 1, 5)
+        end_date = date(2026, 1, 6)
+        clock = datetime.combine(start_date, dtime.min)
+        phases: list[str] = []
+
+        def target_at(i):
+            nonlocal clock
+            result = holiday.resolve(
+                now=clock,
+                armed=True,
+                start_date=start_date,
+                end_date=end_date,
+                normal_target_c=normal_target,
+                holiday_target_c=holiday_target,
+                rise_hours=rise_hours,
+            )
+            phases.append(result.phase)
+            clock += timedelta(hours=STEP_HOURS)
+            return result.target_c
+
+        trace, after, _, learner_state, lag_state, now = run(
+            house,
+            400,
+            target_c=normal_target,
+            target_at=target_at,
+            learner_state=learner_state,
+            lag_state=lag_state,
+            now=now,
+            return_state=True,
+        )
+        indoor = [t[0] for t in trace]
+
+        assert "setback" in phases
+        assert "ramping" in phases
+        # 400 steps (100h) comfortably outlasts the ~39h scheduled window
+        # above, so the run reaches "done" well before the end.
+        assert phases[-1] == "done"
+
+        setback_end = phases.index("ramping")
+        # The house actually sagged toward the setback target during the
+        # plateau — not just the published target number, the real plant.
+        assert min(indoor[:setback_end]) < indoor[0] - 0.5
+        assert min(indoor[:setback_end]) == pytest.approx(holiday_target, abs=0.6)
+
+        # And it's back at the normal target by the end, with the learner
+        # re-converged on (roughly) the same steady offset it had before the
+        # holiday — not left stuck on the setback's number.
+        assert indoor[-1] == pytest.approx(normal_target, abs=0.3)
+        assert after.hold_offset_c == pytest.approx(settled_offset, abs=0.6)
+
+    def test_effective_target_never_dips_below_the_comfort_floor(self):
+        """The coordinator clamps `holiday_target_c` to `comfort_min_c`
+        before calling `holiday.resolve()` — this is the closed-loop half of
+        that guarantee (see test_holiday.py's TestComfortFloor for the pure
+        version): with a holiday target requested well below the floor,
+        already clamped the way `coordinator.py`'s
+        `max(self.holiday_target_c, self.comfort_min_c)` does before it ever
+        reaches `holiday.resolve()`, `heuristic.compute()`'s own published
+        `effective_indoor_target_c` — which layers price braking on top of
+        whatever `holiday.resolve()` returns — never goes under the floor on
+        any cycle either.
+        """
+        house = House(curve_error_c=-2.0, delay_steps=4, inertia=0.15, indoor_c=19.0)
+        comfort_min_c = 18.0
+        holiday_target = max(15.0, comfort_min_c)
+        normal_target = 21.0
+        start_date = date(2026, 1, 5)
+        end_date = date(2026, 1, 6)
+        clock = datetime.combine(start_date, dtime.min)
+
+        def target_at(i):
+            nonlocal clock
+            result = holiday.resolve(
+                now=clock,
+                armed=True,
+                start_date=start_date,
+                end_date=end_date,
+                normal_target_c=normal_target,
+                holiday_target_c=holiday_target,
+                rise_hours=1.5,
+            )
+            clock += timedelta(hours=STEP_HOURS)
+            return result.target_c
+
+        effective_targets: list[float] = []
+        run(
+            house,
+            300,
+            target_c=normal_target,
+            target_at=target_at,
+            params_overrides={"comfort_min_c": comfort_min_c},
+            on_output=lambda output: effective_targets.append(
+                output.effective_indoor_target_c
+            ),
+        )
+
+        assert effective_targets
+        assert min(effective_targets) >= comfort_min_c - 1e-9

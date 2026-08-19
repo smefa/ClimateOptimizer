@@ -159,11 +159,38 @@
           "degraded": "Degraded",
           "error": "Error"
         }
+      },
+      "holiday_status": {
+        "name": "Holiday status",
+        "state": {
+          "inactive": "Not planned",
+          "invalid": "Dates invalid",
+          "scheduled": "Scheduled",
+          "setback": "Setback",
+          "ramping": "Ramping back up",
+          "done": "Done"
+        }
       }
     },
     "switch": {
       "active": {
         "name": "Compensation active"
+      },
+      "holiday_mode": {
+        "name": "Holiday mode"
+      }
+    },
+    "date": {
+      "holiday_start": {
+        "name": "Holiday start"
+      },
+      "holiday_end": {
+        "name": "Holiday end"
+      }
+    },
+    "number": {
+      "holiday_target_temperature": {
+        "name": "Holiday setback temperature"
       }
     },
     "select": {

@@ -159,11 +159,38 @@
           "degraded": "Eingeschränkt",
           "error": "Fehler"
         }
+      },
+      "holiday_status": {
+        "name": "Urlaubsstatus",
+        "state": {
+          "inactive": "Nicht geplant",
+          "invalid": "Daten ungültig",
+          "scheduled": "Geplant",
+          "setback": "Absenkung",
+          "ramping": "Rückkehr zur Zieltemperatur",
+          "done": "Abgeschlossen"
+        }
       }
     },
     "switch": {
       "active": {
         "name": "Kompensation aktiv"
+      },
+      "holiday_mode": {
+        "name": "Urlaubsmodus"
+      }
+    },
+    "date": {
+      "holiday_start": {
+        "name": "Urlaubsbeginn"
+      },
+      "holiday_end": {
+        "name": "Urlaubsende"
+      }
+    },
+    "number": {
+      "holiday_target_temperature": {
+        "name": "Absenktemperatur im Urlaub"
       }
     },
     "select": {

@@ -159,11 +159,38 @@
           "degraded": "Nedsatt",
           "error": "Fel"
         }
+      },
+      "holiday_status": {
+        "name": "Semesterstatus",
+        "state": {
+          "inactive": "Ej planerad",
+          "invalid": "Ogiltiga datum",
+          "scheduled": "Planerad",
+          "setback": "Sänkt temperatur",
+          "ramping": "Återgår till måltemperatur",
+          "done": "Klar"
+        }
       }
     },
     "switch": {
       "active": {
         "name": "Kompensation aktiv"
+      },
+      "holiday_mode": {
+        "name": "Semesterläge"
+      }
+    },
+    "date": {
+      "holiday_start": {
+        "name": "Semester börjar"
+      },
+      "holiday_end": {
+        "name": "Semester slutar"
+      }
+    },
+    "number": {
+      "holiday_target_temperature": {
+        "name": "Sänkt temperatur under semester"
       }
     },
     "select": {

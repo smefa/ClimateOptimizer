@@ -16,13 +16,22 @@ from .const import (
     CONFIG_ENTRY_VERSION,
     DOMAIN,
     FRONTEND_CARD_URL,
+    FRONTEND_HOLIDAY_CARD_URL,
+    FRONTEND_HOLIDAY_JS_VERSION,
     FRONTEND_JS_VERSION,
     FRONTEND_STATIC_URL_PREFIX,
     KNOWN_CONFIG_KEYS,
 )
 from .coordinator import TrueTempCoordinator
 
-PLATFORMS = [Platform.CLIMATE, Platform.SELECT, Platform.SENSOR, Platform.SWITCH]
+PLATFORMS = [
+    Platform.CLIMATE,
+    Platform.DATE,
+    Platform.NUMBER,
+    Platform.SELECT,
+    Platform.SENSOR,
+    Platform.SWITCH,
+]
 
 type TrueTempConfigEntry = ConfigEntry[TrueTempCoordinator]
 
@@ -89,6 +98,7 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
         [StaticPathConfig(FRONTEND_STATIC_URL_PREFIX, str(www_path), cache_headers=True)]
     )
     add_extra_js_url(hass, f"{FRONTEND_CARD_URL}?v={FRONTEND_JS_VERSION}")
+    add_extra_js_url(hass, f"{FRONTEND_HOLIDAY_CARD_URL}?v={FRONTEND_HOLIDAY_JS_VERSION}")
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: TrueTempConfigEntry) -> bool:

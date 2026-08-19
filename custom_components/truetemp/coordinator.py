@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
@@ -94,6 +94,12 @@ from .heuristic import (
     solar_effect_of,
     today_price_spread_and_median_c,
     update_price_spread_history,
+)
+from .holiday import (
+    DEFAULT_HOLIDAY_TARGET_C,
+    HOLIDAY_PHASE_DONE,
+    HolidayResult,
+    resolve as holiday_resolve,
 )
 from .lag import (
     DEFAULT_HEATING_TYPE,
@@ -246,6 +252,23 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         self.price_comfort_tier: str = PRICE_TIER_MID
         self.cold_caution: str = COLD_CAUTION_MID
 
+        # Holiday setback: same "live, restorable, never a config option"
+        # category as the fields above — nudged by hand per trip, restored by
+        # date.py/number.py/switch.py's own RestoreEntity. See holiday.py for
+        # the phase logic these feed; `holiday_result`/`_effective_target_c`
+        # are recomputed every cycle in `_async_update_data`, not restored.
+        self.holiday_armed: bool = False
+        self.holiday_start: date | None = None
+        self.holiday_end: date | None = None
+        self.holiday_target_c: float = DEFAULT_HOLIDAY_TARGET_C
+        self.holiday_result: HolidayResult | None = None
+        # What `indoor_target_c` currently feeds actually feeds THIS instead,
+        # everywhere learning/price/output need "the target right now" — see
+        # the three call sites this replaces, below. Equal to
+        # `indoor_target_c` whenever no holiday is sagging the house, so this
+        # is a no-op when the feature is unused.
+        self._effective_target_c: float = self.indoor_target_c
+
         # The exact price forecast this cycle's decision used, stashed for the
         # data logger — forecasts get revised, so realised prices are not a
         # substitute for what was known at decision time.
@@ -369,13 +392,19 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         forecast service calls are skipped entirely."""
         return self.solar_input_enabled or self.wind_input_enabled
 
+    @property
+    def comfort_min_c(self) -> float:
+        """The absolute indoor floor — see CONF_COMFORT_MIN_C's docstring in
+        const.py. Public (unlike most `_entry_value` reads, which stay
+        inlined in `_params()`) because `number.py`'s holiday-target entity
+        binds its `native_min_value` to this same live value."""
+        return float(_entry_value(self.entry, CONF_COMFORT_MIN_C, DEFAULT_COMFORT_MIN_C))
+
     def _params(self) -> HeuristicParams:
         """This cycle's occupant preferences. No control gains live here."""
         return HeuristicParams(
-            indoor_target_c=self.indoor_target_c,
-            comfort_min_c=_entry_value(
-                self.entry, CONF_COMFORT_MIN_C, DEFAULT_COMFORT_MIN_C
-            ),
+            indoor_target_c=self._effective_target_c,
+            comfort_min_c=self.comfort_min_c,
             enable_price_compensation=self.price_enabled,
             price_comfort_tier=self.price_comfort_tier,
             cold_caution=self.cold_caution,
@@ -714,7 +743,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 self.lag_state,
                 self.learner_state.prev_offset_c,
                 indoor_temp_c,
-                self.indoor_target_c,
+                self._effective_target_c,
             )
             self.lag_result = lag_estimate(self.lag_state, self.heating_type)
 
@@ -726,7 +755,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                     dt_hours=dt_hours,
                     indoor_temp_c=indoor_temp_c,
                     indoor_data_available=indoor_ok,
-                    target_c=self.indoor_target_c,
+                    target_c=self._effective_target_c,
                     outdoor_temp_c=raw_outdoor_temp_c,
                     heating_hard_limit_engaged=resolve_heating_hard_limit_engaged(
                         raw_outdoor_temp_c,
@@ -883,6 +912,37 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 self.price_spread_history,
                 self.price_significance_floor_c,
             )
+
+        # Holiday setback: resolve this cycle's phase/target before anything
+        # below reads `_effective_target_c`. `rise_hours` comes from the
+        # PREVIOUS cycle's lag estimate (via `_lag_result()`, cached until
+        # `_advance_learning` below recomputes it) — same one-cycle-stale
+        # convention `_advance_learning`'s own docstring uses for the hard
+        # limit and price braking, and immaterial against lags measured in
+        # hours. `comfort_min_c` is the single absolute floor everywhere else
+        # in this integration, so `holiday_target_c` is clamped to it here
+        # rather than inside holiday.py — see that module's docstring.
+        self.holiday_result = holiday_resolve(
+            # holiday.py is stdlib-only and builds its own start/ramp/return
+            # datetimes as naive local time (`datetime.combine(date,
+            # time)`), matching the `date` entities' own naive semantics —
+            # see that module's docstring. `dt_util.now()` is timezone-aware,
+            # which raises `TypeError` when compared against a naive
+            # datetime, so the tzinfo is stripped here to hand `resolve()`
+            # the naive local wall-clock time it actually expects.
+            now=dt_util.now().replace(tzinfo=None),
+            armed=self.holiday_armed,
+            start_date=self.holiday_start,
+            end_date=self.holiday_end,
+            normal_target_c=self.indoor_target_c,
+            holiday_target_c=max(self.holiday_target_c, self.comfort_min_c),
+            rise_hours=self._lag_result().rise_hours,
+        )
+        self._effective_target_c = self.holiday_result.target_c
+        if self.holiday_result.phase == HOLIDAY_PHASE_DONE:
+            # One-shot, like a completed schedule: the switch/dates don't
+            # need manual reset before the next trip.
+            self.holiday_armed = False
 
         # Learning advances on its own clock; republishing happens every time.
         self._learner_stepped = self._due_for_learner_step() and self._advance_learning(
@@ -1179,6 +1239,8 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             "effective_target_c": result.effective_indoor_target_c,
             "price_comfort_tier": result.price_comfort_tier,
             "cold_caution": result.cold_caution,
+            "holiday_armed": self.holiday_armed,
+            "holiday_phase": self.holiday_result.phase if self.holiday_result else None,
             # --- composed output ---
             "compensated_outdoor_temp_c": result.compensated_outdoor_temp_c,
             "learned_offset_c": result.learned_offset_c,

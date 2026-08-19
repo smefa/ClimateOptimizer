@@ -54,6 +54,7 @@ from . import TrueTempConfigEntry
 from .const import DOMAIN, OUTPUT_MODE_HEAT_CURVE_OFFSET, OUTPUT_MODE_OUTDOOR_SPOOF
 from .coordinator import TrueTempCoordinator
 from .heuristic import HeuristicResult, heat_curve_offset_c, heating_hard_limit_offset_c
+from .holiday import HOLIDAY_PHASES
 from .learner import bin_label
 
 # Substituted for an attribute that is None only because the feature that would
@@ -76,6 +77,7 @@ async def async_setup_entry(
             HeatPumpOffsetSensor(coordinator, entry),
             LearnedOffsetSensor(coordinator, entry),
             StatusSensor(coordinator, entry),
+            HolidayStatusSensor(coordinator, entry),
         ]
     )
 
@@ -495,4 +497,68 @@ class StatusSensor(TrueTempEntity, SensorEntity):
         attrs["data_logging_enabled"] = self.coordinator.data_logging_enabled
         if self.coordinator.data_log_path:
             attrs["data_log_path"] = self.coordinator.data_log_path
+        return attrs
+
+
+class HolidayStatusSensor(TrueTempEntity, SensorEntity):
+    """Holiday setback phase and the numbers behind it.
+
+    What the holiday card (and any automations/notifications) read to show
+    e.g. "ramp starts Tue 14:00" — see holiday.py's `HolidayResult`, which
+    this mirrors field-for-field.
+    """
+
+    _attr_translation_key = "holiday_status"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = list(HOLIDAY_PHASES)
+
+    def __init__(
+        self,
+        coordinator: TrueTempCoordinator,
+        entry: TrueTempConfigEntry,
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_holiday_status"
+
+    @property
+    def available(self) -> bool:
+        """Always available: a local computation, not fetched data — same
+        override the other live-control-surface entities carry."""
+        return True
+
+    @property
+    def native_value(self) -> str | None:
+        result = self.coordinator.holiday_result
+        return result.phase if result else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        result = self.coordinator.holiday_result
+        attrs: dict = {
+            "holiday_start": (
+                self.coordinator.holiday_start.isoformat()
+                if self.coordinator.holiday_start
+                else None
+            ),
+            "holiday_end": (
+                self.coordinator.holiday_end.isoformat()
+                if self.coordinator.holiday_end
+                else None
+            ),
+            "holiday_target_c": self.coordinator.holiday_target_c,
+        }
+        if result is None:
+            return attrs
+        attrs.update(
+            {
+                "ramp_start_at": (
+                    result.ramp_start_at.isoformat() if result.ramp_start_at else None
+                ),
+                "return_at": result.return_at.isoformat() if result.return_at else None,
+                "hours_needed": round(result.hours_needed, 2),
+                "on_track": result.on_track,
+                "reason": result.reason,
+            }
+        )
         return attrs
