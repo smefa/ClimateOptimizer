@@ -157,14 +157,6 @@ class TrueTempHolidayCard extends HTMLElement {
     );
   }
 
-  _num(value, digits = 1, unit = "") {
-    const parsed = Number(value);
-    if (value === null || value === undefined || value === "" || Number.isNaN(parsed)) {
-      return "—";
-    }
-    return `${parsed.toFixed(digits)}${unit}`;
-  }
-
   _fmtDateTime(iso) {
     if (!iso) return "—";
     const d = new Date(iso);
@@ -204,7 +196,6 @@ class TrueTempHolidayCard extends HTMLElement {
           <div class="ho-grid">
             <div class="ho-cell"><span>${this._esc(t.holidayRowRampStarts)}</span><b class="ho-ramp-start">—</b></div>
             <div class="ho-cell"><span>${this._esc(t.holidayRowBackBy)}</span><b class="ho-return-at">—</b></div>
-            <div class="ho-cell"><span>${this._esc(t.holidayRowHoursNeeded)}</span><b class="ho-hours-needed">—</b></div>
           </div>
           <div class="ho-off-track" hidden></div>
           <div class="ho-reason"></div>
@@ -252,7 +243,6 @@ class TrueTempHolidayCard extends HTMLElement {
       phase: this.querySelector(".ho-phase"),
       rampStart: this.querySelector(".ho-ramp-start"),
       returnAt: this.querySelector(".ho-return-at"),
-      hoursNeeded: this.querySelector(".ho-hours-needed"),
       offTrack: this.querySelector(".ho-off-track"),
       reason: this.querySelector(".ho-reason"),
     };
@@ -326,7 +316,6 @@ class TrueTempHolidayCard extends HTMLElement {
 
     els.rampStart.textContent = this._fmtDateTime(attrs.ramp_start_at);
     els.returnAt.textContent = this._fmtDateTime(attrs.return_at);
-    els.hoursNeeded.textContent = this._num(attrs.hours_needed, 1, " h");
 
     const offTrack = attrs.on_track === false && OFF_TRACK_PHASES.has(phaseKey);
     els.offTrack.hidden = !offTrack;
