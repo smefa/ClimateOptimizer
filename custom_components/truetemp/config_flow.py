@@ -43,6 +43,7 @@ from .const import (
     CONF_ENABLE_PRICE_COMPENSATION,
     CONF_ENABLE_SOLAR_INPUT,
     CONF_ENABLE_WIND_INPUT,
+    CONF_ENABLE_WEATHER_LOOKAHEAD,
     CONF_HEAT_CURVE_OFFSET_ENTITY,
     CONF_HEAT_CURVE_OFFSET_INVERT,
     CONF_HEATING_TYPE,
@@ -60,6 +61,7 @@ from .const import (
     DEFAULT_ENABLE_PRICE_COMPENSATION,
     DEFAULT_ENABLE_SOLAR_INPUT,
     DEFAULT_ENABLE_WIND_INPUT,
+    DEFAULT_ENABLE_WEATHER_LOOKAHEAD,
     DEFAULT_HEAT_CURVE_OFFSET_INVERT,
     DEFAULT_INDOOR_TARGET_TEMPERATURE,
     DEFAULT_OUTPUT_MODE,
@@ -351,6 +353,13 @@ class TrueTempOptionsFlow(config_entries.OptionsFlow):
                         CONF_ENABLE_WIND_INPUT,
                         default=current.get(
                             CONF_ENABLE_WIND_INPUT, DEFAULT_ENABLE_WIND_INPUT
+                        ),
+                    ): selector.BooleanSelector(),
+                    vol.Required(
+                        CONF_ENABLE_WEATHER_LOOKAHEAD,
+                        default=current.get(
+                            CONF_ENABLE_WEATHER_LOOKAHEAD,
+                            DEFAULT_ENABLE_WEATHER_LOOKAHEAD,
                         ),
                     ): selector.BooleanSelector(),
                 }

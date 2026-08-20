@@ -18,6 +18,9 @@ composition and the price logic:
                 + solar * SOLAR_GAIN  feedforward, optional
                 + price_adjustment    bounded, tier-scaled, timed off the
                                       measured fall time
+                + weather_preramp     one-sided forecast lookahead on the three
+                                      terms above, timed off the measured rise
+                                      time, optional
 
 ## Why the two feedforward gains are constants and not config
 
@@ -84,6 +87,7 @@ below for the mechanism, and `compute()` for where the taper is applied.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from math import radians, sin
 
@@ -104,6 +108,21 @@ WIND_GAIN_C_PER_MS = 0.3
 # A price adjustment smaller than this is not a deliberate excursion and should
 # not freeze the learner.
 PRICE_BRAKING_EPS_C = 0.05
+
+# --- Weather lookahead (pre-ramping) ---------------------------------------
+# Total budget across all three pre-ramps, not per signal. A cold front
+# legitimately raises conduction loss, infiltration loss and cloud cover at
+# once, so the terms are additive in physics — but three simultaneous
+# overshoots are still one overshoot too many for the learner to unwind
+# afterwards. 3.0 sits below learner.MAX_AUTHORITY_C (5.0) and
+# PRICE_CATCHUP_MAX_C (6.0), and equals the largest single steady-state
+# feedforward term (SOLAR_GAIN_C).
+WEATHER_PRERAMP_MAX_C = 3.0
+# Below this the ramp is noise: not reported, and does not freeze the learner.
+# Deliberately looser than PRICE_BRAKING_EPS_C — a pre-ramp fires far more
+# often than a price spike, and freezing on every 0.1 degC wobble would starve
+# the learner through a whole winter.
+WEATHER_PRERAMP_EPS_C = 0.2
 
 # --- Price catch-up (feedforward kick) --------------------------------------
 # `max_sag_c`/`precharge_c` above are a comfort bound: how far indoor is
@@ -602,6 +621,40 @@ def _band_response(price: float, start: float, full: float, gamma: float) -> flo
     return _clamp(ramp, 0.0, 1.0) ** gamma
 
 
+def _lookahead_weighted_peak(
+    series: tuple[tuple[float, float], ...] | None,
+    lead_minutes: float,
+    score: Callable[[float], float],
+) -> tuple[float, float | None]:
+    """Largest proximity-weighted `score` within the lead window, and when.
+
+    The one scan shared by every lookahead in this module. `series` is
+    `(hours_from_now, value)` pairs; entries at or before now, and beyond
+    `lead_minutes`, are ignored. Each surviving entry's score is weighted by
+    `1 - t/lead` so authority grows as the event approaches, and the peak
+    wins.
+
+    Deliberately scores in "bigger is more" space regardless of what the
+    caller's term does, so there is exactly one comparison direction to reason
+    about; callers that want a negative push negate the magnitude afterwards.
+    """
+    if not series:
+        return 0.0, None
+    lead_hours = lead_minutes / 60.0
+    if lead_hours <= 0:
+        return 0.0, None
+    best = 0.0
+    best_h: float | None = None
+    for t_h, value in series:
+        if t_h <= 0.0 or t_h > lead_hours:
+            continue
+        contrib = score(value) * (1.0 - t_h / lead_hours)
+        if contrib > best:
+            best = contrib
+            best_h = t_h
+    return best, best_h
+
+
 def _lookahead_response(
     forecast: tuple[tuple[float, float], ...] | None,
     start: float,
@@ -618,21 +671,43 @@ def _lookahead_response(
     is exactly what the old fixed tier constants (30/90/150 min) did on any
     slab.
     """
-    if not forecast:
+    return _lookahead_weighted_peak(
+        forecast,
+        lead_minutes,
+        lambda price: _band_response(price, start, full, gamma),
+    )
+
+
+def _term_preramp_c(
+    series: tuple[tuple[float, float], ...] | None,
+    to_term_c: Callable[[float], float],
+    lead_minutes: float,
+) -> tuple[float, float | None]:
+    """One signal's pre-ramp, in degC of outdoor spoof (<= 0), and when it peaks.
+
+    `to_term_c` maps a raw forecast value to the degC this module would
+    already contribute for it — the forecast temperature itself for the
+    outdoor term, `-WIND_GAIN_C_PER_MS * v` for wind, `SOLAR_GAIN_C * v` for
+    sun. So there is no new gain anywhere: the pre-ramp is the existing term
+    evaluated at a future time.
+
+    The "now" reference is the series' OWN first entry, never a live sensor
+    reading. A forecast that runs a constant 2 degC below the wall sensor is
+    completely normal, and differencing against the sensor would produce a
+    permanent pre-ramp that never decays because the bias never goes away.
+    An internal difference cancels any constant offset.
+
+    One-sided by construction: only the part of the change asking for MORE
+    heat survives. Easing off ahead of a forecast warm-up is a comfort
+    sacrifice on a forecast that may be wrong, with no saving attached.
+    """
+    if not series:
         return 0.0, None
-    lead_hours = lead_minutes / 60.0
-    if lead_hours <= 0:
-        return 0.0, None
-    best = 0.0
-    best_h: float | None = None
-    for t_h, price in forecast:
-        if t_h <= 0.0 or t_h > lead_hours:
-            continue
-        contrib = _band_response(price, start, full, gamma) * (1.0 - t_h / lead_hours)
-        if contrib > best:
-            best = contrib
-            best_h = t_h
-    return best, best_h
+    now_term_c = to_term_c(series[0][1])
+    magnitude, when_h = _lookahead_weighted_peak(
+        series, lead_minutes, lambda v: max(0.0, now_term_c - to_term_c(v))
+    )
+    return -magnitude, when_h
 
 
 @dataclass(frozen=True)
@@ -653,6 +728,15 @@ class HeuristicInputs:
     # rather than datetimes so this module stays free of any datetime or HA
     # dependency; the coordinator does the conversion.
     price_forecast: tuple[tuple[float, float], ...] | None = None
+    # Forecast series for the weather lookahead, same `(hours_from_now, value)`
+    # shape and same reason for it. `solar_forecast` carries the 0..1 output of
+    # `solar_effect_of()` already evaluated at each future time, so this module
+    # never has to know what a datetime or a sun position is. All None until
+    # the coordinator supplies them, which is also what a weather integration
+    # with no hourly forecast leaves them as.
+    outdoor_forecast: tuple[tuple[float, float], ...] | None = None
+    wind_forecast_ms: tuple[tuple[float, float], ...] | None = None
+    solar_forecast: tuple[tuple[float, float], ...] | None = None
     # The learned offset from learner.py. This is the whole indoor-error
     # response — there is no separate proportional gain here any more.
     learned_offset_c: float = 0.0
@@ -693,14 +777,22 @@ class HeuristicParams:
     """
 
     indoor_target_c: float
-    # Absolute indoor floor for price compensation — the only comfort bound
-    # left, and it applies to nothing else.
+    # Absolute indoor floor for price compensation in an OCCUPIED house — the
+    # only comfort bound left, and it applies to nothing else. Not a floor
+    # for `indoor_target_c` itself: during holiday setback, `indoor_target_c`
+    # can legitimately arrive already below this (see `compute()`'s
+    # `floor_c`), and braking must not drag it back up to this value.
     comfort_min_c: float
     enable_price_compensation: bool
     price_comfort_tier: str = PRICE_TIER_MID
     cold_caution: str = COLD_CAUTION_MID
     enable_solar_input: bool = True
     enable_wind_input: bool = True
+    # Whether to act on the weather forecast before the change lands. Covers
+    # all three pre-ramps together: "should it act on forecasts at all" is one
+    # occupant preference, not three. The wind and sun shares are additionally
+    # gated on their own input toggles above.
+    enable_weather_lookahead: bool = False
     # Degrees of outdoor spoof per degree of steady indoor change, supplied by
     # the coordinator from learner.SPOOF_PER_INDOOR_C so the constant is
     # single-sourced without this module importing a sibling.
@@ -756,6 +848,17 @@ class HeuristicResult:
     price_significance_factor: float = 1.0
     today_price_spread_c: float | None = None
     seasonal_reference_spread_c: float | None = None
+    # Weather lookahead. Each component is reported separately (unclamped) so a
+    # user can see which signal drove the total; `weather_preramp_c` is the sum
+    # after the shared `WEATHER_PRERAMP_MAX_C` budget.
+    outdoor_preramp_c: float = 0.0
+    wind_preramp_c: float = 0.0
+    sun_preramp_c: float = 0.0
+    weather_preramp_c: float = 0.0
+    weather_preramp_in_min: float | None = None
+    # True while the pre-ramp is deliberately holding the house above target.
+    # Read by the learner, for the same reason `price_braking` is.
+    weather_preramp_active: bool = False
     model_version: str = MODEL_VERSION
 
 
@@ -910,9 +1013,19 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
     # The comfort floor is the only bound applied here. There is no upper
     # clamp: pre-charging is already limited by the tier's own boost, so a
     # second bound above never bound anything.
+    #
+    # The floor itself is `min(comfort_min_c, indoor_target_c)`, not
+    # `comfort_min_c` alone: `indoor_target_c` can already sit below
+    # `comfort_min_c` when it came from holiday setback (see coordinator.py
+    # and holiday.HOLIDAY_TARGET_MIN_C), which is a deliberate, separate,
+    # colder floor for an unoccupied house. Using `comfort_min_c` unqualified
+    # here would silently drag that intentionally-low holiday target back up
+    # to the occupied-house floor. Braking still cannot push the target any
+    # LOWER than what was already asked for.
+    floor_c = min(params.comfort_min_c, params.indoor_target_c)
     effective_indoor_target_c = params.indoor_target_c - price_shift_c
-    if effective_indoor_target_c < params.comfort_min_c:
-        effective_indoor_target_c = params.comfort_min_c
+    if effective_indoor_target_c < floor_c:
+        effective_indoor_target_c = floor_c
     # Recompute from the clamped target so the reported shift is what is really
     # being asked for, not what was asked for before the floor bit.
     applied_shift_c = params.indoor_target_c - effective_indoor_target_c
@@ -943,12 +1056,54 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
             )
     price_adjustment_c += price_catchup_c * params.spoof_per_indoor_c
 
+    # Weather lookahead: act on a cold front before it lands, the same way the
+    # price logic above acts on a spike before it lands. Timed off the RISE
+    # time, not the fall time — this is a pre-charge, and banked heat must have
+    # arrived before the change, not still be on its way.
+    outdoor_preramp_c = 0.0
+    wind_preramp_c = 0.0
+    sun_preramp_c = 0.0
+    weather_preramp_c = 0.0
+    weather_preramp_in_min: float | None = None
+    preramp_lead_minutes = max(0.0, inputs.rise_minutes)
+    if params.enable_weather_lookahead:
+        outdoor_preramp_c, outdoor_h = _term_preramp_c(
+            inputs.outdoor_forecast, lambda v: v, preramp_lead_minutes
+        )
+        wind_h: float | None = None
+        sun_h: float | None = None
+        # A disabled input contributes exactly 0 to the lookahead too.
+        if params.enable_wind_input:
+            wind_preramp_c, wind_h = _term_preramp_c(
+                inputs.wind_forecast_ms,
+                lambda v: -WIND_GAIN_C_PER_MS * v,
+                preramp_lead_minutes,
+            )
+        if params.enable_solar_input:
+            sun_preramp_c, sun_h = _term_preramp_c(
+                inputs.solar_forecast,
+                lambda v: SOLAR_GAIN_C * v,
+                preramp_lead_minutes,
+            )
+        weather_preramp_c = _clamp(
+            outdoor_preramp_c + wind_preramp_c + sun_preramp_c,
+            -WEATHER_PRERAMP_MAX_C,
+            0.0,
+        )
+        # Report the timing of whichever signal is driving hardest.
+        dominant = max(
+            ((outdoor_preramp_c, outdoor_h), (wind_preramp_c, wind_h), (sun_preramp_c, sun_h)),
+            key=lambda pair: -pair[0],
+        )
+        weather_preramp_in_min = None if dominant[1] is None else dominant[1] * 60.0
+
     compensated_outdoor_temp_c = _clamp(
         inputs.raw_outdoor_temp_c
         + inputs.learned_offset_c
         + price_adjustment_c
         + wind_adjustment_c
-        + sun_adjustment_c,
+        + sun_adjustment_c
+        + weather_preramp_c,
         OUTPUT_SANITY_MIN_C,
         OUTPUT_SANITY_MAX_C,
     )
@@ -976,6 +1131,14 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         reason += f"sun {solar_effect * 100:.0f}% → {sun_adjustment_c:+.1f}°C"
     else:
         reason += f"cloud/sun forecast unavailable, assumed clear → {sun_adjustment_c:+.1f}°C"
+    if abs(weather_preramp_c) > WEATHER_PRERAMP_EPS_C:
+        reason += f"; pre-ramp {weather_preramp_c:+.1f}°C"
+        if weather_preramp_in_min is not None:
+            reason += f" for weather change in {weather_preramp_in_min:.0f} min"
+        reason += (
+            f" (outdoor {outdoor_preramp_c:+.1f}, wind {wind_preramp_c:+.1f}, "
+            f"sun {sun_preramp_c:+.1f}; {preramp_lead_minutes:.0f} min rise)"
+        )
     if price_for_braking is not None:
         reason += f"; price {price_for_braking:.2f} ['{params.price_comfort_tier}' tier"
         if no_forecast:
@@ -1054,6 +1217,12 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         price_significance_factor=inputs.price_significance_factor,
         today_price_spread_c=inputs.today_price_spread_c,
         seasonal_reference_spread_c=inputs.seasonal_reference_spread_c,
+        outdoor_preramp_c=outdoor_preramp_c,
+        wind_preramp_c=wind_preramp_c,
+        sun_preramp_c=sun_preramp_c,
+        weather_preramp_c=weather_preramp_c,
+        weather_preramp_in_min=weather_preramp_in_min,
+        weather_preramp_active=abs(weather_preramp_c) > WEATHER_PRERAMP_EPS_C,
     )
 
 

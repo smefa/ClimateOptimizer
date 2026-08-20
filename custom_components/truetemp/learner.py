@@ -339,6 +339,11 @@ class LearnerInputs:
     # docstring). Used only to correct the open-loop baseline observation
     # below; defaults to 0.0 so every existing call site is unaffected.
     estimated_solar_gain_c: float = 0.0
+    # True while the weather lookahead is deliberately holding the house ABOVE
+    # target ahead of a forecast change. Same freeze as `price_braking` and
+    # for the same reason, just in the other direction — see `step`. Defaults
+    # False so every existing call site is unaffected.
+    weather_preramp: bool = False
 
 
 @dataclass(frozen=True)
@@ -477,6 +482,8 @@ def _freeze_reason(inputs: LearnerInputs, state: LearnerState) -> str | None:
         return "heating hard limit engaged, output is forced rather than learned"
     if inputs.price_braking:
         return "price compensation is deliberately holding below target"
+    if inputs.weather_preramp:
+        return "anticipating a weather change, holding the house above target"
     if state.holdoff_until_s is not None and inputs.now_s < state.holdoff_until_s:
         remaining = (state.holdoff_until_s - inputs.now_s) / 60.0
         return f"waiting {remaining:.0f} min for the last change to reach the room"

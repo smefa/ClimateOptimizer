@@ -80,13 +80,15 @@
           "weather_entity": "Väderprognos",
           "nordpool_price_entity": "Elpris",
           "enable_solar_input": "Kompensera för solsken",
-          "enable_wind_input": "Kompensera för vind"
+          "enable_wind_input": "Kompensera för vind",
+          "enable_weather_lookahead": "Agera på prognosen"
         },
         "data_description": {
           "weather_entity": "Används bara för sol- och vindprognosen. Behövs inte om båda är avstängda nedan.",
           "nordpool_price_entity": "En Nordpool-givare med dagens och morgondagens timpriser. Utan en gör prisbesparing ingenting.",
           "enable_solar_input": "Backar av lite när solen värmer huset. Slå bara på detta om din inomhusgivare sitter någonstans dit solen faktiskt når. En givare i en källare, ett norrvänt rum eller en hall ser aldrig solinstrålningen, så detta skulle sänka temperaturen för en uppvärmning som din givare inte kan bekräfta.",
-          "enable_wind_input": "Lägger till lite när vind drar ut värme ur huset. Låt detta vara avstängt om du inte har ett äldre, dragigt hus som du märker blir kallare i hård vind. Ett rimligt tätt hus reagerar knappt på vind, och att kompensera för en effekt som inte finns lägger bara till brus."
+          "enable_wind_input": "Lägger till lite när vind drar ut värme ur huset. Låt detta vara avstängt om du inte har ett äldre, dragigt hus som du märker blir kallare i hård vind. Ett rimligt tätt hus reagerar knappt på vind, och att kompensera för en effekt som inte finns lägger bara till brus.",
+          "enable_weather_lookahead": "Börjar värma lite hårdare innan en kallfront, tilltagande vind eller moln som skymmer solen faktiskt kommer, i stället för att vänta tills huset hunnit svalna. Den ber alltid om mer värme, aldrig mindre, och tonar ut när förändringen väl är här. Kräver väderprognosentiteten ovan."
         }
       },
       "price": {

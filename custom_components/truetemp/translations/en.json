@@ -80,13 +80,15 @@
           "weather_entity": "Weather forecast",
           "nordpool_price_entity": "Electricity price",
           "enable_solar_input": "Compensate for sunshine",
-          "enable_wind_input": "Compensate for wind"
+          "enable_wind_input": "Compensate for wind",
+          "enable_weather_lookahead": "Act on the forecast"
         },
         "data_description": {
           "weather_entity": "Only used for the sun and wind forecast. Not needed if both are switched off below.",
           "nordpool_price_entity": "A Nordpool sensor with today's and tomorrow's hourly prices. Without one, price saving does nothing.",
           "enable_solar_input": "Backs off a little when the sun is warming the house. Only switch this on if your indoor sensor is somewhere the sun actually reaches. A sensor in a basement, a north-facing room or a hallway never sees the solar gain, so this would push the temperature down for a warming that your sensor cannot confirm.",
-          "enable_wind_input": "Adds a little when wind is stripping heat out of the house. Leave this off unless you have an older, draughty house that you can feel getting colder in high wind. A reasonably sealed house barely responds to wind, and compensating for an effect that is not there just adds noise."
+          "enable_wind_input": "Adds a little when wind is stripping heat out of the house. Leave this off unless you have an older, draughty house that you can feel getting colder in high wind. A reasonably sealed house barely responds to wind, and compensating for an effect that is not there just adds noise.",
+          "enable_weather_lookahead": "Starts heating a little harder before a cold front, a rising wind or the sun going in actually arrives, instead of waiting for the house to cool first. It only ever asks for more heat, never less, and it fades out as the change lands. Needs the weather forecast entity above."
         }
       },
       "price": {

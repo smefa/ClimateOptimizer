@@ -212,13 +212,15 @@ class TestInsufficientRunway:
 
 class TestComfortFloorContract:
     def test_the_callers_clamped_value_is_respected_verbatim(self):
-        """holiday.py has no notion of comfort_min_c — clamping is the
-        caller's job (see resolve()'s docstring, and coordinator.py's
-        `max(self.holiday_target_c, self.comfort_min_c)`). This is the
+        """holiday.py has no notion of `HOLIDAY_TARGET_MIN_C` (or
+        `comfort_min_c` — the two are deliberately different floors, see
+        `HOLIDAY_TARGET_MIN_C`'s docstring) — clamping is the caller's job
+        (see resolve()'s docstring, and coordinator.py's
+        `max(self.holiday_target_c, HOLIDAY_TARGET_MIN_C)`). This is the
         guarantee that makes that division of responsibility safe: whatever
         already-clamped value the caller hands in comes back out verbatim as
         `target_c` during the plateau, never silently re-derived here."""
-        already_clamped = 18.0
+        already_clamped = max(18.0, holiday.HOLIDAY_TARGET_MIN_C)
         result = resolve(
             now=datetime(2026, 1, 6, 0, 0),
             armed=True,

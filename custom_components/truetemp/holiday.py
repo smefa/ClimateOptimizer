@@ -56,6 +56,12 @@ RAMP_HOURS_PER_DEGREE_MULTIPLE = 2.0
 MIN_RAMP_HOURS = 1.0
 
 DEFAULT_HOLIDAY_TARGET_C = 16.0
+# Holiday setback's own absolute floor — deliberately independent of
+# `comfort_min_c`. That value bounds how cold price compensation may sag the
+# house while someone is actually living in it; nobody is home during a
+# holiday, so the setback is allowed to sag well past it. This is the only
+# bound left, a frost-safety minimum rather than a comfort one.
+HOLIDAY_TARGET_MIN_C = 5.0
 
 HOLIDAY_PHASE_INACTIVE = "inactive"
 HOLIDAY_PHASE_INVALID = "invalid"
@@ -128,11 +134,12 @@ def resolve(
     "now" (e.g. Home Assistant's `dt_util.now()`) must strip its tzinfo
     first — this module has no timezone of its own to convert against.
 
-    `holiday_target_c` must already be clamped to the comfort floor by the
-    caller (`max(holiday_target_c, comfort_min_c)`) — see the plan's
-    "Interaction with the comfort floor" note. This module has no notion of
-    `comfort_min_c` and must not re-derive it; that clamp is a cross-cutting
-    concern that belongs at the coordinator, not here.
+    `holiday_target_c` must already be clamped to `HOLIDAY_TARGET_MIN_C` by
+    the caller (`max(holiday_target_c, HOLIDAY_TARGET_MIN_C)`) — deliberately
+    NOT `comfort_min_c`, which is a separate, occupied-house floor this
+    module has no notion of; see `HOLIDAY_TARGET_MIN_C`'s docstring above.
+    That clamp is a cross-cutting concern that belongs at the coordinator,
+    not here.
 
     Never raises: a missing/invalid date, or a house whose target for some
     reason wants a setback deeper than shallow, all degrade to a safe phase

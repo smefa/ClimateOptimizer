@@ -371,10 +371,14 @@ class TrueTempCard extends HTMLElement {
     // are the raw feed and read independently of this toggle — this flag is
     // reused below for the price section header badge.
     const priceDisabled = attrs.price_band_start === DISABLED;
+    // Same trick, but the pre-ramp terms are numbers rather than absent when
+    // off, so sensor.py substitutes DISABLED explicitly.
+    const preRampDisabled = attrs.weather_preramp_c === DISABLED;
 
     const terms = [
       [t.termSun, sunDisabled ? DISABLED : this._num(attrs.sun_adjustment_c, 2, " °C"), "explainSun"],
       [t.termWind, windDisabled ? DISABLED : this._num(attrs.wind_adjustment_c, 2, " °C"), "explainWind"],
+      [t.termPreRamp, preRampDisabled ? DISABLED : this._num(attrs.weather_preramp_c, 2, " °C"), "explainPreRamp"],
       [t.termPrice, priceDisabled ? DISABLED : this._num(attrs.price_adjustment_c, 2, " °C"), "explainPriceAdjustment"],
       [t.termTotalChange, this._num(attrs.total_adjustment_c, 2, " °C"), "explainTotalChange"],
     ];

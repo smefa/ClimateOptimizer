@@ -439,6 +439,18 @@ class StatusSensor(TrueTempEntity, SensorEntity):
                 for key in keys:
                     if breakdown.get(key) is None:
                         breakdown[key] = ATTR_DISABLED
+            # Separate from the loop above because these are 0.0 rather than
+            # None when the feature is off, and a flat 0.0 reads as "the
+            # forecast is calling for nothing" instead of "nobody is looking".
+            if not self.coordinator.lookahead_enabled:
+                for key in (
+                    "outdoor_preramp_c",
+                    "wind_preramp_c",
+                    "sun_preramp_c",
+                    "weather_preramp_c",
+                    "weather_preramp_in_min",
+                ):
+                    breakdown[key] = ATTR_DISABLED
             attrs.update(breakdown)
 
         # --- How learning is going ------------------------------------------

@@ -185,6 +185,42 @@ your house needs; it just reacts after the drift starts instead of before it.
 Any steady bias from a disturbance you are not feeding forward gets absorbed
 into the learned offset within a day.
 
+### Acting on the forecast
+
+**Act on the forecast** is a third, separate switch on the same page, also off
+by default. Sun and wind above answer "what is happening right now"; this one
+answers "what is about to happen".
+
+It reads the hourly forecast and, when a cold front, a rising wind or the sun
+going in is coming, starts heating a little harder *before* it lands — the same
+thing price pre-charging already does ahead of a spike, using the same measured
+rise time, so the extra heat has actually arrived by the time it is needed
+rather than still being on its way.
+
+Three properties keep it from becoming another thing to tune:
+
+- **No new gain.** The outdoor part is a straight level shift: 1 °C of
+  anticipated drop asks for at most 1 °C of colder spoof. Wind and sun reuse
+  the same coefficients their steady-state terms already use.
+- **One-sided.** It only ever asks for *more* heat. Easing off ahead of a
+  forecast warm-up would trade comfort against a forecast that might be wrong,
+  with no saving attached, so it is not done.
+- **Self-cancelling.** The push is the difference between the forecast now and
+  the forecast later, so it decays to zero as the change arrives. It is also
+  measured against the forecast's *own* current value, never your outdoor
+  sensor — a forecast that reads consistently colder than your wall sensor
+  produces exactly zero rather than a permanent nudge.
+
+All three pushes share one 3 °C budget, so a front that fires all of them at
+once cannot stack into an overshoot. While the pre-ramp is acting, learning
+pauses (`learning_paused_because` says so), because the house is deliberately
+being held above target and the learner must not integrate that away.
+
+Wind's share only counts if the wind term is switched on, and the sun's only if
+the sun term is; the outdoor share needs nothing but a weather entity. If the
+weather integration provides no *hourly* forecast, the whole thing quietly
+contributes zero.
+
 ---
 
 ## Saving money on electricity
@@ -287,6 +323,12 @@ again, and on unload/reload so nothing outlives the entry. See `TrueTempCoordina
 | `wind_adjustment_c` | Feedforward wind correction, zero if wind input is off. |
 | `sun_adjustment_c` | Feedforward solar correction, zero if sun input is off. |
 | `price_adjustment_c` | Price-braking correction, zero if price compensation is off or not engaged. |
+| `outdoor_preramp_c` | Anticipatory push (≤ 0) from a forecast outdoor-temperature drop. `disabled` if the forecast lookahead is off. |
+| `wind_preramp_c` | Anticipatory push (≤ 0) from forecast rising wind. `disabled` if the lookahead is off; zero if the wind input is off. |
+| `sun_preramp_c` | Anticipatory push (≤ 0) from forecast losing sun. `disabled` if the lookahead is off; zero if the sun input is off. |
+| `weather_preramp_c` | The three above, summed and clamped to a shared 3 °C budget — the number that actually reaches the published value. `disabled` if the lookahead is off. |
+| `weather_preramp_in_min` | Minutes until the forecast change currently driving the pre-ramp. `disabled` if the lookahead is off. |
+| `weather_preramp_active` | `True` while the pre-ramp is deliberately holding the house above target — tells the learner to freeze, exactly as `price_braking` does in the other direction. |
 | `wind_speed_ms` | Wind speed read from the weather entity's forecast. |
 | `cloud_coverage_pct` | Cloud cover read from the weather entity's forecast. `disabled` if sun input is off and nothing was fetched. |
 | `solar_effect` | Fraction (0–1) of full solar gain available right now — pure geometry and cloud cover, computed regardless of whether the sun term is enabled (see `solar_effect_of` in `heuristic.py`). |

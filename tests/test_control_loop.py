@@ -89,6 +89,8 @@ def run(
     price_at=None,
     params_overrides: dict | None = None,
     inputs_overrides: dict | None = None,
+    inputs_at=None,
+    outdoor_at=None,
     active_at=None,
     target_at=None,
     learner_state=None,
@@ -123,6 +125,12 @@ def run(
     `HeuristicResult` — for a test that needs to see every step's published
     value (e.g. `effective_indoor_target_c`), not just the final one `run()`
     itself returns.
+
+    `outdoor_at(i)` overrides `outdoor_c` per step, and `inputs_at(i)` returns
+    a per-step dict layered on top of `inputs_overrides` — together enough to
+    drive a scenario whose weather actually changes mid-run. `outdoor_at` is
+    called once at the top of each step, which is also the hook a test uses to
+    move the simulated house's own equilibrium as the weather turns.
     """
     if learner_state is None:
         learner_state = learner.initial_state()
@@ -137,6 +145,7 @@ def run(
 
     for i in range(steps):
         current_target = target_c if target_at is None else target_at(i)
+        current_outdoor = outdoor_c if outdoor_at is None else outdoor_at(i)
         is_active = True if active_at is None else active_at(i)
         indoor = house.advance(offset)
         now += STEP_HOURS * 3600.0
@@ -154,10 +163,13 @@ def run(
                 indoor_temp_c=indoor,
                 indoor_data_available=True,
                 target_c=current_target,
-                outdoor_temp_c=outdoor_c,
+                outdoor_temp_c=current_outdoor,
                 heating_hard_limit_engaged=False,
                 is_active=is_active,
                 price_braking=bool(previous_output and previous_output.price_braking),
+                weather_preramp=bool(
+                    previous_output and previous_output.weather_preramp_active
+                ),
                 rise_hours=lag_result.rise_hours,
             ),
         )
@@ -177,7 +189,7 @@ def run(
         inputs = dict(
             indoor_temp_c=indoor,
             indoor_data_available=True,
-            raw_outdoor_temp_c=outdoor_c,
+            raw_outdoor_temp_c=current_outdoor,
             wind_speed_ms=0.0,
             wind_data_available=True,
             sun_elevation_deg=-10.0,
@@ -195,6 +207,8 @@ def run(
             ),
         )
         inputs.update(inputs_overrides or {})
+        if inputs_at is not None:
+            inputs.update(inputs_at(i))
 
         output = heuristic.compute(
             heuristic.HeuristicInputs(**inputs), heuristic.HeuristicParams(**params)
@@ -205,7 +219,9 @@ def run(
         # What the pump actually sees, relative to the real outdoor reading.
         # Zero while compensation is off: the coordinator publishes the raw
         # reading then, so no term — learned, weather or price — reaches the pump.
-        offset = (output.compensated_outdoor_temp_c - outdoor_c) if is_active else 0.0
+        offset = (
+            (output.compensated_outdoor_temp_c - current_outdoor) if is_active else 0.0
+        )
         trace.append((indoor, offset, result.hold_offset_c))
 
     if return_state:
@@ -346,6 +362,85 @@ class TestPriceInteraction:
         )
         assert output.cold_brake_factor == 0.0
         assert output.price_adjustment_c == 0.0
+
+
+class TestColdFrontLookahead:
+    """A front the forecast saw coming, with and without pre-ramping.
+
+    The house model has no outdoor term of its own, so the front is applied
+    the way the plant would actually feel it: the same pump curve leaves the
+    house further short once it is colder outside, i.e. `base_indoor_c` steps
+    down. The forecast is built from the SAME schedule the house follows, so
+    the run is not testing a lucky forecast — it is testing that a correct one
+    is acted on early.
+    """
+
+    WARM_C = -2.0
+    COLD_C = -8.0
+    FRONT_STEP = 60  # 15 h in, well after the loop has settled
+    # How much of the 6 degC outdoor drop the (unchanged) curve fails to cover.
+    SHORTFALL_C = 2.0
+    STEPS = 160
+
+    def _outdoor_of_step(self, i: int) -> float:
+        return self.WARM_C if i < self.FRONT_STEP else self.COLD_C
+
+    def _run(self, lookahead: bool):
+        house = House(curve_error_c=-2.0)
+        warm_base = house.base_indoor_c
+
+        def outdoor_at(i: int) -> float:
+            # Single per-step hook, so the plant and the published raw reading
+            # can never disagree about when the front landed.
+            house.base_indoor_c = warm_base - (
+                self.SHORTFALL_C if i >= self.FRONT_STEP else 0.0
+            )
+            return self._outdoor_of_step(i)
+
+        def inputs_at(i: int) -> dict:
+            # An hourly forecast of the next 12 h, from this step's vantage
+            # point — exactly the shape the coordinator builds.
+            return {
+                "outdoor_forecast": tuple(
+                    (float(h), self._outdoor_of_step(i + h * 4)) for h in range(13)
+                )
+            }
+
+        trace, result, output = run(
+            house,
+            self.STEPS,
+            outdoor_at=outdoor_at,
+            inputs_at=inputs_at,
+            params_overrides={"enable_weather_lookahead": lookahead},
+        )
+        return trace, result, output
+
+    def test_pre_ramping_softens_the_dip(self):
+        without, _, _ = self._run(lookahead=False)
+        with_ramp, _, _ = self._run(lookahead=True)
+        # The first 2.5 h after the front is the whole claim: banked heat has
+        # to carry the house through the dead time before the learner's own
+        # response arrives. Beyond that the two runs converge, and the
+        # lookahead run is fractionally BEHIND — it froze the learner while it
+        # was pre-ramping, which is the deliberate trade in §6 of the plan.
+        window = slice(self.FRONT_STEP, self.FRONT_STEP + 10)
+        assert min(t[0] for t in with_ramp[window]) > min(
+            t[0] for t in without[window]
+        )
+
+    def test_the_ramp_does_not_bias_the_integrator(self):
+        _, without, _ = self._run(lookahead=False)
+        _, with_ramp, _ = self._run(lookahead=True)
+        # Same house, same front: whatever the pre-ramp did on the way in, the
+        # learned offset must land in the same place once it is over.
+        assert with_ramp.hold_offset_c == pytest.approx(
+            without.hold_offset_c, abs=0.3
+        )
+
+    def test_the_ramp_is_over_once_the_front_has_landed(self):
+        _, _, output = self._run(lookahead=True)
+        assert output.weather_preramp_c == 0.0
+        assert not output.weather_preramp_active
 
 
 class TestLagMeasurementInTheLoop:
@@ -594,24 +689,34 @@ class TestHolidaySetback:
         assert indoor[-1] == pytest.approx(normal_target, abs=0.3)
         assert after.hold_offset_c == pytest.approx(settled_offset, abs=0.6)
 
-    def test_effective_target_never_dips_below_the_comfort_floor(self):
-        """The coordinator clamps `holiday_target_c` to `comfort_min_c`
-        before calling `holiday.resolve()` — this is the closed-loop half of
-        that guarantee (see test_holiday.py's TestComfortFloor for the pure
-        version): with a holiday target requested well below the floor,
-        already clamped the way `coordinator.py`'s
-        `max(self.holiday_target_c, self.comfort_min_c)` does before it ever
-        reaches `holiday.resolve()`, `heuristic.compute()`'s own published
+    def test_effective_target_can_dip_below_the_comfort_floor_on_holiday(self):
+        """`comfort_min_c` is an occupied-house floor; nobody is home during
+        a holiday, so a holiday target below it must reach the plant as-is,
+        not get dragged back up to `comfort_min_c` — see
+        `holiday.HOLIDAY_TARGET_MIN_C`'s docstring for why the two floors are
+        kept separate. The coordinator clamps `holiday_target_c` to
+        `HOLIDAY_TARGET_MIN_C`, NOT `comfort_min_c`
+        (`max(self.holiday_target_c, HOLIDAY_TARGET_MIN_C)`), before ever
+        calling `holiday.resolve()`; this is the closed-loop half of that
+        guarantee (see test_holiday.py's TestComfortFloorContract for the
+        pure version). `heuristic.compute()`'s own published
         `effective_indoor_target_c` — which layers price braking on top of
-        whatever `holiday.resolve()` returns — never goes under the floor on
-        any cycle either.
+        whatever `holiday.resolve()` returns — must therefore reach down to
+        the holiday target, comfortably below `comfort_min_c`, and price
+        braking must never push it lower still than that holiday target.
         """
         house = House(curve_error_c=-2.0, delay_steps=4, inertia=0.15, indoor_c=19.0)
         comfort_min_c = 18.0
-        holiday_target = max(15.0, comfort_min_c)
+        holiday_target = max(10.0, holiday.HOLIDAY_TARGET_MIN_C)
+        assert holiday_target < comfort_min_c
         normal_target = 21.0
         start_date = date(2026, 1, 5)
-        end_date = date(2026, 1, 6)
+        # Far enough out that the return ramp never starts within the run's
+        # 300 steps (~75h) — this keeps every cycle on the flat SETBACK
+        # plateau (`target_c == holiday_target` exactly), which is what lets
+        # the assertions below pin the floor to an exact value instead of a
+        # moving ramp target.
+        end_date = date(2026, 2, 4)
         clock = datetime.combine(start_date, dtime.min)
 
         def target_at(i):
@@ -634,11 +739,19 @@ class TestHolidaySetback:
             300,
             target_c=normal_target,
             target_at=target_at,
-            params_overrides={"comfort_min_c": comfort_min_c},
+            # A live price spike so braking actually engages during the
+            # holiday plateau, not just an inert `enable_price_compensation`
+            # flag — this is what proves braking can't sag the target any
+            # further below the already-below-comfort-floor holiday target.
+            price_at=TestPriceInteraction._spike_schedule(spike_step=40, width=200),
+            params_overrides={"comfort_min_c": comfort_min_c, "price_comfort_tier": "high"},
             on_output=lambda output: effective_targets.append(
                 output.effective_indoor_target_c
             ),
         )
 
         assert effective_targets
-        assert min(effective_targets) >= comfort_min_c - 1e-9
+        # Reached: the holiday target itself, well below comfort_min_c.
+        assert min(effective_targets) == pytest.approx(holiday_target, abs=1e-6)
+        # Never pushed lower still by price braking on top of it.
+        assert min(effective_targets) >= holiday_target - 1e-9

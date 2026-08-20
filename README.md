@@ -119,6 +119,9 @@ Allt nedan är valfritt och kan hoppas över helt:
 
 - **Kompensering för sol och vind** — för hus där det här faktiskt
   påverkar rummet du mäter i.
+- **Agera på väderprognosen** — börjar värma lite hårdare innan en kallfront,
+  tilltagande vind eller moln som skymmer solen hinner fram, så att huset inte
+  behöver svalna först. Lägger alltid till värme, tar aldrig bort.
 - **Elprisbesparing** — flytta värmen bort från dygnets dyraste timmar.
 - **Vart resultatet ska skickas** — antingen som en låtsad utegivare (en
   entitet i Home Assistant och/eller en direktkoppling mot en Ohm on WiFi- /

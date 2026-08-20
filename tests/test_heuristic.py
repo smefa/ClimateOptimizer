@@ -372,6 +372,17 @@ class TestPriceBraking:
         assert result.effective_indoor_target_c >= 20.5
         assert result.price_shift_applied_c == pytest.approx(0.5, abs=1e-6)
 
+    def test_an_already_below_floor_target_is_not_dragged_back_up(self):
+        """`comfort_min_c` bounds price braking in an OCCUPIED house. A
+        holiday-derived `indoor_target_c` can legitimately already sit below
+        it (see coordinator.py/holiday.HOLIDAY_TARGET_MIN_C) — braking must
+        not silently drag that back up to `comfort_min_c`, only refuse to
+        push it any lower still."""
+        result = self._braking(
+            params={"comfort_min_c": 20.0, "indoor_target_c": 10.0, "price_comfort_tier": "high"}
+        )
+        assert result.effective_indoor_target_c == pytest.approx(10.0, abs=1e-6)
+
     def test_reported_shift_reflects_the_floor_not_the_request(self):
         floored = self._braking(params={"comfort_min_c": 20.0})
         assert floored.price_shift_applied_c == pytest.approx(
@@ -1236,3 +1247,265 @@ class TestComputeAppliesSignificanceTaper:
         assert result.price_significance_factor == pytest.approx(0.42)
         assert result.today_price_spread_c == pytest.approx(1.23)
         assert result.seasonal_reference_spread_c == pytest.approx(0.87)
+
+
+# --- Weather lookahead ------------------------------------------------------
+
+_lookahead_weighted_peak = heuristic._lookahead_weighted_peak
+WEATHER_PRERAMP_MAX_C = heuristic.WEATHER_PRERAMP_MAX_C
+WEATHER_PRERAMP_EPS_C = heuristic.WEATHER_PRERAMP_EPS_C
+SOLAR_GAIN_C = heuristic.SOLAR_GAIN_C
+WIND_GAIN_C_PER_MS = heuristic.WIND_GAIN_C_PER_MS
+
+
+def temp_forecast(*temps: float, step_h: float = 1.0):
+    """`(hours_from_now, temperature)` starting at t=0, one entry per step."""
+    return tuple((i * step_h, t) for i, t in enumerate(temps))
+
+
+def lookahead_params(**overrides) -> HeuristicParams:
+    defaults = dict(enable_weather_lookahead=True)
+    defaults.update(overrides)
+    return make_params(**defaults)
+
+
+class TestLookaheadWeightedPeak:
+    def test_weights_by_proximity(self):
+        # Same score at 1 h and 3 h inside a 4 h window: the nearer one wins.
+        near, near_h = _lookahead_weighted_peak(((1.0, 1.0),), 240.0, lambda v: v)
+        far, far_h = _lookahead_weighted_peak(((3.0, 1.0),), 240.0, lambda v: v)
+        assert near == pytest.approx(0.75)
+        assert far == pytest.approx(0.25)
+        assert near_h == 1.0 and far_h == 3.0
+
+    def test_entries_beyond_the_window_are_ignored(self):
+        peak, when = _lookahead_weighted_peak(((5.0, 10.0),), 240.0, lambda v: v)
+        assert peak == 0.0
+        assert when is None
+
+    def test_entries_at_or_before_now_are_ignored(self):
+        peak, when = _lookahead_weighted_peak(
+            ((-1.0, 10.0), (0.0, 10.0)), 240.0, lambda v: v
+        )
+        assert peak == 0.0
+        assert when is None
+
+    def test_empty_and_none_series_do_nothing(self):
+        assert _lookahead_weighted_peak(None, 240.0, lambda v: v) == (0.0, None)
+        assert _lookahead_weighted_peak((), 240.0, lambda v: v) == (0.0, None)
+
+    def test_non_positive_lead_does_nothing(self):
+        assert _lookahead_weighted_peak(((1.0, 5.0),), 0.0, lambda v: v) == (0.0, None)
+        assert _lookahead_weighted_peak(((1.0, 5.0),), -60.0, lambda v: v) == (0.0, None)
+
+    def test_reports_the_peak_not_the_last_entry(self):
+        peak, when = _lookahead_weighted_peak(
+            ((1.0, 4.0), (2.0, 1.0)), 240.0, lambda v: v
+        )
+        assert peak == pytest.approx(3.0)
+        assert when == 1.0
+
+
+class TestWeatherPreRamp:
+    def test_a_drop_inside_the_window_ramps(self):
+        result = compute(
+            make_inputs(
+                outdoor_forecast=temp_forecast(0.0, -4.0),
+                rise_minutes=120.0,
+            ),
+            lookahead_params(),
+        )
+        # 4 degC colder at t=1 h inside a 2 h lead: 4 * (1 - 0.5).
+        assert result.outdoor_preramp_c == pytest.approx(-2.0)
+        assert result.weather_preramp_c == pytest.approx(-2.0)
+        assert result.weather_preramp_in_min == pytest.approx(60.0)
+
+    def test_the_same_drop_beyond_the_rise_time_does_nothing(self):
+        result = compute(
+            make_inputs(
+                outdoor_forecast=temp_forecast(0.0, 0.0, 0.0, 0.0, -4.0),
+                rise_minutes=120.0,
+            ),
+            lookahead_params(),
+        )
+        assert result.weather_preramp_c == 0.0
+        assert not result.weather_preramp_active
+
+    def test_a_forecast_rise_produces_exactly_zero(self):
+        result = compute(
+            make_inputs(
+                outdoor_forecast=temp_forecast(0.0, 6.0),
+                rise_minutes=120.0,
+            ),
+            lookahead_params(),
+        )
+        assert result.outdoor_preramp_c == 0.0
+        assert result.weather_preramp_c == 0.0
+
+    def test_the_ramp_decays_as_the_event_arrives(self):
+        far = compute(
+            make_inputs(outdoor_forecast=((0.0, 0.0), (1.5, -4.0)), rise_minutes=120.0),
+            lookahead_params(),
+        )
+        near = compute(
+            make_inputs(outdoor_forecast=((0.0, 0.0), (0.5, -4.0)), rise_minutes=120.0),
+            lookahead_params(),
+        )
+        arrived = compute(
+            make_inputs(outdoor_forecast=((0.0, -4.0), (1.0, -4.0)), rise_minutes=120.0),
+            lookahead_params(),
+        )
+        assert near.weather_preramp_c < far.weather_preramp_c < 0.0
+        # Once the drop IS the current forecast value it is the steady-state
+        # raw reading's problem, not the lookahead's.
+        assert arrived.weather_preramp_c == 0.0
+
+    def test_a_constant_forecast_bias_produces_exactly_zero(self):
+        """The regression that matters most: a forecast running a constant
+        offset below the wall sensor must not produce a permanent ramp."""
+        for bias in (-5.0, 0.0, 5.0):
+            result = compute(
+                make_inputs(
+                    raw_outdoor_temp_c=3.0,
+                    outdoor_forecast=temp_forecast(*(bias for _ in range(4))),
+                    rise_minutes=180.0,
+                ),
+                lookahead_params(),
+            )
+            assert result.weather_preramp_c == 0.0
+
+    def test_rising_wind_ramps_at_the_existing_gain(self):
+        result = compute(
+            make_inputs(
+                wind_forecast_ms=((0.0, 0.0), (1.0, 10.0)),
+                rise_minutes=120.0,
+            ),
+            lookahead_params(enable_wind_input=True),
+        )
+        assert result.wind_preramp_c == pytest.approx(-WIND_GAIN_C_PER_MS * 10.0 * 0.5)
+
+    def test_the_sun_going_in_ramps_at_the_existing_gain(self):
+        result = compute(
+            make_inputs(
+                solar_forecast=((0.0, 1.0), (1.0, 0.0)),
+                rise_minutes=120.0,
+            ),
+            lookahead_params(enable_solar_input=True),
+        )
+        assert result.sun_preramp_c == pytest.approx(-SOLAR_GAIN_C * 0.5)
+
+    def test_the_ramp_reaches_the_published_value(self):
+        without = compute(make_inputs(), make_params())
+        with_ramp = compute(
+            make_inputs(outdoor_forecast=temp_forecast(0.0, -4.0), rise_minutes=120.0),
+            lookahead_params(),
+        )
+        assert with_ramp.compensated_outdoor_temp_c == pytest.approx(
+            without.compensated_outdoor_temp_c - 2.0
+        )
+
+
+class TestPreRampBudget:
+    def _all_three(self, **params):
+        return compute(
+            make_inputs(
+                outdoor_forecast=((0.0, 0.0), (0.1, -8.0)),
+                wind_forecast_ms=((0.0, 0.0), (0.1, 20.0)),
+                solar_forecast=((0.0, 1.0), (0.1, 0.0)),
+                rise_minutes=120.0,
+            ),
+            lookahead_params(enable_wind_input=True, enable_solar_input=True, **params),
+        )
+
+    def test_three_simultaneous_ramps_clamp_to_the_shared_budget(self):
+        result = self._all_three()
+        assert result.weather_preramp_c == pytest.approx(-WEATHER_PRERAMP_MAX_C)
+
+    def test_components_are_still_reported_unclamped(self):
+        result = self._all_three()
+        raw_sum = (
+            result.outdoor_preramp_c + result.wind_preramp_c + result.sun_preramp_c
+        )
+        assert raw_sum < -WEATHER_PRERAMP_MAX_C
+        assert result.outdoor_preramp_c < 0.0
+        assert result.wind_preramp_c < 0.0
+        assert result.sun_preramp_c < 0.0
+
+
+class TestPreRampGating:
+    def _inputs(self, **overrides):
+        defaults = dict(
+            outdoor_forecast=temp_forecast(0.0, -4.0),
+            wind_forecast_ms=((0.0, 0.0), (1.0, 10.0)),
+            solar_forecast=((0.0, 1.0), (1.0, 0.0)),
+            rise_minutes=120.0,
+        )
+        defaults.update(overrides)
+        return make_inputs(**defaults)
+
+    def test_lookahead_off_is_bit_identical_to_no_forecast_at_all(self):
+        off = compute(self._inputs(), make_params())
+        bare = compute(make_inputs(rise_minutes=120.0), make_params())
+        assert off.weather_preramp_c == 0.0
+        assert off.outdoor_preramp_c == 0.0
+        assert off.wind_preramp_c == 0.0
+        assert off.sun_preramp_c == 0.0
+        assert off.weather_preramp_in_min is None
+        assert off.compensated_outdoor_temp_c == pytest.approx(
+            bare.compensated_outdoor_temp_c
+        )
+
+    def test_wind_off_contributes_exactly_zero(self):
+        result = compute(
+            self._inputs(outdoor_forecast=None, solar_forecast=None),
+            lookahead_params(enable_wind_input=False),
+        )
+        assert result.wind_preramp_c == 0.0
+        assert result.weather_preramp_c == 0.0
+
+    def test_solar_off_contributes_exactly_zero(self):
+        result = compute(
+            self._inputs(outdoor_forecast=None, wind_forecast_ms=None),
+            lookahead_params(enable_solar_input=False),
+        )
+        assert result.sun_preramp_c == 0.0
+        assert result.weather_preramp_c == 0.0
+
+    def test_missing_series_ramps_nothing(self):
+        result = compute(
+            make_inputs(rise_minutes=120.0),
+            lookahead_params(enable_wind_input=True, enable_solar_input=True),
+        )
+        assert result.weather_preramp_c == 0.0
+
+    def test_hard_limit_short_circuits_on_raw_and_zeroes_the_ramp(self):
+        result = compute(
+            self._inputs(raw_outdoor_temp_c=22.0),
+            lookahead_params(),
+        )
+        assert result.heating_hard_limit_engaged
+        assert result.weather_preramp_c == 0.0
+        assert result.outdoor_preramp_c == 0.0
+
+
+class TestPreRampFreezesLearner:
+    def test_flag_set_above_eps(self):
+        result = compute(
+            make_inputs(outdoor_forecast=temp_forecast(0.0, -4.0), rise_minutes=120.0),
+            lookahead_params(),
+        )
+        assert abs(result.weather_preramp_c) > WEATHER_PRERAMP_EPS_C
+        assert result.weather_preramp_active
+        assert "pre-ramp" in result.reason
+
+    def test_flag_clear_below_eps(self):
+        result = compute(
+            make_inputs(
+                outdoor_forecast=temp_forecast(0.0, -0.2),
+                rise_minutes=120.0,
+            ),
+            lookahead_params(),
+        )
+        assert 0.0 < abs(result.weather_preramp_c) <= WEATHER_PRERAMP_EPS_C
+        assert not result.weather_preramp_active
+        assert "pre-ramp" not in result.reason

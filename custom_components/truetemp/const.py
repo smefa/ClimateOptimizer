@@ -88,6 +88,13 @@ CONF_PRICE_SIGNIFICANCE_FLOOR = "price_significance_floor"
 # With both off, no weather entity is needed at all.
 CONF_ENABLE_SOLAR_INPUT = "enable_solar_input"
 CONF_ENABLE_WIND_INPUT = "enable_wind_input"
+# Whether to pre-ramp on the weather forecast — acting on a cold front before
+# it lands, the way price compensation already acts on a spike before it
+# lands. One switch for all three forecast signals (outdoor temperature, wind,
+# cloud): "should it act on forecasts at all" is a single occupant
+# preference, not three. Needs the weather entity even with both terms above
+# switched off. See heuristic._term_preramp_c.
+CONF_ENABLE_WEATHER_LOOKAHEAD = "enable_weather_lookahead"
 
 # --- Config / options keys: plumbing --------------------------------------
 CONF_ENABLE_DATA_LOGGING = "enable_data_logging"
@@ -126,6 +133,7 @@ KNOWN_CONFIG_KEYS = frozenset(
         CONF_PRICE_SIGNIFICANCE_FLOOR,
         CONF_ENABLE_SOLAR_INPUT,
         CONF_ENABLE_WIND_INPUT,
+        CONF_ENABLE_WEATHER_LOOKAHEAD,
         CONF_ENABLE_DATA_LOGGING,
     }
 )
@@ -145,6 +153,9 @@ DEFAULT_COMFORT_MIN_C = 18.0
 DEFAULT_PRICE_SIGNIFICANCE_FLOOR = 0.0
 DEFAULT_ENABLE_SOLAR_INPUT = True
 DEFAULT_ENABLE_WIND_INPUT = False
+# Off, for the same reason compensation itself ships off: an upgrade must not
+# silently change what an existing install publishes.
+DEFAULT_ENABLE_WEATHER_LOOKAHEAD = False
 DEFAULT_ENABLE_DATA_LOGGING = False
 DEFAULT_OUTPUT_MODE = OUTPUT_MODE_OUTDOOR_SPOOF
 DEFAULT_HEAT_CURVE_OFFSET_INVERT = False
@@ -176,7 +187,7 @@ STARTUP_GRACE_PERIOD_MINUTES = 5
 # changes — the main file or any of the language files.
 FRONTEND_STATIC_URL_PREFIX = "/truetemp"
 FRONTEND_CARD_URL = f"{FRONTEND_STATIC_URL_PREFIX}/truetemp-card.js"
-FRONTEND_JS_VERSION = "14"
+FRONTEND_JS_VERSION = "15"
 
 # The holiday-mode card is a second, independent bundle (see
 # www/truetemp-holiday-card.js's module docstring for why) with its own

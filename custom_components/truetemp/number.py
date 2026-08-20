@@ -1,11 +1,12 @@
 """Number platform: the holiday setback target temperature.
 
 A live entity over one in-memory coordinator field, same reasoning as
-select.py/date.py. `native_min_value` tracks the live `comfort_min_c` config
-value (`coordinator.comfort_min_c`) so the occupant cannot even select a
-holiday target below their own configured comfort floor — `comfort_min_c`
-stays the single absolute floor everywhere in this integration, see
-holiday.py's module docstring.
+select.py/date.py. `native_min_value` is `HOLIDAY_TARGET_MIN_C`, a fixed
+floor independent of `comfort_min_c` — the occupant is deliberately allowed
+to pick a holiday target colder than their own configured (occupied-house)
+comfort floor, since nobody is home during a holiday. See
+`HOLIDAY_TARGET_MIN_C`'s docstring in holiday.py for why the two floors are
+kept separate.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import TrueTempConfigEntry
 from .coordinator import TrueTempCoordinator
+from .holiday import HOLIDAY_TARGET_MIN_C
 from .sensor import TrueTempEntity
 
 
@@ -34,6 +36,7 @@ class HolidayTargetTemperatureNumber(TrueTempEntity, NumberEntity, RestoreEntity
 
     _attr_translation_key = "holiday_target_temperature"
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_native_min_value = HOLIDAY_TARGET_MIN_C
     _attr_native_max_value = 30.0
     _attr_native_step = 0.5
     _attr_mode = NumberMode.BOX
@@ -49,10 +52,6 @@ class HolidayTargetTemperatureNumber(TrueTempEntity, NumberEntity, RestoreEntity
         """Always settable: a local value, not fetched data. Same override
         the other live-control-surface entities carry."""
         return True
-
-    @property
-    def native_min_value(self) -> float:
-        return self.coordinator.comfort_min_c
 
     @property
     def native_value(self) -> float:

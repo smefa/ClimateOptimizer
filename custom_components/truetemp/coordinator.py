@@ -24,9 +24,12 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 import aiohttp
+from astral.sun import elevation as astral_elevation
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     STATE_UNAVAILABLE,
@@ -38,6 +41,7 @@ from homeassistant.core import HomeAssistant, State
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.storage import Store
+from homeassistant.helpers.sun import get_astral_location
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 from homeassistant.util.unit_conversion import SpeedConverter, TemperatureConverter
@@ -48,6 +52,7 @@ from .const import (
     CONF_ENABLE_PRICE_COMPENSATION,
     CONF_ENABLE_SOLAR_INPUT,
     CONF_ENABLE_WIND_INPUT,
+    CONF_ENABLE_WEATHER_LOOKAHEAD,
     CONF_HEAT_CURVE_OFFSET_ENTITY,
     CONF_HEAT_CURVE_OFFSET_INVERT,
     CONF_HEATING_TYPE,
@@ -65,6 +70,7 @@ from .const import (
     DEFAULT_ENABLE_PRICE_COMPENSATION,
     DEFAULT_ENABLE_SOLAR_INPUT,
     DEFAULT_ENABLE_WIND_INPUT,
+    DEFAULT_ENABLE_WEATHER_LOOKAHEAD,
     DEFAULT_HEAT_CURVE_OFFSET_INVERT,
     DEFAULT_INDOOR_TARGET_TEMPERATURE,
     DEFAULT_OUTPUT_MODE,
@@ -98,6 +104,7 @@ from .heuristic import (
 from .holiday import (
     DEFAULT_HOLIDAY_TARGET_C,
     HOLIDAY_PHASE_DONE,
+    HOLIDAY_TARGET_MIN_C,
     HolidayResult,
     resolve as holiday_resolve,
 )
@@ -148,6 +155,77 @@ OHMONWIFI_REQUEST_TIMEOUT_SECONDS = 10.0
 # Tolerance on the learner cadence. HA's scheduler jitters by a second or two,
 # and demanding the full interval would drop roughly every other step.
 LEARNER_STEP_TOLERANCE = 0.9
+
+# How far ahead to keep forecast entries for the weather lookahead. A fetch
+# bound, not a control coefficient: the pre-ramp's real window is the MEASURED
+# rise time (`heuristic._term_preramp_c`), which is far shorter than this, and
+# this only stops an integration that publishes a week of hourly data from
+# handing `compute()` a pointlessly long series every cycle.
+WEATHER_LOOKAHEAD_HORIZON_HOURS = 12.0
+
+
+@dataclass(frozen=True)
+class ForecastRead:
+    """One cycle's read of the optional weather entity.
+
+    The scalars are the "now" values the steady-state wind and solar terms
+    have always used. The series are the hourly lookahead feed, and come from
+    the `hourly` forecast ONLY: the `daily` fallback below still backfills a
+    missing scalar, but a 24-hour-granularity series inside a 1-4 hour lead
+    would be actively misleading rather than merely coarse.
+    """
+
+    wind_speed_ms: float
+    wind_ok: bool
+    cloud_coverage_pct: float | None
+    cloud_ok: bool
+    outdoor_series: tuple[tuple[float, float], ...] | None = None
+    wind_series: tuple[tuple[float, float], ...] | None = None
+    solar_series: tuple[tuple[float, float], ...] | None = None
+
+
+def _forecast_offsets(
+    entries: list,
+    now: datetime,
+    field: str,
+    convert: Callable[[float], float],
+) -> tuple[tuple[float, float], ...] | None:
+    """One forecast field as sorted `(hours_from_now, value)` pairs, or None.
+
+    The same float-offset conversion `_price_forecast_offsets` does, for the
+    same reason: `heuristic.py` stays free of any datetime dependency. Entries
+    missing the field or carrying an unparseable `datetime` are skipped
+    individually rather than discarding the whole series — not every
+    integration fills every field on every hour.
+
+    Entries at or before `now` are KEPT: the first one is the reference the
+    pre-ramp differences against (see `heuristic._term_preramp_c` on why that
+    must be the forecast's own value and never the wall sensor's).
+    """
+    offsets: list[tuple[float, float]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        raw = entry.get(field)
+        when = entry.get("datetime")
+        if raw is None or when is None:
+            continue
+        if isinstance(when, str):
+            when = dt_util.parse_datetime(when)
+        if when is None:
+            continue
+        try:
+            value = convert(float(raw))
+        except (TypeError, ValueError):
+            continue
+        hours = (dt_util.as_local(when) - now).total_seconds() / 3600.0
+        if hours > WEATHER_LOOKAHEAD_HORIZON_HOURS:
+            continue
+        offsets.append((hours, value))
+    if not offsets:
+        return None
+    offsets.sort(key=lambda item: item[0])
+    return tuple(offsets)
 
 
 def _entry_value(entry: ConfigEntry, key: str, default):
@@ -273,6 +351,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # data logger — forecasts get revised, so realised prices are not a
         # substitute for what was known at decision time.
         self._last_price_forecast: tuple[tuple[float, float], ...] | None = None
+        self._last_outdoor_forecast: tuple[tuple[float, float], ...] | None = None
 
     # --- Configuration views -------------------------------------------------
 
@@ -369,6 +448,16 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         )
 
     @property
+    def lookahead_enabled(self) -> bool:
+        return bool(
+            _entry_value(
+                self.entry,
+                CONF_ENABLE_WEATHER_LOOKAHEAD,
+                DEFAULT_ENABLE_WEATHER_LOOKAHEAD,
+            )
+        )
+
+    @property
     def heating_type(self) -> str:
         return _entry_value(self.entry, CONF_HEATING_TYPE, DEFAULT_HEATING_TYPE)
 
@@ -387,10 +476,17 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
 
     @property
     def weather_needed(self) -> bool:
-        """Whether the optional weather entity is worth reading at all. Its only
-        consumers are the wind and solar terms, so with both off the per-cycle
-        forecast service calls are skipped entirely."""
-        return self.solar_input_enabled or self.wind_input_enabled
+        """Whether the optional weather entity is worth reading at all. Its
+        consumers are the wind and solar terms and the forecast lookahead, so
+        with all three off the per-cycle forecast service calls are skipped
+        entirely. The lookahead is a separate disjunct because its outdoor
+        pre-ramp needs the weather entity even with both steady-state weather
+        terms switched off — a real config combination."""
+        return (
+            self.solar_input_enabled
+            or self.wind_input_enabled
+            or self.lookahead_enabled
+        )
 
     @property
     def comfort_min_c(self) -> float:
@@ -410,6 +506,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             cold_caution=self.cold_caution,
             enable_solar_input=self.solar_input_enabled,
             enable_wind_input=self.wind_input_enabled,
+            enable_weather_lookahead=self.lookahead_enabled,
             spoof_per_indoor_c=SPOOF_PER_INDOOR_C,
         )
 
@@ -510,8 +607,8 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         unit = state.attributes.get("unit_of_measurement", UnitOfTemperature.CELSIUS)
         return TemperatureConverter.convert(value, unit, UnitOfTemperature.CELSIUS)
 
-    async def _read_forecast(self) -> tuple[float, bool, float | None, bool]:
-        """Return (wind_speed_ms, wind_ok, cloud_coverage_pct, cloud_ok).
+    async def _read_forecast(self) -> ForecastRead:
+        """Read the optional weather entity: scalars now, series for lookahead.
 
         Wind and cloud are tracked independently: not every weather integration
         provides both, and a missing wind value must not discard a perfectly
@@ -520,26 +617,35 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         enrichment only, since raw outdoor temperature comes from a dedicated
         sensor.
         """
+        empty = ForecastRead(0.0, False, None, False)
         if not self.weather_needed:
-            return 0.0, False, None, False
+            return empty
 
         weather_entity_id = _entry_value(self.entry, CONF_WEATHER_ENTITY, None)
         if not weather_entity_id:
             _LOGGER.debug("No weather entity configured; wind/solar terms contribute 0")
-            return 0.0, False, None, False
+            return empty
         weather_state = self.hass.states.get(weather_entity_id)
         if not _state_is_usable(weather_state):
             _LOGGER.warning(
                 "Weather entity %s is unavailable; continuing without wind/solar data",
                 weather_entity_id,
             )
-            return 0.0, False, None, False
+            return empty
 
         wind_speed_ms: float | None = None
         cloud_coverage_pct: float | None = None
+        hourly: list = []
+        # With both steady-state terms off, the only reason to be here is the
+        # lookahead — and that reads the hourly series alone, so the daily
+        # fallback (which exists purely to backfill a missing scalar) is a
+        # service call with nothing to do.
+        scalars_needed = self.wind_input_enabled or self.solar_input_enabled
 
         for forecast_type in ("hourly", "daily"):
             if wind_speed_ms is not None and cloud_coverage_pct is not None:
+                break
+            if forecast_type == "daily" and not scalars_needed:
                 break
             try:
                 response = await self.hass.services.async_call(
@@ -552,6 +658,8 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 forecast = response[weather_entity_id]["forecast"]
                 if not forecast:
                     continue
+                if forecast_type == "hourly":
+                    hourly = list(forecast)
                 first = forecast[0]
                 if wind_speed_ms is None:
                     raw_wind = first.get("wind_speed")
@@ -586,12 +694,82 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 "Could not retrieve a cloud/sun forecast for %s; assuming clear sky",
                 weather_entity_id,
             )
-        return (
-            wind_speed_ms if wind_ok else 0.0,
-            wind_ok,
-            cloud_coverage_pct,
-            cloud_ok,
+        outdoor_series, wind_series, solar_series = self._lookahead_series(
+            hourly, weather_state
         )
+        return ForecastRead(
+            wind_speed_ms=wind_speed_ms if wind_ok else 0.0,
+            wind_ok=wind_ok,
+            cloud_coverage_pct=cloud_coverage_pct,
+            cloud_ok=cloud_ok,
+            outdoor_series=outdoor_series,
+            wind_series=wind_series,
+            solar_series=solar_series,
+        )
+
+    def _lookahead_series(
+        self, hourly: list, weather_state: State
+    ) -> tuple[
+        tuple[tuple[float, float], ...] | None,
+        tuple[tuple[float, float], ...] | None,
+        tuple[tuple[float, float], ...] | None,
+    ]:
+        """The three `(hours_from_now, value)` series `compute()`'s pre-ramp
+        reads, or all-None when the lookahead is off or there is no hourly
+        forecast.
+
+        `get_forecasts` reports each field in the weather entity's OWN unit,
+        so temperature and wind get the same conversion the scalar reads
+        above already get. The solar series is the 0..1 output of
+        `solar_effect_of` evaluated at each future hour, computed here rather
+        than in `heuristic.py` so that module never has to know what a
+        datetime or a sun position is.
+        """
+        if not self.lookahead_enabled or not hourly:
+            return None, None, None
+        now = dt_util.now()
+        temp_unit = weather_state.attributes.get(
+            "temperature_unit", UnitOfTemperature.CELSIUS
+        )
+        wind_unit = weather_state.attributes.get(
+            "wind_speed_unit", UnitOfSpeed.METERS_PER_SECOND
+        )
+        outdoor_series = _forecast_offsets(
+            hourly,
+            now,
+            "temperature",
+            lambda v: TemperatureConverter.convert(
+                v, temp_unit, UnitOfTemperature.CELSIUS
+            ),
+        )
+        wind_series = _forecast_offsets(
+            hourly,
+            now,
+            "wind_speed",
+            lambda v: SpeedConverter.convert(
+                v, wind_unit, UnitOfSpeed.METERS_PER_SECOND
+            ),
+        )
+        cloud_series = _forecast_offsets(hourly, now, "cloud_coverage", float)
+        solar_series: tuple[tuple[float, float], ...] | None = None
+        if cloud_series:
+            try:
+                location, _ = get_astral_location(self.hass)
+                solar_series = tuple(
+                    (
+                        t_h,
+                        solar_effect_of(
+                            astral_elevation(
+                                location.observer, now + timedelta(hours=t_h)
+                            ),
+                            cloud,
+                        ),
+                    )
+                    for t_h, cloud in cloud_series
+                )
+            except Exception as err:  # noqa: BLE001 - soft-degrade on any failure
+                _LOGGER.debug("Could not project future sun elevation: %s", err)
+        return outdoor_series, wind_series, solar_series
 
     def _read_sun_elevation(self) -> float:
         sun_state = self.hass.states.get("sun.sun")
@@ -763,6 +941,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                     ),
                     is_active=self.is_active,
                     price_braking=bool(previous and previous.price_braking),
+                    weather_preramp=bool(previous and previous.weather_preramp_active),
                     rise_hours=self.lag_result.rise_hours,
                     estimated_solar_gain_c=estimated_solar_gain_c,
                 ),
@@ -849,7 +1028,11 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         )
         await self._async_ohmonwifi_relay_failsafe(sensor_ok=True)
         indoor_temp_c, indoor_ok = self._read_indoor_temp_c()
-        wind_speed_ms, wind_ok, cloud_coverage_pct, cloud_ok = await self._read_forecast()
+        forecast_read = await self._read_forecast()
+        wind_speed_ms = forecast_read.wind_speed_ms
+        wind_ok = forecast_read.wind_ok
+        cloud_coverage_pct = forecast_read.cloud_coverage_pct
+        cloud_ok = forecast_read.cloud_ok
         sun_elevation_deg = self._read_sun_elevation()
         current_price, price_ok = self._read_price()
         self._sync_source_issue(
@@ -878,6 +1061,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         )
         price_forecast = self._price_forecast_offsets()
         self._last_price_forecast = price_forecast
+        self._last_outdoor_forecast = forecast_read.outdoor_series
 
         # Price significance: a taper on braking/pre-charge authority for days
         # whose price swing is economically trivial — see
@@ -919,9 +1103,10 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # `_advance_learning` below recomputes it) — same one-cycle-stale
         # convention `_advance_learning`'s own docstring uses for the hard
         # limit and price braking, and immaterial against lags measured in
-        # hours. `comfort_min_c` is the single absolute floor everywhere else
-        # in this integration, so `holiday_target_c` is clamped to it here
-        # rather than inside holiday.py — see that module's docstring.
+        # hours. `holiday_target_c` is deliberately clamped to
+        # `HOLIDAY_TARGET_MIN_C`, NOT `comfort_min_c` — nobody is home during
+        # a holiday, so the setback is allowed to sag past the occupied-house
+        # comfort floor. See `HOLIDAY_TARGET_MIN_C`'s docstring in holiday.py.
         self.holiday_result = holiday_resolve(
             # holiday.py is stdlib-only and builds its own start/ramp/return
             # datetimes as naive local time (`datetime.combine(date,
@@ -935,7 +1120,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             start_date=self.holiday_start,
             end_date=self.holiday_end,
             normal_target_c=self.indoor_target_c,
-            holiday_target_c=max(self.holiday_target_c, self.comfort_min_c),
+            holiday_target_c=max(self.holiday_target_c, HOLIDAY_TARGET_MIN_C),
             rise_hours=self._lag_result().rise_hours,
         )
         self._effective_target_c = self.holiday_result.target_c
@@ -978,6 +1163,9 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 current_price=current_price,
                 price_data_available=price_ok,
                 price_forecast=price_forecast,
+                outdoor_forecast=forecast_read.outdoor_series,
+                wind_forecast_ms=forecast_read.wind_series,
+                solar_forecast=forecast_read.solar_series,
                 learned_offset_c=offset_c,
                 fall_minutes=lag.fall_minutes,
                 rise_minutes=lag.rise_minutes,
@@ -1254,6 +1442,11 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             "seasonal_reference_spread_c": result.seasonal_reference_spread_c,
             "price_braking": result.price_braking,
             "precharge_active": result.precharge_active,
+            "outdoor_preramp_c": result.outdoor_preramp_c,
+            "wind_preramp_c": result.wind_preramp_c,
+            "sun_preramp_c": result.sun_preramp_c,
+            "weather_preramp_c": result.weather_preramp_c,
+            "weather_preramp_active": result.weather_preramp_active,
             "heating_hard_limit_engaged": result.heating_hard_limit_engaged,
             "lead_minutes_effective": result.lead_minutes_effective,
         }
@@ -1312,6 +1505,16 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         if self._last_price_forecast is not None:
             record["price_forecast"] = [
                 [round(h, 3), p] for h, p in self._last_price_forecast
+            ]
+        # Forecasts get revised, so realised weather is not a substitute for
+        # what was known at decision time. Logged only while the pre-ramp is
+        # actually acting, though — the same low-cardinality rule
+        # `learner_freeze_reason` follows, since the full series on every row
+        # roughly doubles the record for something that only matters on the
+        # rows where it drove a decision.
+        if result.weather_preramp_active and self._last_outdoor_forecast is not None:
+            record["outdoor_forecast"] = [
+                [round(h, 3), round(t, 2)] for h, t in self._last_outdoor_forecast
             ]
         return record
 
