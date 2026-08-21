@@ -242,7 +242,7 @@
         "name": "Offset värmepump"
       },
       "indoor_climate_target_temperature": {
-        "name": "Klimatentitetens måltemperatur"
+        "name": "Inomhuslimatets måltemperatur"
       },
       "learned_offset": {
         "name": "Inlärd offset"

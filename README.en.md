@@ -6,6 +6,8 @@
 teaches it to guess right — so your home actually reaches the temperature you
 asked for.**
 
+Support on [Discord](https://discord.gg/6VmjrXA4h)
+
 ---
 
 ## The problem
@@ -188,7 +190,7 @@ currently active.
 
 The plain-language version above is the whole story for most people. If
 you're curious how the learning actually works under the hood, or you're a
-developer, see the [technical reference](docs/TECHNICAL.md).
+developer, see the [technical reference](docs/TECHNICAL.md). Built with Claude code.
 
 ---
 

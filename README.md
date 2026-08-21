@@ -5,6 +5,8 @@
 **Din värmepump styrs ofta av utomhustemperaturen vilket inte återspeglar behovet inne. TrueTemp lär den att
 välja rätt — så att huset faktiskt håller den temperatur du har bett om.**
 
+Support på [Discord](https://discord.gg/6VmjrXA4h)
+
 ---
 
 ## Problemet
@@ -44,7 +46,7 @@ skruva på.
 - 📊 **[Egen kontrollpanel](docs/card.png)** — ett färdigt kort som visar vad
   tillägget gör och varför.
 - 🔌 **Fungerar med de flesta värmepumpar** — allt som krävs är en pump som
-  läser av en utegivare, vilket nästan alla gör.
+  läser av en ute eller innegivare, vilket nästan alla gör.
 
 ---
 
@@ -194,7 +196,7 @@ plan (om någon) som är aktiv just nu.
 
 Texten ovan är hela historien för de allra flesta. Är du nyfiken på exakt hur
 inlärningen fungerar under huven, eller är du utvecklare, finns den
-[tekniska dokumentationen](docs/TECHNICAL.md) (på engelska).
+[tekniska dokumentationen](docs/TECHNICAL.md) (på engelska). Byggd med Claude code.
 
 ---
 
