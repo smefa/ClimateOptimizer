@@ -40,6 +40,7 @@ const TRANSLATION_KEYS = {
   active: "active",
   tier: "price_comfort_tier",
   caution: "cold_caution",
+  vacation: "vacation_status",
 };
 
 // Fallback for the rare case a registry entry lacks translation_key (e.g. a
@@ -53,6 +54,17 @@ const SUFFIXES = {
   active: "compensation_active",
   tier: "price_saving",
   caution: "cold_caution",
+  vacation: "vacation_status",
+};
+
+// Same six-state phase set as holiday.py's HolidayResult / the vacation-plans
+// card. "inactive" and "done" mean nothing is currently sagging the target,
+// so those two produce no note below.
+const VACATION_NOTE_KEYS = {
+  invalid: "noteVacationInvalid",
+  scheduled: "noteVacationScheduled",
+  setback: "noteVacationActive",
+  ramping: "noteVacationRamping",
 };
 
 // The sentinel the sensors publish for an attribute whose feature is switched
@@ -90,6 +102,53 @@ function fmt(template, vars) {
 }
 
 class TrueTempCard extends HTMLElement {
+  constructor() {
+    super();
+    // While the pointer is over the card, hold off rebuilding innerHTML (see
+    // the render-pause note in _render()) so a hover-tooltip timer started on
+    // a row/badge isn't reset out from under the user before it can fire.
+    this._hovering = false;
+    this.addEventListener("mouseenter", () => {
+      this._hovering = true;
+    });
+    this.addEventListener("mouseleave", () => {
+      this._hovering = false;
+      if (this._renderPending) {
+        this._renderPending = false;
+        this._render();
+      }
+    });
+
+    // Delegated rather than bound per-cell, since innerHTML gets torn down
+    // and rebuilt on every render (see _render()) — a listener attached to a
+    // cell itself would be gone by the next tick.
+    this.addEventListener("click", (ev) => {
+      const el = ev.target.closest("[data-entity]");
+      if (el) this._fireMoreInfo(el.dataset.entity);
+    });
+    this.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      const el = ev.target.closest("[data-entity]");
+      if (!el) return;
+      ev.preventDefault();
+      this._fireMoreInfo(el.dataset.entity);
+    });
+  }
+
+  // Opens HA's own more-info dialog (History tab included) for a cell backed
+  // by a real entity. Cells that are only attributes on `status`/`offset`
+  // have no entity to open — see the module docstring on why most of the
+  // card's numbers were deliberately never promoted to their own entity.
+  _fireMoreInfo(entityId) {
+    this.dispatchEvent(
+      new CustomEvent("hass-more-info", {
+        bubbles: true,
+        composed: true,
+        detail: { entityId },
+      }),
+    );
+  }
+
   setConfig(config) {
     if (!config || !config.entity) {
       throw new Error(STRINGS[pickLang(this._hass)].setEntityError);
@@ -182,6 +241,15 @@ class TrueTempCard extends HTMLElement {
     return text ? ` title="${this._esc(text)}"` : "";
   }
 
+  // Matches truetemp-vacation-card.js's own formatter, since a date/time
+  // shown here should read identically to the same value on that card.
+  _fmtDateTime(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  }
+
   _num(value, digits = 1, unit = "") {
     if (value === DISABLED) return DISABLED;
     const parsed = Number(value);
@@ -191,13 +259,22 @@ class TrueTempCard extends HTMLElement {
     return `${parsed.toFixed(digits)}${unit}`;
   }
 
+  // A pair may carry a 4th element: the entity_id whose current state this
+  // cell's value came from verbatim. Only pass one when that's actually
+  // true — see the call sites — since clicking must open history for the
+  // number the user is looking at, not a same-named entity showing something
+  // else right now.
   _cells(pairs, t) {
     return pairs
-      .map(([k, v, explanation]) => {
+      .map(([k, v, explanation, entityId]) => {
         const off = v === DISABLED ? " co-off" : "";
+        const clickable = entityId && this._state(entityId) ? " co-clickable" : "";
         const display = v === DISABLED ? t.badgeDisabled : v;
         const title = explanation ? this._tooltip(t, explanation) : "";
-        return `<div class="co-cell${off}"${title}><span>${this._esc(k)}</span><b>${this._esc(display)}</b></div>`;
+        const interactive = clickable
+          ? ` data-entity="${this._esc(entityId)}" role="button" tabindex="0"`
+          : "";
+        return `<div class="co-cell${off}${clickable}"${title}${interactive}><span>${this._esc(k)}</span><b>${this._esc(display)}</b></div>`;
       })
       .join("");
   }
@@ -292,11 +369,20 @@ class TrueTempCard extends HTMLElement {
 
     // hass.states is a single object HA replaces (and pushes to every card's
     // hass setter) on *any* entity changing anywhere, not just this zone's —
-    // so without this guard, this.innerHTML below gets torn down and rebuilt
-    // many times a minute. That's harmless for the numbers, but it destroys
-    // whatever element the mouse happens to be over, resetting the browser's
-    // hover-tooltip timer before it ever gets to fire — which is why the
-    // title="" tooltips added for card rows/terms never visibly appear.
+    // so without the guard below, this.innerHTML would get torn down and
+    // rebuilt many times a minute. That guard alone isn't enough though: the
+    // entities this card *does* watch (temperature, price tier, ...) still
+    // update often enough to blow away whatever element the mouse happens to
+    // be over mid-hover, resetting the browser's hover-tooltip timer before
+    // it ever gets to fire. So on top of the guard, the constructor's
+    // mouseenter/mouseleave listeners pause rendering entirely while the
+    // pointer is anywhere over the card — see the _hovering check below —
+    // and flush the latest state once the pointer leaves.
+    if (this._hovering) {
+      this._renderPending = true;
+      return;
+    }
+
     const watched = [
       this._entities.status,
       this._entities.compensated,
@@ -305,6 +391,7 @@ class TrueTempCard extends HTMLElement {
       this._entities.climate,
       this._entities.tier,
       this._entities.caution,
+      this._entities.vacation,
     ].map((id) => this._state(id));
     const lang = pickLang(this._hass);
     const configKey = JSON.stringify(this._config);
@@ -321,7 +408,7 @@ class TrueTempCard extends HTMLElement {
     this._lastConfigKey = configKey;
 
     const t = STRINGS[lang];
-    const [status, compensated, heatPumpOffset, offset, climate, tier, caution] = watched;
+    const [status, compensated, heatPumpOffset, offset, climate, tier, caution, vacation] = watched;
     const attrs = (status && status.attributes) || {};
     const offsetAttrs = (offset && offset.attributes) || {};
 
@@ -339,6 +426,12 @@ class TrueTempCard extends HTMLElement {
     // outdoor temperature (see climate.py) instead of the number compensation
     // would have chosen — so preview that number from the status sensor's
     // recommended_* attributes instead, labeled "Would publish".
+    // Clickable only while `active`: that's the one case where the number
+    // shown is the entity's own state verbatim. Inactive, the cell shows
+    // recommended_* from status's attributes instead (see comment above) —
+    // the real entity is reporting the raw fallback, a different number, so
+    // pointing history at it would show the wrong thing.
+    const publishEntity = active ? (offsetMode ? this._entities.heatPumpOffset : this._entities.compensated) : null;
     const rows = [
       [
         active
@@ -352,6 +445,7 @@ class TrueTempCard extends HTMLElement {
               ? this._num(attrs.recommended_heat_pump_offset, 0, " °C")
                     : this._num(attrs.recommended_compensated_outdoor_temp_c, 1, " °C")),
               "explainPublishing",
+              publishEntity,
       ],
                   [t.rowOutdoorNow, this._num(attrs.raw_outdoor_temp_c, 1, " °C"), "explainOutdoorNow"],
                   [t.rowIndoorNow, this._num(attrs.indoor_temp_c, 1, " °C"), "explainIndoorNow"],
@@ -384,7 +478,7 @@ class TrueTempCard extends HTMLElement {
     ];
 
     const learned = [
-      [t.learnedOffset, this._num(offset && offset.state, 2, " °C"), "explainLearnedOffset"],
+      [t.learnedOffset, this._num(offset && offset.state, 2, " °C"), "explainLearnedOffset", this._entities.offset],
       [t.outdoorBand, offsetAttrs.outdoor_band || "—", "explainOutdoorBand"],
       [t.respondsIn, this._num(attrs.response_time_min, 0, " min"), "explainRespondsIn"],
       [t.windsDownIn, this._num(attrs.wind_down_time_min, 0, " min"), "explainWindsDownIn"],
@@ -405,8 +499,8 @@ class TrueTempCard extends HTMLElement {
       [t.nextSpikeIn, this._num(attrs.upcoming_spike_in_min, 0, " min"), "explainNextSpikeIn"],
       [t.allowedSag, this._num(attrs.allowed_sag_c, 2, " °C"), "explainAllowedSag"],
       [t.coldBrake, this._num(attrs.cold_brake_factor, 2, "×"), "explainColdBrake"],
-      [t.savingLevel, (tier && tier.state) || "—", "explainSavingLevel"],
-      [t.coldCaution, (caution && caution.state) || "—", "explainColdCaution"],
+      [t.savingLevel, (tier && tier.state) || "—", "explainSavingLevel", this._entities.tier],
+      [t.coldCaution, (caution && caution.state) || "—", "explainColdCaution", this._entities.caution],
       [t.preBrakeLead, this._num(attrs.lead_minutes_effective, 0, " min"), "explainPreBrakeLead"],
     ];
 
@@ -426,6 +520,22 @@ class TrueTempCard extends HTMLElement {
     });
 
     const notes = [];
+    // Surfaced here so a target that looks unusually low is explained without
+    // needing to open the separate truetemp-vacation-card.js. "inactive" and
+    // "done" mean nothing is currently sagging the target, so those two phases
+    // add no note (see VACATION_NOTE_KEYS).
+    const vacationPhase = vacation ? vacation.state : null;
+    const vacationNoteKey = vacationPhase && VACATION_NOTE_KEYS[vacationPhase];
+    if (vacationNoteKey) {
+      const vacationAttrs = vacation.attributes || {};
+      const value =
+        vacationPhase === "invalid"
+          ? vacationAttrs.reason || ""
+          : vacationPhase === "scheduled"
+            ? this._fmtDateTime(vacationAttrs.start_at)
+            : this._fmtDateTime(vacationAttrs.return_at);
+      notes.push(fmt(t[vacationNoteKey], { value }));
+    }
     if (!active) {
       notes.push(offsetMode ? t.noteCompOffOffset : t.noteCompOffRaw);
     }
@@ -460,7 +570,7 @@ class TrueTempCard extends HTMLElement {
     this.innerHTML = `
       <ha-card header="${this._esc(title)}">
         <div class="co-body">
-          <div class="co-status co-${this._esc(statusKey)}"${this._tooltip(t, "explainStatus")}>
+          <div class="co-status co-${this._esc(statusKey)} co-clickable" data-entity="${this._esc(this._entities.status)}" role="button" tabindex="0"${this._tooltip(t, "explainStatus")}>
             <span class="co-dot"></span>
             <span>${this._esc(t["status" + statusKey.charAt(0).toUpperCase() + statusKey.slice(1)] || statusKey)}</span>
             ${active ? "" : `<span class="co-badge">${this._esc(t.badgeOff)}</span>`}
@@ -511,6 +621,10 @@ class TrueTempCard extends HTMLElement {
         .co-cell span { font-size:11px; color: var(--secondary-text-color); }
         .co-cell b { font-size:16px; font-weight:500; font-variant-numeric: tabular-nums; }
         .co-cell.co-off b { font-size:12px; font-style:italic; color: var(--disabled-text-color, #999); }
+        .co-clickable { cursor:pointer; }
+        .co-cell.co-clickable:hover, .co-cell.co-clickable:focus-visible { background: var(--divider-color); }
+        .co-status.co-clickable:hover, .co-status.co-clickable:focus-visible { text-decoration: underline; }
+        .co-clickable:focus-visible { outline: 2px solid var(--primary-color); outline-offset:1px; }
         .co-section { margin:18px 0 8px; font-size:11px; text-transform:uppercase; letter-spacing:.08em;
                       color: var(--secondary-text-color); }
         .co-bar-group { display:flex; flex-direction:column; gap:3px; }

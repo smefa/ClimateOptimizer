@@ -25,6 +25,8 @@ always stated — config describes the occupant, never the building.
 
 from __future__ import annotations
 
+import uuid
+from datetime import date, time
 from typing import Any
 
 import aiohttp
@@ -35,6 +37,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.data_entry_flow import section
 from homeassistant.helpers import selector
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONFIG_ENTRY_VERSION,
@@ -47,6 +50,7 @@ from .const import (
     CONF_HEAT_CURVE_OFFSET_ENTITY,
     CONF_HEAT_CURVE_OFFSET_INVERT,
     CONF_HEATING_TYPE,
+    CONF_INDOOR_CLIMATE_ENTITY,
     CONF_INDOOR_TARGET_TEMPERATURE,
     CONF_INDOOR_TEMP_SENSOR,
     CONF_NORDPOOL_PRICE_ENTITY,
@@ -55,6 +59,7 @@ from .const import (
     CONF_OUTPUT_MODE,
     CONF_OUTPUT_NUMBER_ENTITY,
     CONF_PRICE_SIGNIFICANCE_FLOOR,
+    CONF_VACATION_PLANS,
     CONF_WEATHER_ENTITY,
     DEFAULT_COMFORT_MIN_C,
     DEFAULT_ENABLE_DATA_LOGGING,
@@ -68,9 +73,20 @@ from .const import (
     DEFAULT_PRICE_SIGNIFICANCE_FLOOR,
     DOMAIN,
     OUTPUT_MODE_HEAT_CURVE_OFFSET,
+    OUTPUT_MODE_INDOOR_CLIMATE,
     OUTPUT_MODES,
 )
+from .holiday import HOLIDAY_TARGET_MIN_C
 from .lag import DEFAULT_HEATING_TYPE, HEATING_TYPES
+from .vacation import (
+    RECURRENCE_ONCE,
+    RECURRENCE_WEEKLY,
+    RECURRENCE_YEARLY,
+    VacationPlan,
+    deserialize_plans,
+    find_overlap,
+    serialize_plans,
+)
 
 # UI-only grouping for the two outdoor-spoofing targets on the "output_spoof"
 # page, so each gets its own header. The entry's stored options stay flat, so
@@ -217,9 +233,18 @@ class TrueTempOptionsFlow(config_entries.OptionsFlow):
     """
 
     # Set by `async_step_output` before it hands off to whichever mode-specific
-    # page follows (`async_step_output_spoof` or `async_step_output_curve`),
-    # which merge it back in on save. Not persisted mid-flow anywhere else.
+    # page follows (`async_step_output_spoof`, `async_step_output_curve` or
+    # `async_step_output_indoor_climate`), which merge it back in on save. Not
+    # persisted mid-flow anywhere else.
     _output_common: dict[str, Any]
+
+    # Set by `async_step_vacation_add`/`async_step_vacation_edit_fields` before
+    # handing off to whichever recurrence-specific page follows, mirroring
+    # `_output_common` above. `_vacation_editing_id` is `None` while adding a
+    # new plan, or the id of the plan being replaced while editing one — see
+    # `_save_vacation_plan`.
+    _vacation_common: dict[str, Any]
+    _vacation_editing_id: str | None = None
 
     def _current(self) -> dict[str, Any]:
         """Stored options layered over setup data — what each page shows."""
@@ -232,7 +257,8 @@ class TrueTempOptionsFlow(config_entries.OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> config_entries.ConfigFlowResult:
         return self.async_show_menu(
-            step_id="init", menu_options=["settings", "sources", "price", "output"]
+            step_id="init",
+            menu_options=["settings", "sources", "price", "output", "vacation"],
         )
 
     # --- Page: the building's own sensors and logging -----------------------
@@ -474,6 +500,8 @@ class TrueTempOptionsFlow(config_entries.OptionsFlow):
             self._output_common = dict(user_input)
             if self._output_common[CONF_OUTPUT_MODE] == OUTPUT_MODE_HEAT_CURVE_OFFSET:
                 return await self.async_step_output_curve()
+            if self._output_common[CONF_OUTPUT_MODE] == OUTPUT_MODE_INDOOR_CLIMATE:
+                return await self.async_step_output_indoor_climate()
             return await self.async_step_output_spoof()
 
         return self.async_show_form(
@@ -608,6 +636,425 @@ class TrueTempOptionsFlow(config_entries.OptionsFlow):
                             DEFAULT_HEAT_CURVE_OFFSET_INVERT,
                         ),
                     ): selector.BooleanSelector(),
+                }
+            ),
+        )
+
+    async def async_step_output_indoor_climate(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        current = self._current()
+
+        if user_input is not None:
+            return self._save({**self._output_common, **user_input})
+
+        return self.async_show_form(
+            step_id="output_indoor_climate",
+            data_schema=vol.Schema(
+                {
+                    # `vol.Any(None, ...)` — see the OhmOnWifi host field in
+                    # `async_step_output_spoof`, same reason.
+                    vol.Optional(
+                        CONF_INDOOR_CLIMATE_ENTITY,
+                        default=current.get(CONF_INDOOR_CLIMATE_ENTITY),
+                    ): vol.Any(
+                        None,
+                        selector.EntitySelector(
+                            selector.EntitySelectorConfig(domain="climate")
+                        ),
+                    ),
+                }
+            ),
+        )
+
+    # --- Pages: vacation plans -----------------------------------------------
+    #
+    # A hand-rolled list-of-records CRUD, not a single page: HA's options flow
+    # has no native list editor, and config-entry subentries (the newer native
+    # per-item config UI) are off the table for this integration's HA version
+    # floor — see docs/plan_vacation_plans.md §7. Each action below is a short
+    # sub-flow that saves and closes, same "no back button" model the other
+    # options pages above already use.
+    #
+    # Selector option labels (weekdays, up/down) are supplied inline, not via
+    # `translation_key` — HA has no translation mechanism for selector options
+    # defined ad hoc in a flow schema (unlike the fixed `selector.*.options`
+    # keys used elsewhere in this file).
+
+    _WEEKDAY_LABELS = (
+        "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+    )
+
+    def _current_plans(self) -> list[VacationPlan]:
+        return deserialize_plans(self.config_entry.options.get(CONF_VACATION_PLANS, []))
+
+    def _editing_plan(self) -> VacationPlan | None:
+        if self._vacation_editing_id is None:
+            return None
+        for plan in self._current_plans():
+            if plan.id == self._vacation_editing_id:
+                return plan
+        return None
+
+    def _save_vacation_plan(self, plan: VacationPlan) -> config_entries.ConfigFlowResult:
+        plans = [p for p in self._current_plans() if p.id != plan.id]
+        plans.append(plan)
+        return self._save({CONF_VACATION_PLANS: serialize_plans(plans)})
+
+    def _plan_overlaps_another(self, plan: VacationPlan) -> bool:
+        """Whether saving `plan` (replacing any existing plan with the same
+        id) would leave an enabled plan overlapping another — refused, not
+        just warned, at save time (open question answer, §9)."""
+        plans = [p for p in self._current_plans() if p.id != plan.id]
+        plans.append(plan)
+        return find_overlap(plans, dt_util.now().replace(tzinfo=None)) is not None
+
+    def _weekday_options(self) -> list[selector.SelectOptionDict]:
+        return [
+            selector.SelectOptionDict(value=str(i), label=label)
+            for i, label in enumerate(self._WEEKDAY_LABELS)
+        ]
+
+    async def async_step_vacation(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        plans = self._current_plans()
+        menu_options = ["vacation_add"]
+        if plans:
+            menu_options += ["vacation_edit", "vacation_remove"]
+        if len(plans) > 1:
+            menu_options.append("vacation_reorder")
+        return self.async_show_menu(step_id="vacation", menu_options=menu_options)
+
+    # --- Common fields, shared by add and edit -------------------------------
+
+    def _vacation_common_schema(self, defaults: dict[str, Any]) -> vol.Schema:
+        return vol.Schema(
+            {
+                vol.Required("name", default=defaults.get("name", "")): str,
+                vol.Required(
+                    "enabled", default=defaults.get("enabled", True)
+                ): selector.BooleanSelector(),
+                vol.Required(
+                    "recurrence", default=defaults.get("recurrence", RECURRENCE_ONCE)
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(value=RECURRENCE_ONCE, label="Once"),
+                            selector.SelectOptionDict(value=RECURRENCE_WEEKLY, label="Weekly"),
+                            selector.SelectOptionDict(value=RECURRENCE_YEARLY, label="Yearly"),
+                        ],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(
+                    "min_temp_c", default=defaults.get("min_temp_c", 15.0)
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=HOLIDAY_TARGET_MIN_C,
+                        max=30,
+                        step=0.5,
+                        unit_of_measurement="°C",
+                        mode="box",
+                    )
+                ),
+            }
+        )
+
+    async def async_step_vacation_add(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        self._vacation_editing_id = None
+        if user_input is not None:
+            self._vacation_common = user_input
+            return await self._async_step_vacation_recurrence_fields()
+        return self.async_show_form(
+            step_id="vacation_add", data_schema=self._vacation_common_schema({})
+        )
+
+    async def async_step_vacation_edit(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        plans = self._current_plans()
+        if user_input is not None:
+            self._vacation_editing_id = user_input["plan_id"]
+            return await self.async_step_vacation_edit_fields()
+        return self.async_show_form(
+            step_id="vacation_edit",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("plan_id"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(value=plan.id, label=plan.name)
+                                for plan in plans
+                            ],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_vacation_edit_fields(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        existing = self._editing_plan()
+        if user_input is not None:
+            self._vacation_common = user_input
+            return await self._async_step_vacation_recurrence_fields()
+        defaults = (
+            {
+                "name": existing.name,
+                "enabled": existing.enabled,
+                "recurrence": existing.recurrence,
+                "min_temp_c": existing.min_temp_c,
+            }
+            if existing is not None
+            else {}
+        )
+        return self.async_show_form(
+            step_id="vacation_edit_fields", data_schema=self._vacation_common_schema(defaults)
+        )
+
+    async def _async_step_vacation_recurrence_fields(
+        self,
+    ) -> config_entries.ConfigFlowResult:
+        recurrence = self._vacation_common["recurrence"]
+        if recurrence == RECURRENCE_WEEKLY:
+            return await self.async_step_vacation_weekly()
+        if recurrence == RECURRENCE_YEARLY:
+            return await self.async_step_vacation_yearly()
+        return await self.async_step_vacation_once()
+
+    # --- Recurrence-specific fields, shared by add and edit ------------------
+
+    async def async_step_vacation_once(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        existing = self._editing_plan()
+        errors: dict[str, str] = {}
+        defaults: dict[str, Any] = {
+            "start_date": existing.start_date.isoformat() if existing and existing.start_date else None,
+            "end_date": existing.end_date.isoformat() if existing and existing.end_date else None,
+        }
+
+        if user_input is not None:
+            defaults = user_input
+            start_date = date.fromisoformat(user_input["start_date"])
+            end_date = date.fromisoformat(user_input["end_date"])
+            if end_date <= start_date:
+                errors["base"] = "vacation_window_invalid"
+            else:
+                plan = VacationPlan(
+                    id=self._vacation_editing_id or str(uuid.uuid4()),
+                    name=self._vacation_common["name"],
+                    enabled=self._vacation_common["enabled"],
+                    recurrence=RECURRENCE_ONCE,
+                    min_temp_c=self._vacation_common["min_temp_c"],
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+                if self._plan_overlaps_another(plan):
+                    errors["base"] = "vacation_overlap"
+                else:
+                    return self._save_vacation_plan(plan)
+
+        return self.async_show_form(
+            step_id="vacation_once",
+            errors=errors,
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        "start_date",
+                        default=defaults.get("start_date"),
+                    ): selector.DateSelector(),
+                    vol.Required(
+                        "end_date",
+                        default=defaults.get("end_date"),
+                    ): selector.DateSelector(),
+                }
+            ),
+        )
+
+    async def async_step_vacation_weekly(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        existing = self._editing_plan()
+        errors: dict[str, str] = {}
+
+        def _weekday_default(value: int | None) -> str | None:
+            return str(value) if value is not None else None
+
+        def _time_default(value: time | None) -> str | None:
+            return value.isoformat() if value is not None else None
+
+        defaults: dict[str, Any] = {
+            "start_weekday": _weekday_default(existing.start_weekday if existing else None),
+            "start_time": _time_default(existing.start_time if existing else None),
+            "stop_weekday": _weekday_default(existing.stop_weekday if existing else None),
+            "stop_time": _time_default(existing.stop_time if existing else None),
+        }
+
+        if user_input is not None:
+            defaults = user_input
+            plan = VacationPlan(
+                id=self._vacation_editing_id or str(uuid.uuid4()),
+                name=self._vacation_common["name"],
+                enabled=self._vacation_common["enabled"],
+                recurrence=RECURRENCE_WEEKLY,
+                min_temp_c=self._vacation_common["min_temp_c"],
+                start_weekday=int(user_input["start_weekday"]),
+                start_time=time.fromisoformat(user_input["start_time"]),
+                stop_weekday=int(user_input["stop_weekday"]),
+                stop_time=time.fromisoformat(user_input["stop_time"]),
+            )
+            if self._plan_overlaps_another(plan):
+                errors["base"] = "vacation_overlap"
+            else:
+                return self._save_vacation_plan(plan)
+
+        weekday_options = self._weekday_options()
+        return self.async_show_form(
+            step_id="vacation_weekly",
+            errors=errors,
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        "start_weekday", default=defaults.get("start_weekday")
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=weekday_options, mode=selector.SelectSelectorMode.DROPDOWN
+                        )
+                    ),
+                    vol.Required(
+                        "start_time", default=defaults.get("start_time")
+                    ): selector.TimeSelector(),
+                    vol.Required(
+                        "stop_weekday", default=defaults.get("stop_weekday")
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=weekday_options, mode=selector.SelectSelectorMode.DROPDOWN
+                        )
+                    ),
+                    vol.Required(
+                        "stop_time", default=defaults.get("stop_time")
+                    ): selector.TimeSelector(),
+                }
+            ),
+        )
+
+    async def async_step_vacation_yearly(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        existing = self._editing_plan()
+        errors: dict[str, str] = {}
+        defaults: dict[str, Any] = {
+            "start_month": existing.start_month if existing else None,
+            "start_day": existing.start_day if existing else None,
+            "end_month": existing.end_month if existing else None,
+            "end_day": existing.end_day if existing else None,
+        }
+
+        if user_input is not None:
+            defaults = user_input
+            plan = VacationPlan(
+                id=self._vacation_editing_id or str(uuid.uuid4()),
+                name=self._vacation_common["name"],
+                enabled=self._vacation_common["enabled"],
+                recurrence=RECURRENCE_YEARLY,
+                min_temp_c=self._vacation_common["min_temp_c"],
+                start_month=int(user_input["start_month"]),
+                start_day=int(user_input["start_day"]),
+                end_month=int(user_input["end_month"]),
+                end_day=int(user_input["end_day"]),
+            )
+            if self._plan_overlaps_another(plan):
+                errors["base"] = "vacation_overlap"
+            else:
+                return self._save_vacation_plan(plan)
+
+        month_selector = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=1, max=12, step=1, mode="box")
+        )
+        day_selector = selector.NumberSelector(
+            selector.NumberSelectorConfig(min=1, max=31, step=1, mode="box")
+        )
+        return self.async_show_form(
+            step_id="vacation_yearly",
+            errors=errors,
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        "start_month", default=defaults.get("start_month")
+                    ): month_selector,
+                    vol.Required("start_day", default=defaults.get("start_day")): day_selector,
+                    vol.Required("end_month", default=defaults.get("end_month")): month_selector,
+                    vol.Required("end_day", default=defaults.get("end_day")): day_selector,
+                }
+            ),
+        )
+
+    # --- Remove / reorder ----------------------------------------------------
+
+    async def async_step_vacation_remove(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        plans = self._current_plans()
+        if user_input is not None:
+            remaining = [p for p in plans if p.id != user_input["plan_id"]]
+            return self._save({CONF_VACATION_PLANS: serialize_plans(remaining)})
+        return self.async_show_form(
+            step_id="vacation_remove",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("plan_id"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(value=plan.id, label=plan.name)
+                                for plan in plans
+                            ],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                }
+            ),
+        )
+
+    async def async_step_vacation_reorder(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        plans = self._current_plans()
+        if user_input is not None:
+            plan_id = user_input["plan_id"]
+            index = next((i for i, p in enumerate(plans) if p.id == plan_id), None)
+            if index is not None:
+                swap_with = index - 1 if user_input["direction"] == "up" else index + 1
+                if 0 <= swap_with < len(plans):
+                    plans[index], plans[swap_with] = plans[swap_with], plans[index]
+            return self._save({CONF_VACATION_PLANS: serialize_plans(plans)})
+        return self.async_show_form(
+            step_id="vacation_reorder",
+            data_schema=vol.Schema(
+                {
+                    vol.Required("plan_id"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(value=plan.id, label=plan.name)
+                                for plan in plans
+                            ],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    vol.Required("direction", default="up"): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=[
+                                selector.SelectOptionDict(value="up", label="Move up"),
+                                selector.SelectOptionDict(value="down", label="Move down"),
+                            ],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
                 }
             ),
         )

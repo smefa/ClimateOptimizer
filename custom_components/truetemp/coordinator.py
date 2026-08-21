@@ -26,12 +26,13 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import aiohttp
 from astral.sun import elevation as astral_elevation
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
+    ATTR_TEMPERATURE,
     STATE_UNAVAILABLE,
     STATE_UNKNOWN,
     UnitOfSpeed,
@@ -56,6 +57,7 @@ from .const import (
     CONF_HEAT_CURVE_OFFSET_ENTITY,
     CONF_HEAT_CURVE_OFFSET_INVERT,
     CONF_HEATING_TYPE,
+    CONF_INDOOR_CLIMATE_ENTITY,
     CONF_INDOOR_TARGET_TEMPERATURE,
     CONF_INDOOR_TEMP_SENSOR,
     CONF_NORDPOOL_PRICE_ENTITY,
@@ -64,6 +66,7 @@ from .const import (
     CONF_OUTPUT_MODE,
     CONF_OUTPUT_NUMBER_ENTITY,
     CONF_PRICE_SIGNIFICANCE_FLOOR,
+    CONF_VACATION_PLANS,
     CONF_WEATHER_ENTITY,
     DEFAULT_COMFORT_MIN_C,
     DEFAULT_ENABLE_DATA_LOGGING,
@@ -78,6 +81,7 @@ from .const import (
     DOMAIN,
     LEARNER_STEP_SECONDS,
     OUTPUT_MODE_HEAT_CURVE_OFFSET,
+    OUTPUT_MODE_INDOOR_CLIMATE,
     OUTPUT_MODE_OUTDOOR_SPOOF,
     STARTUP_GRACE_PERIOD_MINUTES,
     UPDATE_INTERVAL_MINUTES,
@@ -94,6 +98,7 @@ from .heuristic import (
     compute,
     heat_curve_offset_c,
     heating_hard_limit_offset_c,
+    indoor_climate_offset_c,
     initial_price_spread_history,
     price_significance,
     resolve_heating_hard_limit_engaged,
@@ -101,13 +106,7 @@ from .heuristic import (
     today_price_spread_and_median_c,
     update_price_spread_history,
 )
-from .holiday import (
-    DEFAULT_HOLIDAY_TARGET_C,
-    HOLIDAY_PHASE_DONE,
-    HOLIDAY_TARGET_MIN_C,
-    HolidayResult,
-    resolve as holiday_resolve,
-)
+from .holiday import HolidayResult
 from .lag import (
     DEFAULT_HEATING_TYPE,
     LagResult,
@@ -133,6 +132,7 @@ from .learner_store import (
     serialize as learner_serialize,
     store_key as learner_store_key,
 )
+from .vacation import VacationPlan, deserialize_plans, resolve_vacation
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -307,6 +307,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         self._last_ohmonwifi_value_c: float | None = None
         self._last_output_number_value_c: float | None = None
         self._last_heat_curve_offset_value_c: int | None = None
+        self._last_indoor_climate_value_c: float | None = None
         # Whether this integration switched the OhmOnWifi device's relay to
         # bypass because the outdoor sensor it spoofs from went unavailable —
         # see `_async_ohmonwifi_relay_failsafe`. Tracked so recovery only
@@ -330,21 +331,27 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         self.price_comfort_tier: str = PRICE_TIER_MID
         self.cold_caution: str = COLD_CAUTION_MID
 
-        # Holiday setback: same "live, restorable, never a config option"
-        # category as the fields above — nudged by hand per trip, restored by
-        # date.py/number.py/switch.py's own RestoreEntity. See holiday.py for
-        # the phase logic these feed; `holiday_result`/`_effective_target_c`
-        # are recomputed every cycle in `_async_update_data`, not restored.
-        self.holiday_armed: bool = False
-        self.holiday_start: date | None = None
-        self.holiday_end: date | None = None
-        self.holiday_target_c: float = DEFAULT_HOLIDAY_TARGET_C
-        self.holiday_result: HolidayResult | None = None
+        # Vacation mode master switch: same "live, restorable, never a config
+        # option" category as the fields above — a hand-flipped kill switch,
+        # restored by switch.py's own RestoreEntity, independent of each
+        # plan's own `enabled` flag. The plan list itself is a config option
+        # (see `vacation_plans` below, edited via the options-flow CRUD in
+        # config_flow.py) since it is authored once and edited rarely, not
+        # nudged per trip the way the old single holiday scenario's dates
+        # were. `vacation_result`/`active_plan_id`/`_effective_target_c` are
+        # recomputed every cycle in `_async_update_data`, not restored.
+        # Defaults on (unlike the old HolidayModeSwitch, which defaulted
+        # off) — per §Phase 4 of docs/plan_vacation_plans.md: with no plans
+        # configured yet, an armed-but-empty switch is a no-op, so there is
+        # no cost to starting armed and no need for a first-run flip.
+        self.vacation_armed: bool = True
+        self.vacation_result: HolidayResult | None = None
+        self.active_plan_id: str | None = None
         # What `indoor_target_c` currently feeds actually feeds THIS instead,
         # everywhere learning/price/output need "the target right now" — see
         # the three call sites this replaces, below. Equal to
-        # `indoor_target_c` whenever no holiday is sagging the house, so this
-        # is a no-op when the feature is unused.
+        # `indoor_target_c` whenever no vacation plan is sagging the house,
+        # so this is a no-op when the feature is unused.
         self._effective_target_c: float = self.indoor_target_c
 
         # The exact price forecast this cycle's decision used, stashed for the
@@ -408,6 +415,10 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
     @property
     def heat_curve_offset_entity_id(self) -> str | None:
         return _entry_value(self.entry, CONF_HEAT_CURVE_OFFSET_ENTITY, None) or None
+
+    @property
+    def indoor_climate_entity_id(self) -> str | None:
+        return _entry_value(self.entry, CONF_INDOOR_CLIMATE_ENTITY, None) or None
 
     @property
     def heat_curve_offset_invert(self) -> bool:
@@ -495,6 +506,15 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         inlined in `_params()`) because `number.py`'s holiday-target entity
         binds its `native_min_value` to this same live value."""
         return float(_entry_value(self.entry, CONF_COMFORT_MIN_C, DEFAULT_COMFORT_MIN_C))
+
+    @property
+    def vacation_plans(self) -> list[VacationPlan]:
+        """The user-authored plan list, read fresh from `entry.options` every
+        cycle — same live-config-option pattern as `output_mode`/
+        `comfort_min_c` above, not cached, since an options-flow save reloads
+        the config entry anyway. `deserialize_plans` never raises and drops
+        any individually corrupt plan rather than the whole list."""
+        return deserialize_plans(_entry_value(self.entry, CONF_VACATION_PLANS, []))
 
     def _params(self) -> HeuristicParams:
         """This cycle's occupant preferences. No control gains live here."""
@@ -1097,37 +1117,41 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 self.price_significance_floor_c,
             )
 
-        # Holiday setback: resolve this cycle's phase/target before anything
+        # Vacation setback: resolve this cycle's phase/target before anything
         # below reads `_effective_target_c`. `rise_hours` comes from the
         # PREVIOUS cycle's lag estimate (via `_lag_result()`, cached until
         # `_advance_learning` below recomputes it) — same one-cycle-stale
         # convention `_advance_learning`'s own docstring uses for the hard
         # limit and price braking, and immaterial against lags measured in
-        # hours. `holiday_target_c` is deliberately clamped to
-        # `HOLIDAY_TARGET_MIN_C`, NOT `comfort_min_c` — nobody is home during
-        # a holiday, so the setback is allowed to sag past the occupied-house
-        # comfort floor. See `HOLIDAY_TARGET_MIN_C`'s docstring in holiday.py.
-        self.holiday_result = holiday_resolve(
-            # holiday.py is stdlib-only and builds its own start/ramp/return
-            # datetimes as naive local time (`datetime.combine(date,
-            # time)`), matching the `date` entities' own naive semantics —
-            # see that module's docstring. `dt_util.now()` is timezone-aware,
-            # which raises `TypeError` when compared against a naive
-            # datetime, so the tzinfo is stripped here to hand `resolve()`
-            # the naive local wall-clock time it actually expects.
+        # hours. Each plan's own `min_temp_c` is clamped to
+        # `HOLIDAY_TARGET_MIN_C` inside `resolve_plan()`, NOT `comfort_min_c`
+        # — nobody is home during a vacation, so the setback is allowed to
+        # sag past the occupied-house comfort floor. See
+        # `HOLIDAY_TARGET_MIN_C`'s docstring in holiday.py.
+        #
+        # No per-plan "done" auto-disarm here: unlike the old single scenario,
+        # `vacation_armed` is a persistent master kill switch shared by every
+        # plan (§3 of docs/plan_vacation_plans.md) — one `once` plan finishing
+        # must not silently disable plans still scheduled. A finished `once`
+        # plan simply stops matching (`occurrence_window` keeps returning its
+        # same past window, so `resolve_plan` reports `done` for it forever);
+        # `weekly`/`yearly` plans roll over to their next occurrence on their
+        # own, never reaching `done`.
+        self.vacation_result, self.active_plan_id = resolve_vacation(
+            # holiday.py/vacation.py are stdlib-only and build their own
+            # start/ramp/return datetimes as naive local time
+            # (`datetime.combine(date, time)`) — see those modules'
+            # docstrings. `dt_util.now()` is timezone-aware, which raises
+            # `TypeError` when compared against a naive datetime, so the
+            # tzinfo is stripped here to hand `resolve_vacation()` the naive
+            # local wall-clock time it actually expects.
             now=dt_util.now().replace(tzinfo=None),
-            armed=self.holiday_armed,
-            start_date=self.holiday_start,
-            end_date=self.holiday_end,
+            master_armed=self.vacation_armed,
+            plans=self.vacation_plans,
             normal_target_c=self.indoor_target_c,
-            holiday_target_c=max(self.holiday_target_c, HOLIDAY_TARGET_MIN_C),
             rise_hours=self._lag_result().rise_hours,
         )
-        self._effective_target_c = self.holiday_result.target_c
-        if self.holiday_result.phase == HOLIDAY_PHASE_DONE:
-            # One-shot, like a completed schedule: the switch/dates don't
-            # need manual reset before the next trip.
-            self.holiday_armed = False
+        self._effective_target_c = self.vacation_result.target_c
 
         # Learning advances on its own clock; republishing happens every time.
         self._learner_stepped = self._due_for_learner_step() and self._advance_learning(
@@ -1195,15 +1219,20 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         mode uses.
 
         The two outdoor-spoofing channels are independent, not alternatives —
-        set one, both or neither. The heat-curve-offset channel is a genuine
-        alternative to both of them (it writes a delta to a different pump
-        parameter, not a faked outdoor reading), so it is gated by
-        `output_mode` rather than by whether its own entity is configured:
-        leaving stale values in the other section's fields must never cause a
-        double push to the same pump.
+        set one, both or neither. The heat-curve-offset and indoor-climate
+        channels are each a genuine alternative to outdoor spoofing and to
+        one another (one writes a delta to a different pump parameter, the
+        other a target temperature to a different entity type, neither a
+        faked outdoor reading), so both are gated by `output_mode` rather
+        than by whether their own entity is configured: leaving stale values
+        in another section's fields must never cause a double push to the
+        same pump.
         """
         if self.output_mode == OUTPUT_MODE_HEAT_CURVE_OFFSET:
             await self._async_push_heat_curve_offset(result)
+            return
+        if self.output_mode == OUTPUT_MODE_INDOOR_CLIMATE:
+            await self._async_push_indoor_climate(result)
             return
 
         host = self.ohmonwifi_host
@@ -1262,6 +1291,47 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 blocking=True,
             )
             self._last_heat_curve_offset_value_c = value
+        except Exception as err:  # noqa: BLE001 - best-effort, never break output
+            _LOGGER.warning("Could not push to %s (ignored): %s", entity_id, err)
+
+    async def _async_push_indoor_climate(self, result: HeuristicResult) -> None:
+        """Push a target temperature to a room-sensor climate entity instead
+        of a faked outdoor reading or a native curve-offset dial, for pumps
+        (or TRVs) that expose one. Zero delta while compensation is off — the
+        same "preview without touching the pump" semantics the other two
+        output modes get, so the entity simply sits at the occupant's own
+        target.
+        """
+        entity_id = self.indoor_climate_entity_id
+        if not entity_id:
+            return
+        if not self.is_active:
+            extra_c = 0.0
+        elif result.heating_hard_limit_engaged:
+            # Same reason `_async_push_heat_curve_offset` special-cases this:
+            # raw keeps drifting with ordinary weather noise while the hard
+            # limit holds and `compensated_outdoor_temp_c` is pinned to a
+            # fixed ceiling during it, so deriving live from raw would flap.
+            extra_c = heating_hard_limit_offset_c(invert=False)
+        else:
+            extra_c = indoor_climate_offset_c(
+                result.compensated_outdoor_temp_c, result.raw_outdoor_temp_c
+            )
+        value = result.effective_indoor_target_c + extra_c
+        if (
+            self._last_indoor_climate_value_c is not None
+            and abs(value - self._last_indoor_climate_value_c)
+            < OUTPUT_WRITE_TOLERANCE_C
+        ):
+            return
+        try:
+            await self.hass.services.async_call(
+                "climate",
+                "set_temperature",
+                {"entity_id": entity_id, ATTR_TEMPERATURE: value},
+                blocking=True,
+            )
+            self._last_indoor_climate_value_c = value
         except Exception as err:  # noqa: BLE001 - best-effort, never break output
             _LOGGER.warning("Could not push to %s (ignored): %s", entity_id, err)
 
@@ -1427,8 +1497,9 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             "effective_target_c": result.effective_indoor_target_c,
             "price_comfort_tier": result.price_comfort_tier,
             "cold_caution": result.cold_caution,
-            "holiday_armed": self.holiday_armed,
-            "holiday_phase": self.holiday_result.phase if self.holiday_result else None,
+            "vacation_armed": self.vacation_armed,
+            "vacation_phase": self.vacation_result.phase if self.vacation_result else None,
+            "active_plan_id": self.active_plan_id,
             # --- composed output ---
             "compensated_outdoor_temp_c": result.compensated_outdoor_temp_c,
             "learned_offset_c": result.learned_offset_c,

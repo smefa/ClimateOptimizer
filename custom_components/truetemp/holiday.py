@@ -145,6 +145,12 @@ def resolve(
     reason wants a setback deeper than shallow, all degrade to a safe phase
     (`inactive`/`invalid`) with `target_c = normal_target_c` rather than
     surfacing an exception into the update loop.
+
+    Validates `armed`/dates, then builds `start_at`/`return_at` from the
+    dates and delegates everything else (the ramp/phase state machine) to
+    `resolve_window()`, which is also what the multi-plan `vacation.py`
+    resolver calls directly with its own occurrence-derived `start_at`/
+    `return_at`.
     """
     if not armed:
         return _inactive(normal_target_c, HOLIDAY_PHASE_INACTIVE, "Holiday mode not armed")
@@ -162,6 +168,34 @@ def resolve(
     start_at = datetime.combine(start_date, time.min)
     return_at = datetime.combine(end_date, HOLIDAY_RETURN_TIME)
 
+    return resolve_window(
+        now=now,
+        start_at=start_at,
+        return_at=return_at,
+        normal_target_c=normal_target_c,
+        holiday_target_c=holiday_target_c,
+        rise_hours=rise_hours,
+    )
+
+
+def resolve_window(
+    now: datetime,
+    start_at: datetime,
+    return_at: datetime,
+    normal_target_c: float,
+    holiday_target_c: float,
+    rise_hours: float,
+) -> HolidayResult:
+    """Resolve the phase/ramp state machine for one concrete `[start_at,
+    return_at)` window.
+
+    This is `resolve()`'s engine with the window handed in directly instead
+    of being built from `start_date`/`end_date`/`HOLIDAY_RETURN_TIME` — the
+    same math, generalised so a caller with its own way of picking a window
+    (e.g. `vacation.py`'s recurrence-driven occurrence picking) can reuse it
+    without going through date-only args. `now`/`start_at`/`return_at` must
+    all be naive local datetimes, same contract as `resolve()`. Never raises.
+    """
     delta_c = normal_target_c - holiday_target_c
     if delta_c <= 0.0:
         hours_needed = MIN_RAMP_HOURS
@@ -185,7 +219,7 @@ def resolve(
             return_at=return_at,
             hours_needed=hours_needed,
             on_track=on_track,
-            reason=f"Holiday scheduled from {start_date} to {end_date}",
+            reason=f"Holiday scheduled from {start_at:%Y-%m-%d %H:%M} to {return_at:%Y-%m-%d %H:%M}",
         )
     if now < ramp_start_at:
         return HolidayResult(

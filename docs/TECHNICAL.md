@@ -260,9 +260,100 @@ first, heat is banked one response time before it — because heat has to have
 
 ---
 
+## Vacation plans
+
+A list of named, independently-enabled setback plans, each timed off the
+house's own measured lag rather than a manual dial — the multi-plan
+generalisation of the earlier single holiday scenario.
+
+Each plan has a name, an `enabled` flag, a setback floor (`min_temp_c`) and
+one of three recurrence shapes:
+
+| Recurrence | Fields | Example |
+| --- | --- | --- |
+| `once` | `start_date`, `end_date` | A specific trip |
+| `weekly` | `start_weekday`/`start_time`, `stop_weekday`/`stop_time` (Monday=0..Sunday=6) | "Every Fri 18:00 → Mon 07:00", a cabin weekend |
+| `yearly` | `start_month`/`start_day`, `end_month`/`end_day` (year-independent) | "Jul 1 → Jul 14"; wraps correctly over New Year's |
+
+The plan list lives in the config entry's **options** (`vacation_plans`),
+not in a separate store — unlike the old per-field `RestoreEntity` holiday
+entities, an options-flow save no longer discards it, since the whole list
+is one option value that survives the reload.
+
+**Resolution is priority by list order, not lowest-temperature-wins.** Each
+cycle, `vacation.resolve_vacation()` walks the plans in order and the first
+one currently actively sagging the house (setback or ramping) wins outright.
+A silent "whichever plan is colder" tiebreak was deliberately rejected —
+the wrong failure mode for a heating setback if the user's actual intent
+was the other plan. If two *enabled* plans' windows would ever overlap, the
+save is refused (not just warned) rather than leaving an ambiguous list —
+enforced identically by the options-flow steps and by the `vacation_plan_set`
+service below.
+
+A single master switch, `switch.<name>_vacation_mode`, suspends every plan
+at once regardless of their individual `enabled` flags — "I'm home early"
+never requires editing N records. It defaults to **on**; with no plans
+configured yet, an armed-but-empty switch is simply a no-op, so a fresh
+install starts ready rather than needing a first-run flip.
+
+Once a plan's concrete `(start_at, return_at)` occurrence is picked, the
+setback/ramp/return behaviour inside it is unchanged from the original
+single-scenario design: the target drops to the plan's floor in one sharp
+step at the start, the ramp back up is paced off the house's own measured
+response time (not a fixed duration), and the house is back at the normal
+target by 15:00 local on the end date — starting the ramp immediately at
+the leave date instead if there isn't enough time for a gentle one. The
+setback floor is clamped to a fixed 5 °C frost-safety minimum, deliberately
+independent of the price-saving comfort floor above: nobody is home during
+a vacation, so the setback may sag further than it would with someone
+actually living in the house.
+
+### Managing plans
+
+Two ways, both writing to the same options:
+
+- **Settings → Devices & services → TrueTemp → Configure → Vacation
+  plans** — a native options-flow add/edit/remove/reorder menu, no card
+  required.
+- **The `truetemp-vacation-card`** — a dashboard card, sibling to the main
+  card, that lists plans (with an "active" badge on whichever one is
+  currently winning), and adds/edits/removes/reorders them. Add it with:
+
+  ```yaml
+  type: custom:truetemp-vacation-card
+  entity: sensor.<name>_vacation_status
+  ```
+
+  Any entity from the zone works — the arm switch and the config entry to
+  address are discovered automatically, same as the main card.
+
+Three services back both the card and the options flow, and can also be
+called directly from automations/scripts — all addressed by
+`config_entry_id` (via a `config_entry` selector scoped to the `truetemp`
+integration) rather than an entity, since no HA entity models "one vacation
+plan":
+
+| Service | Fields | Does |
+| --- | --- | --- |
+| `truetemp.vacation_plan_set` | `config_entry_id`, `id` (omit to create), `name`, `enabled`, `recurrence`, `min_temp_c`, plus whichever recurrence-specific fields apply | Upserts one plan |
+| `truetemp.vacation_plan_remove` | `config_entry_id`, `id` | Deletes a plan by id |
+| `truetemp.vacation_plan_reorder` | `config_entry_id`, `id`, `direction` (`up`/`down`) | Swaps a plan with its neighbour — the only way to change which plan wins an overlap |
+
+`vacation_plan_set` runs the same overlap check as the options flow and
+raises a translated `ServiceValidationError` (readable in the Developer
+Tools UI or a failed automation) rather than silently saving an ambiguous
+list.
+
+`sensor.<name>_vacation_status`'s state is one of `inactive`/`invalid`/
+`scheduled`/`setback`/`ramping`/`done` — whichever phase the currently-winning
+plan (if any) is in — and its attributes carry the whole plan list plus
+`active_plan_id`, so the card only needs one entity to read.
+
+---
+
 ## Entities
 
-Eight per zone.
+Eight per zone, plus the vacation-plan entities above.
 
 | Entity | What it is |
 | --- | --- |
@@ -522,6 +613,23 @@ and its long-term statistics keep only hourly aggregates — too coarse to judge
 controller or replay a candidate change offline.
 
 Files rotate to a gzipped sibling at 10 MB and are never deleted automatically.
+
+---
+
+## Upgrading from 0.3.x
+
+**0.4.0 replaced the single holiday scenario with the multi-plan vacation
+system above.** This is a breaking change, not a migration — an existing
+armed holiday scenario is not carried over into a plan:
+
+- `date.*_holiday_start`, `date.*_holiday_end` and
+  `number.*_holiday_target_temperature` are gone entirely — no per-plan
+  entity exists any more (see [Vacation plans](#vacation-plans) for why).
+  Automations referencing them will break.
+- `switch.*_holiday_mode` and `sensor.*_holiday_status` were renamed to
+  `switch.*_vacation_mode` and `sensor.*_vacation_status`.
+- If you had a holiday scenario armed, recreate it as a plan (via the
+  options flow or the new card) after upgrading.
 
 ---
 

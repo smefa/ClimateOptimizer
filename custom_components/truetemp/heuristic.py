@@ -1250,6 +1250,24 @@ def heat_curve_offset_c(
     return round(delta_c if invert else -delta_c)
 
 
+def indoor_climate_offset_c(
+    compensated_outdoor_temp_c: float, raw_outdoor_temp_c: float
+) -> float:
+    """The delta to add to an indoor climate entity's own target temperature,
+    for pumps (or TRVs) that expose a room-sensor climate entity to steer
+    instead of a spoofed outdoor sensor or a native curve-offset dial.
+
+    Same magnitude as `heat_curve_offset_c(..., invert=False)`, but never
+    rounded to a whole number: a climate entity's target step (commonly
+    0.1-0.5 degC) is finer than a curve-offset dial's integer one. There is
+    also no invert flag here — raising a climate entity's target always
+    means "call for more heat", the same universal direction `invert=False`
+    already matches, so unlike a pump's proprietary curve dial there is no
+    per-pump convention to flip.
+    """
+    return raw_outdoor_temp_c - compensated_outdoor_temp_c
+
+
 # The delta `heat_curve_offset_c` would compute while the hard limit is
 # engaged, using the THRESHOLD rather than the actual (fluctuating) raw
 # reading. During the hard limit `compensated_outdoor_temp_c` is pinned to

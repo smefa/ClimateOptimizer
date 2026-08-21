@@ -20,7 +20,7 @@ async def async_setup_entry(
     async_add_entities(
         [
             ActiveSwitch(entry.runtime_data, entry),
-            HolidayModeSwitch(entry.runtime_data, entry),
+            VacationModeSwitch(entry.runtime_data, entry),
         ]
     )
 
@@ -80,17 +80,23 @@ class ActiveSwitch(TrueTempEntity, SwitchEntity, RestoreEntity):
         await self.coordinator.async_request_refresh()
 
 
-class HolidayModeSwitch(TrueTempEntity, SwitchEntity, RestoreEntity):
-    """Arms/disarms the holiday setback.
+class VacationModeSwitch(TrueTempEntity, SwitchEntity, RestoreEntity):
+    """The one master kill switch over every vacation plan.
 
-    Explicit arming rather than "the two dates alone are active": lets a trip
-    be planned ahead (dates set) and then cancelled without clearing them, and
-    lets the coordinator's own one-shot auto-disarm (once
-    `holiday_result.phase == "done"`, see coordinator.py) fire without
-    silently re-arming the next time both dates happen to be set again.
+    Flipping it off suspends every plan regardless of their individual
+    `enabled` flags, so "I'm home early" never requires editing N records —
+    see §3 of docs/plan_vacation_plans.md. Unlike the old single-scenario
+    switch, there is no coordinator-driven auto-disarm: a shared switch over
+    N independent plans can't auto-disarm just because one `once` plan
+    finished while others may still be scheduled (see the comment at the
+    `resolve_vacation()` call site in coordinator.py).
+
+    Defaults on: with no plans configured yet an armed-but-empty switch is a
+    no-op, so a fresh install starts ready rather than needing a first-run
+    flip once the occupant adds their first plan.
     """
 
-    _attr_translation_key = "holiday_mode"
+    _attr_translation_key = "vacation_mode"
 
     def __init__(
         self,
@@ -98,11 +104,11 @@ class HolidayModeSwitch(TrueTempEntity, SwitchEntity, RestoreEntity):
         entry: TrueTempConfigEntry,
     ) -> None:
         super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{entry.entry_id}_holiday_mode"
+        self._attr_unique_id = f"{entry.entry_id}_vacation_mode"
 
     @property
     def is_on(self) -> bool:
-        return self.coordinator.holiday_armed
+        return self.coordinator.vacation_armed
 
     @property
     def available(self) -> bool:
@@ -113,15 +119,15 @@ class HolidayModeSwitch(TrueTempEntity, SwitchEntity, RestoreEntity):
         await super().async_added_to_hass()
         last_state = await self.async_get_last_state()
         if last_state is not None and last_state.state in ("on", "off"):
-            self.coordinator.holiday_armed = last_state.state == "on"
+            self.coordinator.vacation_armed = last_state.state == "on"
         # else: keep the coordinator's default (unarmed).
 
     async def async_turn_on(self, **kwargs) -> None:
-        self.coordinator.holiday_armed = True
+        self.coordinator.vacation_armed = True
         self.async_write_ha_state()
         await self.coordinator.async_request_refresh()
 
     async def async_turn_off(self, **kwargs) -> None:
-        self.coordinator.holiday_armed = False
+        self.coordinator.vacation_armed = False
         self.async_write_ha_state()
         await self.coordinator.async_request_refresh()

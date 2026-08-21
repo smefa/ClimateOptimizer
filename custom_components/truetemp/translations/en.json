@@ -44,7 +44,9 @@
   "options": {
     "error": {
       "cannot_connect": "Could not reach that address. Check the name or IP, and that the device is switched on and on the same network.",
-      "already_configured": "That indoor sensor is already used by another TrueTemp zone."
+      "already_configured": "That indoor sensor is already used by another TrueTemp zone.",
+      "vacation_window_invalid": "The end date must be after the start date.",
+      "vacation_overlap": "This plan's window overlaps another enabled plan. Adjust the dates or times, or disable one of them."
     },
     "step": {
       "init": {
@@ -54,7 +56,8 @@
           "settings": "Settings",
           "sources": "Sun, wind and price sensors",
           "price": "Saving money on electricity",
-          "output": "Outgoing sensors"
+          "output": "Outgoing sensors",
+          "vacation": "Vacation plans"
         }
       },
       "settings": {
@@ -118,16 +121,18 @@
         "sections": {
           "output_number_push": {
             "name": "Send to a number entity",
-            "description": "For example number.nibe_ohmigo_temperature, if you already have your OhmOnWifi or Ohmigo device set up in Home Assistant."
+            "description": "For example number.ohmigo_temperature, if you already have your OhmOnWifi or Ohmigo device set up in Home Assistant.",
+            "data": {
+              "output_number_entity": "Existing MQTT Device"
+            }
           },
           "ohmonwifi_direct": {
             "name": "Send straight to an OhmOnWifi device",
-            "description": "Talks to the device over your local network with no Home Assistant entity in between. Enter its name (usually ohmonwifiplus.local) or its IP address. This is checked when you save."
+            "description": "Talks to the device over your local network with no Home Assistant entity in between. Enter its name (usually ohmonwifiplus.local) or its IP address. This is checked when you save.",
+            "data": {
+              "ohmonwifi_host": "OhmOnWIFI address"
+            }
           }
-        },
-        "data": {
-          "output_number_entity": "Existing MQTT Device",
-          "ohmonwifi_host": "OhmOnWIFI address"
         }
       },
       "output_curve": {
@@ -140,6 +145,91 @@
         "data_description": {
           "heat_curve_offset_invert": "Leave off if a higher number on your pump means more heat, which is the case for most pumps. Switch on if it is the other way round for yours."
         }
+      },
+      "output_indoor_climate": {
+        "title": "Steering an indoor climate entity",
+        "description": "For pumps or thermostatic radiator valves that expose their own room-sensor climate entity, instead of faking the outdoor sensor or a curve offset.",
+        "data": {
+          "indoor_climate_entity": "Climate entity"
+        }
+      },
+      "vacation": {
+        "title": "Vacation plans",
+        "description": "Add, edit, remove or reorder plans. Only enabled plans whose windows don't overlap can be saved.",
+        "menu_options": {
+          "vacation_add": "Add a plan",
+          "vacation_edit": "Edit a plan",
+          "vacation_remove": "Remove a plan",
+          "vacation_reorder": "Reorder plans"
+        }
+      },
+      "vacation_add": {
+        "title": "Add a vacation plan",
+        "description": "Set the plan's name, whether it's enabled, how it repeats, and the lowest temperature allowed while you're away.",
+        "data": {
+          "name": "Name",
+          "enabled": "Enabled",
+          "recurrence": "Repeats",
+          "min_temp_c": "Lowest temperature while away"
+        }
+      },
+      "vacation_edit": {
+        "title": "Choose a plan to edit",
+        "data": {
+          "plan_id": "Plan"
+        }
+      },
+      "vacation_edit_fields": {
+        "title": "Edit vacation plan",
+        "description": "Change the plan's name, whether it's enabled, how it repeats, and the lowest temperature allowed while you're away.",
+        "data": {
+          "name": "Name",
+          "enabled": "Enabled",
+          "recurrence": "Repeats",
+          "min_temp_c": "Lowest temperature while away"
+        }
+      },
+      "vacation_once": {
+        "title": "Dates",
+        "description": "The plan is active from the start date to the end date.",
+        "data": {
+          "start_date": "Start date",
+          "end_date": "End date"
+        }
+      },
+      "vacation_weekly": {
+        "title": "Weekly window",
+        "description": "The plan repeats every week between these days and times.",
+        "data": {
+          "start_weekday": "Start day",
+          "start_time": "Start time",
+          "stop_weekday": "End day",
+          "stop_time": "End time"
+        }
+      },
+      "vacation_yearly": {
+        "title": "Yearly window",
+        "description": "The plan repeats every year between these dates.",
+        "data": {
+          "start_month": "Start month",
+          "start_day": "Start day",
+          "end_month": "End month",
+          "end_day": "End day"
+        }
+      },
+      "vacation_remove": {
+        "title": "Remove a vacation plan",
+        "data": {
+          "plan_id": "Plan"
+        }
+      },
+      "vacation_reorder": {
+        "title": "Reorder vacation plans",
+        "description": "When more than one enabled plan is active at the same time, the one higher in the list wins.",
+        "data": {
+          "plan_id": "Plan",
+          "direction": "Direction"
+        }
       }
     }
   },
@@ -150,6 +240,9 @@
       },
       "heat_pump_offset": {
         "name": "Heat pump offset"
+      },
+      "indoor_climate_target_temperature": {
+        "name": "Indoor climate target temperature"
       },
       "learned_offset": {
         "name": "Learned offset"
@@ -162,8 +255,8 @@
           "error": "Error"
         }
       },
-      "holiday_status": {
-        "name": "Holiday status",
+      "vacation_status": {
+        "name": "Vacation status",
         "state": {
           "inactive": "Not planned",
           "invalid": "Dates invalid",
@@ -178,21 +271,8 @@
       "active": {
         "name": "Compensation active"
       },
-      "holiday_mode": {
-        "name": "Holiday mode"
-      }
-    },
-    "date": {
-      "holiday_start": {
-        "name": "Holiday start"
-      },
-      "holiday_end": {
-        "name": "Holiday end"
-      }
-    },
-    "number": {
-      "holiday_target_temperature": {
-        "name": "Holiday setback temperature"
+      "vacation_mode": {
+        "name": "Vacation mode"
       }
     },
     "select": {
@@ -237,8 +317,9 @@
     },
     "output_mode": {
       "options": {
-        "outdoor_temp_spoof": "OhmOnWIFI hardware",
-        "heat_curve_offset": "Heat pump sensor offset"
+        "outdoor_temp_spoof": "Outdoor temp or OhmOnWIFI",
+        "heat_curve_offset": "Heat pump sensor offset",
+        "indoor_temp_climate": "Indoor temp sensor"
       }
     }
   },
@@ -262,6 +343,61 @@
     "price_unavailable": {
       "title": "TrueTemp ({name}) has lost its electricity price",
       "description": "{entity_id} is unavailable, so price-based saving is contributing nothing this cycle."
+    }
+  },
+  "exceptions": {
+    "vacation_service_unknown_entry": {
+      "message": "That TrueTemp zone could not be found."
+    },
+    "vacation_service_missing_fields": {
+      "message": "That plan is missing a field its recurrence type needs."
+    },
+    "vacation_service_window_invalid": {
+      "message": "The end date must be after the start date."
+    },
+    "vacation_service_overlap": {
+      "message": "This plan's window overlaps another enabled plan. Adjust the dates or times, or disable one of them."
+    }
+  },
+  "services": {
+    "vacation_plan_set": {
+      "name": "Set vacation plan",
+      "description": "Create or update one vacation plan on a TrueTemp zone.",
+      "fields": {
+        "config_entry_id": { "name": "Zone", "description": "Which TrueTemp zone to update." },
+        "id": { "name": "Plan ID", "description": "Omit to create a new plan; include to update an existing one." },
+        "name": { "name": "Name", "description": "A label for the plan, e.g. \"Cabin trip\"." },
+        "enabled": { "name": "Enabled", "description": "Whether this plan takes part in scheduling." },
+        "recurrence": { "name": "Recurrence", "description": "once, weekly, or yearly." },
+        "min_temp_c": { "name": "Setback minimum (°C)", "description": "The lowest indoor target while this plan is active." },
+        "start_date": { "name": "Start date", "description": "Recurrence \"once\" only." },
+        "end_date": { "name": "End date", "description": "Recurrence \"once\" only." },
+        "start_weekday": { "name": "Start weekday", "description": "Recurrence \"weekly\" only. Monday=0..Sunday=6." },
+        "start_time": { "name": "Start time", "description": "Recurrence \"weekly\" only." },
+        "stop_weekday": { "name": "Stop weekday", "description": "Recurrence \"weekly\" only. Monday=0..Sunday=6." },
+        "stop_time": { "name": "Stop time", "description": "Recurrence \"weekly\" only." },
+        "start_month": { "name": "Start month", "description": "Recurrence \"yearly\" only." },
+        "start_day": { "name": "Start day", "description": "Recurrence \"yearly\" only." },
+        "end_month": { "name": "End month", "description": "Recurrence \"yearly\" only." },
+        "end_day": { "name": "End day", "description": "Recurrence \"yearly\" only." }
+      }
+    },
+    "vacation_plan_remove": {
+      "name": "Remove vacation plan",
+      "description": "Delete one vacation plan from a TrueTemp zone.",
+      "fields": {
+        "config_entry_id": { "name": "Zone", "description": "Which TrueTemp zone to update." },
+        "id": { "name": "Plan ID", "description": "The plan to delete." }
+      }
+    },
+    "vacation_plan_reorder": {
+      "name": "Reorder vacation plan",
+      "description": "Move one vacation plan up or down the priority list.",
+      "fields": {
+        "config_entry_id": { "name": "Zone", "description": "Which TrueTemp zone to update." },
+        "id": { "name": "Plan ID", "description": "The plan to move." },
+        "direction": { "name": "Direction", "description": "up or down." }
+      }
     }
   }
 }

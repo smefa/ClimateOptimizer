@@ -808,6 +808,42 @@ class TestHeatCurveOffset:
         assert isinstance(value, int)
 
 
+class TestIndoorClimateOffset:
+    """`indoor_climate_offset_c` is the delta added to an indoor climate
+    entity's own target temperature — same magnitude and sign as
+    `heat_curve_offset_c(..., invert=False)`, but never rounded, since there
+    is only one universal convention for a climate entity's target (higher
+    means more heat) and no per-pump direction to flip.
+    """
+
+    indoor_climate_offset_c = staticmethod(heuristic.indoor_climate_offset_c)
+
+    def test_more_heat_wanted_is_positive(self):
+        # Spoofed colder than raw -> more heat wanted -> target nudged up.
+        value = self.indoor_climate_offset_c(
+            compensated_outdoor_temp_c=-2.0, raw_outdoor_temp_c=3.0
+        )
+        assert value == pytest.approx(5.0)
+
+    def test_less_heat_wanted_is_negative(self):
+        value = self.indoor_climate_offset_c(
+            compensated_outdoor_temp_c=6.0, raw_outdoor_temp_c=3.0
+        )
+        assert value == pytest.approx(-3.0)
+
+    def test_no_compensation_is_zero(self):
+        assert self.indoor_climate_offset_c(
+            compensated_outdoor_temp_c=3.0, raw_outdoor_temp_c=3.0
+        ) == pytest.approx(0.0)
+
+    def test_matches_heat_curve_offset_unrounded(self):
+        # Same formula as heat_curve_offset_c(invert=False), just not rounded
+        # to a whole number.
+        assert self.indoor_climate_offset_c(
+            compensated_outdoor_temp_c=-2.6, raw_outdoor_temp_c=3.0
+        ) == pytest.approx(5.6)
+
+
 class TestHeatingHardLimitOffset:
     """`heating_hard_limit_offset_c` is the fixed value pushed to the native
     curve-offset entity while the hard limit is engaged — deliberately NOT

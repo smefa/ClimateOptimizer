@@ -15,6 +15,12 @@ an entity to write, or a genuine occupant preference.
 
 DOMAIN = "truetemp"
 
+# hass.data key: a set of entry_ids whose *next* options update was written by
+# services.py's vacation_plan_set/_remove/_reorder rather than the options
+# flow. __init__.py's update listener checks this to skip the usual full
+# entry reload for those writes — see its own comment for why that's safe.
+DATA_VACATION_SKIP_RELOAD = f"{DOMAIN}_vacation_skip_reload"
+
 # --- Config / options keys: sources to read -------------------------------
 CONF_INDOOR_TEMP_SENSOR = "indoor_temp_sensor"
 CONF_OUTDOOR_TEMP_SENSOR = "outdoor_temp_sensor"
@@ -26,12 +32,20 @@ CONF_NORDPOOL_PRICE_ENTITY = "nordpool_price_entity"
 # outdoor-spoofing channels below are two ways of reaching the SAME thing (a
 # faked outdoor reading) and may be combined; heat-curve-offset writes a
 # different quantity (a delta, not a temperature) to a different pump
-# parameter, so it is an alternative to both rather than a third independent
-# channel — running it alongside outdoor spoofing would compensate twice.
+# parameter, and indoor-climate writes a third (a target temperature, to a
+# room-sensor climate entity), so each of those two is an alternative to
+# outdoor spoofing and to each other rather than a further independent
+# channel — running more than one alongside outdoor spoofing would compensate
+# twice.
 CONF_OUTPUT_MODE = "output_mode"
 OUTPUT_MODE_OUTDOOR_SPOOF = "outdoor_temp_spoof"
 OUTPUT_MODE_HEAT_CURVE_OFFSET = "heat_curve_offset"
-OUTPUT_MODES = (OUTPUT_MODE_OUTDOOR_SPOOF, OUTPUT_MODE_HEAT_CURVE_OFFSET)
+OUTPUT_MODE_INDOOR_CLIMATE = "indoor_temp_climate"
+OUTPUT_MODES = (
+    OUTPUT_MODE_OUTDOOR_SPOOF,
+    OUTPUT_MODE_HEAT_CURVE_OFFSET,
+    OUTPUT_MODE_INDOOR_CLIMATE,
+)
 
 # Optional: a number entity to push the published compensated outdoor
 # temperature into every cycle (e.g. `number.nibe_ohmigo_temperature`). Only
@@ -54,6 +68,16 @@ CONF_HEAT_CURVE_OFFSET_ENTITY = "heat_curve_offset_entity"
 # heat. False (the default) flips the sign to match that common convention;
 # True is for the pumps that don't.
 CONF_HEAT_CURVE_OFFSET_INVERT = "heat_curve_offset_invert"
+# A climate entity to steer instead of a spoofed outdoor sensor or a native
+# curve-offset dial, for pumps (or TRVs) that expose their own room-sensor
+# climate entity. Written via `climate.set_temperature` with the occupant's
+# effective indoor target plus the same heat/cool delta the other two modes
+# would otherwise send — see `coordinator._async_push_indoor_climate`. Only
+# used while CONF_OUTPUT_MODE is OUTPUT_MODE_INDOOR_CLIMATE. No invert flag:
+# unlike a pump's proprietary curve dial, a climate entity's target
+# temperature has one universal convention (higher means more heat), so
+# there is no per-pump direction to flip.
+CONF_INDOOR_CLIMATE_ENTITY = "indoor_climate_entity"
 
 # --- Config / options keys: occupant preferences --------------------------
 CONF_INDOOR_TARGET_TEMPERATURE = "indoor_target_temperature"
@@ -99,6 +123,14 @@ CONF_ENABLE_WEATHER_LOOKAHEAD = "enable_weather_lookahead"
 # --- Config / options keys: plumbing --------------------------------------
 CONF_ENABLE_DATA_LOGGING = "enable_data_logging"
 
+# The vacation plan list (see docs/plan_vacation_plans.md), a list of
+# vacation.serialize_plan()-shaped dicts. Written either through the options
+# flow's "vacation" pages (config_flow.py) or, for the dashboard card,
+# services.py's vacation_plan_set/_remove/_reorder — see DATA_VACATION_SKIP_RELOAD
+# for why the latter path doesn't reload the entry the way an options-flow
+# save does.
+CONF_VACATION_PLANS = "vacation_plans"
+
 # --- Config entry schema ---------------------------------------------------
 # Bumped whenever a stored entry needs rewriting; see `async_migrate_entry`.
 #   1 -> 2  prune the keys left behind by the pre-v0.2.0 RC/MPC/gains stack.
@@ -126,6 +158,7 @@ KNOWN_CONFIG_KEYS = frozenset(
         CONF_OHMONWIFI_HOST,
         CONF_HEAT_CURVE_OFFSET_ENTITY,
         CONF_HEAT_CURVE_OFFSET_INVERT,
+        CONF_INDOOR_CLIMATE_ENTITY,
         CONF_INDOOR_TARGET_TEMPERATURE,
         CONF_HEATING_TYPE,
         CONF_ENABLE_PRICE_COMPENSATION,
@@ -135,6 +168,7 @@ KNOWN_CONFIG_KEYS = frozenset(
         CONF_ENABLE_WIND_INPUT,
         CONF_ENABLE_WEATHER_LOOKAHEAD,
         CONF_ENABLE_DATA_LOGGING,
+        CONF_VACATION_PLANS,
     }
 )
 
@@ -187,10 +221,11 @@ STARTUP_GRACE_PERIOD_MINUTES = 5
 # changes — the main file or any of the language files.
 FRONTEND_STATIC_URL_PREFIX = "/truetemp"
 FRONTEND_CARD_URL = f"{FRONTEND_STATIC_URL_PREFIX}/truetemp-card.js"
-FRONTEND_JS_VERSION = "15"
+FRONTEND_JS_VERSION = "17"
 
-# The holiday-mode card is a second, independent bundle (see
-# www/truetemp-holiday-card.js's module docstring for why) with its own
+# The vacation-plans card is a second, independent bundle (see
+# www/truetemp-vacation-card.js's module docstring for why) with its own
 # cache-busting version, bumped independently of FRONTEND_JS_VERSION above.
-FRONTEND_HOLIDAY_CARD_URL = f"{FRONTEND_STATIC_URL_PREFIX}/truetemp-holiday-card.js"
-FRONTEND_HOLIDAY_JS_VERSION = "3"
+# Replaced the single-scenario truetemp-holiday-card.js in 0.4.0.
+FRONTEND_VACATION_CARD_URL = f"{FRONTEND_STATIC_URL_PREFIX}/truetemp-vacation-card.js"
+FRONTEND_VACATION_JS_VERSION = "2"

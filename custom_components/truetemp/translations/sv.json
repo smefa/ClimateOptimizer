@@ -44,7 +44,9 @@
   "options": {
     "error": {
       "cannot_connect": "Kunde inte nå den adressen. Kontrollera namnet eller IP-adressen, och att enheten är påslagen och på samma nätverk.",
-      "already_configured": "Den inomhusgivaren används redan av en annan TrueTemp-zon."
+      "already_configured": "Den inomhusgivaren används redan av en annan TrueTemp-zon.",
+      "vacation_window_invalid": "Slutdatumet måste vara efter startdatumet.",
+      "vacation_overlap": "Den här planens tidsfönster överlappar en annan aktiverad plan. Justera datumen eller tiderna, eller inaktivera en av dem."
     },
     "step": {
       "init": {
@@ -54,7 +56,8 @@
           "settings": "Inställningar",
           "sources": "Sol-, vind- och prisgivare",
           "price": "Spara pengar på el",
-          "output": "Utgående givare"
+          "output": "Utgående givare",
+          "vacation": "Semesterplaner"
         }
       },
       "settings": {
@@ -118,16 +121,18 @@
         "sections": {
           "output_number_push": {
             "name": "Skicka till en number-entitet",
-            "description": "Till exempel number.nibe_ohmigo_temperature, om du redan har din OhmOnWifi- eller Ohmigo-enhet uppsatt i Home Assistant."
+            "description": "Till exempel number.ohmigo_temperature, om du redan har din OhmOnWifi- eller Ohmigo-enhet uppsatt i Home Assistant.",
+            "data": {
+              "output_number_entity": "Befintlig MQTT-enhet"
+            }
           },
           "ohmonwifi_direct": {
             "name": "Skicka direkt till en OhmOnWifi-enhet",
-            "description": "Pratar med enheten över ditt lokala nätverk utan någon Home Assistant-entitet emellan. Ange dess namn (vanligtvis ohmonwifiplus.local) eller dess IP-adress. Detta kontrolleras när du sparar."
+            "description": "Pratar med enheten över ditt lokala nätverk utan någon Home Assistant-entitet emellan. Ange dess namn (vanligtvis ohmonwifiplus.local) eller dess IP-adress. Detta kontrolleras när du sparar.",
+            "data": {
+              "ohmonwifi_host": "OhmOnWIFI-adress"
+            }
           }
-        },
-        "data": {
-          "output_number_entity": "Befintlig MQTT-enhet",
-          "ohmonwifi_host": "OhmOnWIFI-adress"
         }
       },
       "output_curve": {
@@ -140,6 +145,91 @@
         "data_description": {
           "heat_curve_offset_invert": "Lämna avstängt om ett högre värde på din pump betyder mer värme, kurvförskjutning. Slå på om det är tvärtom för din, offta vid utomhustemp."
         }
+      },
+      "output_indoor_climate": {
+        "title": "Styra en klimatentitet",
+        "description": "För pumpar eller termostatiska radiatorventiler som exponerar en egen rumsgivar-klimatentitet, istället för att modifiera utomhusgivaren eller en kurvoffset.",
+        "data": {
+          "indoor_climate_entity": "Klimatentitet"
+        }
+      },
+      "vacation": {
+        "title": "Semesterplaner",
+        "description": "Lägg till, redigera, ta bort eller ändra ordning på planer. Endast aktiverade planer vars tidsfönster inte överlappar kan sparas.",
+        "menu_options": {
+          "vacation_add": "Lägg till plan",
+          "vacation_edit": "Redigera plan",
+          "vacation_remove": "Ta bort plan",
+          "vacation_reorder": "Ändra ordning på planer"
+        }
+      },
+      "vacation_add": {
+        "title": "Lägg till en semesterplan",
+        "description": "Ange namn, om planen är aktiverad, hur den upprepas och lägsta tillåtna temperatur medan du är borta.",
+        "data": {
+          "name": "Namn",
+          "enabled": "Aktiverad",
+          "recurrence": "Upprepning",
+          "min_temp_c": "Lägsta temperatur medan du är borta"
+        }
+      },
+      "vacation_edit": {
+        "title": "Välj en plan att redigera",
+        "data": {
+          "plan_id": "Plan"
+        }
+      },
+      "vacation_edit_fields": {
+        "title": "Redigera semesterplan",
+        "description": "Ändra namn, om planen är aktiverad, hur den upprepas och lägsta tillåtna temperatur medan du är borta.",
+        "data": {
+          "name": "Namn",
+          "enabled": "Aktiverad",
+          "recurrence": "Upprepning",
+          "min_temp_c": "Lägsta temperatur medan du är borta"
+        }
+      },
+      "vacation_once": {
+        "title": "Datum",
+        "description": "Planen är aktiv från startdatumet till slutdatumet.",
+        "data": {
+          "start_date": "Startdatum",
+          "end_date": "Slutdatum"
+        }
+      },
+      "vacation_weekly": {
+        "title": "Veckovis tidsfönster",
+        "description": "Planen upprepas varje vecka mellan dessa dagar och tider.",
+        "data": {
+          "start_weekday": "Startdag",
+          "start_time": "Starttid",
+          "stop_weekday": "Slutdag",
+          "stop_time": "Sluttid"
+        }
+      },
+      "vacation_yearly": {
+        "title": "Årligt tidsfönster",
+        "description": "Planen upprepas varje år mellan dessa datum.",
+        "data": {
+          "start_month": "Startmånad",
+          "start_day": "Startdag",
+          "end_month": "Slutmånad",
+          "end_day": "Slutdag"
+        }
+      },
+      "vacation_remove": {
+        "title": "Ta bort en semesterplan",
+        "data": {
+          "plan_id": "Plan"
+        }
+      },
+      "vacation_reorder": {
+        "title": "Ändra ordning på semesterplaner",
+        "description": "När mer än en aktiverad plan är aktiv samtidigt vinner den som ligger högre upp i listan.",
+        "data": {
+          "plan_id": "Plan",
+          "direction": "Riktning"
+        }
       }
     }
   },
@@ -150,6 +240,9 @@
       },
       "heat_pump_offset": {
         "name": "Offset värmepump"
+      },
+      "indoor_climate_target_temperature": {
+        "name": "Klimatentitetens måltemperatur"
       },
       "learned_offset": {
         "name": "Inlärd offset"
@@ -162,7 +255,7 @@
           "error": "Fel"
         }
       },
-      "holiday_status": {
+      "vacation_status": {
         "name": "Semesterstatus",
         "state": {
           "inactive": "Ej planerad",
@@ -178,21 +271,8 @@
       "active": {
         "name": "Kompensation aktiv"
       },
-      "holiday_mode": {
+      "vacation_mode": {
         "name": "Semesterläge"
-      }
-    },
-    "date": {
-      "holiday_start": {
-        "name": "Semester börjar"
-      },
-      "holiday_end": {
-        "name": "Semester slutar"
-      }
-    },
-    "number": {
-      "holiday_target_temperature": {
-        "name": "Sänkt temperatur under semester"
       }
     },
     "select": {
@@ -237,8 +317,9 @@
     },
     "output_mode": {
       "options": {
-        "outdoor_temp_spoof": "OhmOnWIFI-hårdvara",
-        "heat_curve_offset": "Värmepumpens sensor för offset"
+        "outdoor_temp_spoof": "Utomhustemp eller OhmOnWIFI",
+        "heat_curve_offset": "Värmepumpens sensor för offset",
+        "indoor_temp_climate": "Inomhustempgivare"
       }
     }
   },
@@ -262,6 +343,61 @@
     "price_unavailable": {
       "title": "TrueTemp ({name}) har tappat elpriset",
       "description": "{entity_id} är otillgänglig, så prisbaserad besparing bidrar inte alls denna cykel."
+    }
+  },
+  "exceptions": {
+    "vacation_service_unknown_entry": {
+      "message": "Den TrueTemp-zonen kunde inte hittas."
+    },
+    "vacation_service_missing_fields": {
+      "message": "Den planen saknar ett fält som dess återkommandetyp behöver."
+    },
+    "vacation_service_window_invalid": {
+      "message": "Slutdatumet måste vara efter startdatumet."
+    },
+    "vacation_service_overlap": {
+      "message": "Den här planens tidsfönster överlappar en annan aktiverad plan. Justera datumen eller tiderna, eller inaktivera en av dem."
+    }
+  },
+  "services": {
+    "vacation_plan_set": {
+      "name": "Ange semesterplan",
+      "description": "Skapa eller uppdatera en semesterplan på en TrueTemp-zon.",
+      "fields": {
+        "config_entry_id": { "name": "Zon", "description": "Vilken TrueTemp-zon som ska uppdateras." },
+        "id": { "name": "Plan-ID", "description": "Utelämna för att skapa en ny plan; ange för att uppdatera en befintlig." },
+        "name": { "name": "Namn", "description": "En etikett för planen, t.ex. \"Stugresa\"." },
+        "enabled": { "name": "Aktiverad", "description": "Om den här planen deltar i schemaläggningen." },
+        "recurrence": { "name": "Återkommande", "description": "once, weekly eller yearly." },
+        "min_temp_c": { "name": "Lägsta sänktemperatur (°C)", "description": "Det lägsta inomhusmålet medan den här planen är aktiv." },
+        "start_date": { "name": "Startdatum", "description": "Endast vid återkommande \"once\"." },
+        "end_date": { "name": "Slutdatum", "description": "Endast vid återkommande \"once\"." },
+        "start_weekday": { "name": "Startveckodag", "description": "Endast vid återkommande \"weekly\". Måndag=0..Söndag=6." },
+        "start_time": { "name": "Starttid", "description": "Endast vid återkommande \"weekly\"." },
+        "stop_weekday": { "name": "Slutveckodag", "description": "Endast vid återkommande \"weekly\". Måndag=0..Söndag=6." },
+        "stop_time": { "name": "Sluttid", "description": "Endast vid återkommande \"weekly\"." },
+        "start_month": { "name": "Startmånad", "description": "Endast vid återkommande \"yearly\"." },
+        "start_day": { "name": "Startdag", "description": "Endast vid återkommande \"yearly\"." },
+        "end_month": { "name": "Slutmånad", "description": "Endast vid återkommande \"yearly\"." },
+        "end_day": { "name": "Slutdag", "description": "Endast vid återkommande \"yearly\"." }
+      }
+    },
+    "vacation_plan_remove": {
+      "name": "Ta bort semesterplan",
+      "description": "Ta bort en semesterplan från en TrueTemp-zon.",
+      "fields": {
+        "config_entry_id": { "name": "Zon", "description": "Vilken TrueTemp-zon som ska uppdateras." },
+        "id": { "name": "Plan-ID", "description": "Planen som ska tas bort." }
+      }
+    },
+    "vacation_plan_reorder": {
+      "name": "Flytta semesterplan",
+      "description": "Flytta en semesterplan upp eller ner i prioritetslistan.",
+      "fields": {
+        "config_entry_id": { "name": "Zon", "description": "Vilken TrueTemp-zon som ska uppdateras." },
+        "id": { "name": "Plan-ID", "description": "Planen som ska flyttas." },
+        "direction": { "name": "Riktning", "description": "up eller down." }
+      }
     }
   }
 }

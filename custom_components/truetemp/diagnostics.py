@@ -23,7 +23,7 @@ possible: "the raw curve holds you 1.2 degC below target at -5 degC; the
 learned offset holds you 0.1 degC below" is only answerable with both tables
 in front of you at once.
 
-Redaction: the two output-push targets are removed. Neither is a credential
+Redaction: the output-push targets are removed. None is a credential
 (this integration has none), but a hostname and the entity id of a device
 register describe someone's local network and hardware, and diagnostics files
 routinely get pasted into public issue trackers. Source entity ids are kept
@@ -41,6 +41,7 @@ from homeassistant.core import HomeAssistant
 from . import TrueTempConfigEntry
 from .const import (
     CONF_HEAT_CURVE_OFFSET_ENTITY,
+    CONF_INDOOR_CLIMATE_ENTITY,
     CONF_OHMONWIFI_HOST,
     CONF_OUTPUT_NUMBER_ENTITY,
 )
@@ -72,7 +73,12 @@ from .learner import (
     seed_offset_for,
 )
 
-TO_REDACT = {CONF_OHMONWIFI_HOST, CONF_OUTPUT_NUMBER_ENTITY, CONF_HEAT_CURVE_OFFSET_ENTITY}
+TO_REDACT = {
+    CONF_OHMONWIFI_HOST,
+    CONF_OUTPUT_NUMBER_ENTITY,
+    CONF_HEAT_CURVE_OFFSET_ENTITY,
+    CONF_INDOOR_CLIMATE_ENTITY,
+}
 
 
 async def async_get_config_entry_diagnostics(

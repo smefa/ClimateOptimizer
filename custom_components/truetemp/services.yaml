@@ -1,0 +1,126 @@
+vacation_plan_set:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: truetemp
+    id:
+      required: false
+      example: "3b1f2a9e-..."
+      selector:
+        text:
+    name:
+      required: true
+      example: "Cabin trip"
+      selector:
+        text:
+    enabled:
+      required: true
+      selector:
+        boolean:
+    recurrence:
+      required: true
+      selector:
+        select:
+          options:
+            - "once"
+            - "weekly"
+            - "yearly"
+    min_temp_c:
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 30
+          step: 0.5
+          unit_of_measurement: "°C"
+    start_date:
+      required: false
+      selector:
+        date:
+    end_date:
+      required: false
+      selector:
+        date:
+    start_weekday:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 6
+          step: 1
+    start_time:
+      required: false
+      selector:
+        time:
+    stop_weekday:
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 6
+          step: 1
+    stop_time:
+      required: false
+      selector:
+        time:
+    start_month:
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 12
+          step: 1
+    start_day:
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 31
+          step: 1
+    end_month:
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 12
+          step: 1
+    end_day:
+      required: false
+      selector:
+        number:
+          min: 1
+          max: 31
+          step: 1
+
+vacation_plan_remove:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: truetemp
+    id:
+      required: true
+      selector:
+        text:
+
+vacation_plan_reorder:
+  fields:
+    config_entry_id:
+      required: true
+      selector:
+        config_entry:
+          integration: truetemp
+    id:
+      required: true
+      selector:
+        text:
+    direction:
+      required: true
+      selector:
+        select:
+          options:
+            - "up"
+            - "down"

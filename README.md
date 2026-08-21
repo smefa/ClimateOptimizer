@@ -37,9 +37,10 @@ skruva på.
   märker någon skillnad i huset. Som standard sänker den också värmen om det inte behövs och du sparar även på det.
 - ☀️💨 **Tar hänsyn till sol och vind** (valfritt) — för hus där solen
   faktiskt värmer rummet, eller där drag är ett riktigt problem.
-- 🧳 **[Semesterläge](#semesterläge)** (valfritt) — sänk värmen automatiskt
-  medan du är bortrest och låt TrueTemp räkna ut exakt när den ska börja
-  värma igen, så att huset är varmt precis till att du kommer hem.
+- 🧳 **[Semesterläge](#semesterläge)** (valfritt) — lägg in en eller flera
+  namngivna resor, en gång eller återkommande, och låt TrueTemp räkna ut
+  exakt när den ska börja värma igen, så att huset är varmt precis till att
+  du kommer hem.
 - 📊 **[Egen kontrollpanel](docs/card.png)** — ett färdigt kort som visar vad
   tillägget gör och varför.
 - 🔌 **Fungerar med de flesta värmepumpar** — allt som krävs är en pump som
@@ -139,31 +140,40 @@ sedan själv ut exakt när återuppvärmningen måste börja, så att huset är
 varmt precis till att du kommer hem — inte en timme för tidigt eller för
 sent.
 
-Läget slås på separat från själva tillägget, som fyra nya entiteter:
+Du lägger in en eller flera namngivna **planer** istället för bara en enda
+resa. Varje plan slås av och på för sig och upprepas på ett av tre sätt:
 
-- **Semesterläge** (brytare) — slår på/av hela funktionen.
-- **Avresedatum** och **Hemkomstdatum**.
-- **Sänkningstemperatur** — vilken temperatur huset ska hålla under resan.
+- **En gång** — start- och slutdatum, för en specifik resa.
+- **Varje vecka** — t.ex. "fredag 18:00 till måndag 07:00", för stugan
+  varje helg.
+- **Varje år** — t.ex. "1–14 juli", för den årliga sommarsemestern (går
+  även att lägga över ett årsskifte).
+
+Planerna hanteras i ett eget kontrollkort, skilt från huvudkortet, där du
+lägger till, redigerar, tar bort och ändrar ordning på dem (går även att
+göra under tilläggets egna inställningar, utan kortet). Utöver planlistan
+finns en huvudbrytare (**Semesterläge**) som slår av alla planer på en
+gång oavsett vilka som är påslagna var för sig — perfekt för "jag kom hem
+tidigare".
 
 Så fungerar det:
 
-1. Vid midnatt på avresedagen sänks målet till sänkningstemperaturen i ett
-   enda steg.
+1. Vid startögonblicket sänks målet till planens egen sänkningstemperatur
+   i ett enda steg.
 2. TrueTemp räknar ut när återuppvärmningen måste starta utifrån hur
    snabbt just ditt hus historiskt har värmts upp — samma mätning som
    resten av tillägget bygger på — istället för att gissa på en fast
    uppvärmningstid. Det gör att huset hinner bli varmt utan att tvinga
    fram tilläggsvärme i värmepumpen.
-3. Huset är tillbaka på din vanliga temperatur klockan 15:00 på
-   hemkomstdagen. Räcker inte tiden mellan datumen till en skonsam
-   återuppvärmning börjar den istället direkt vid avresan, och en
-   statusentitet ("Semesterstatus") talar om att det hände.
-4. Sänkningen går aldrig under komfortgolvet du ställt in
-   (**"Låt det aldrig bli kallare än"**).
+3. Huset är tillbaka på din vanliga temperatur klockan 15:00 vid planens
+   slutdatum. Räcker inte tiden till en skonsam återuppvärmning börjar den
+   istället direkt vid avresan, och statusen talar om att det hände.
+4. Sänkningen går aldrig under en fast frysskyddsgräns.
 
-Det finns även ett eget, separat kontrollkort för semesterläge — utöver
-huvudkortet — som visar status, datum och hur långt återuppvärmningen
-kommit.
+Skulle två påslagna planers tidsfönster krocka avgör ordningen i listan
+vilken som gäller — TrueTemp varnar och vägrar spara ändringen om det
+skulle hända, så att det aldrig sker i tysthet. Kortet visar också vilken
+plan (om någon) som är aktiv just nu.
 
 ---
 

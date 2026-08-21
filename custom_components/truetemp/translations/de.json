@@ -44,7 +44,9 @@
   "options": {
     "error": {
       "cannot_connect": "Diese Adresse konnte nicht erreicht werden. Prüfe Name oder IP-Adresse und ob das Gerät eingeschaltet und im selben Netzwerk ist.",
-      "already_configured": "Dieser Innensensor wird bereits von einer anderen TrueTemp-Zone verwendet."
+      "already_configured": "Dieser Innensensor wird bereits von einer anderen TrueTemp-Zone verwendet.",
+      "vacation_window_invalid": "Das Enddatum muss nach dem Startdatum liegen.",
+      "vacation_overlap": "Das Zeitfenster dieses Plans überschneidet sich mit einem anderen aktivierten Plan. Passe die Daten oder Uhrzeiten an oder deaktiviere einen davon."
     },
     "step": {
       "init": {
@@ -54,7 +56,8 @@
           "settings": "Einstellungen",
           "sources": "Sonne-, Wind- und Preissensoren",
           "price": "Stromkosten sparen",
-          "output": "Ausgehende Sensoren"
+          "output": "Ausgehende Sensoren",
+          "vacation": "Urlaubspläne"
         }
       },
       "settings": {
@@ -118,16 +121,18 @@
         "sections": {
           "output_number_push": {
             "name": "An eine Number-Entität senden",
-            "description": "Zum Beispiel number.nibe_ohmigo_temperature, falls bereits ein OhmOnWifi- oder Ohmigo-Gerät in Home Assistant eingerichtet ist."
+            "description": "Zum Beispiel number.ohmigo_temperature, falls bereits ein OhmOnWifi- oder Ohmigo-Gerät in Home Assistant eingerichtet ist.",
+            "data": {
+              "output_number_entity": "Vorhandenes MQTT-Gerät"
+            }
           },
           "ohmonwifi_direct": {
             "name": "Direkt an ein OhmOnWifi-Gerät senden",
-            "description": "Kommuniziert über dein lokales Netzwerk direkt mit dem Gerät, ohne Home-Assistant-Entität dazwischen. Gib seinen Namen (meist ohmonwifiplus.local) oder seine IP-Adresse ein. Dies wird beim Speichern geprüft."
+            "description": "Kommuniziert über dein lokales Netzwerk direkt mit dem Gerät, ohne Home-Assistant-Entität dazwischen. Gib seinen Namen (meist ohmonwifiplus.local) oder seine IP-Adresse ein. Dies wird beim Speichern geprüft.",
+            "data": {
+              "ohmonwifi_host": "OhmOnWIFI-Adresse"
+            }
           }
-        },
-        "data": {
-          "output_number_entity": "Vorhandenes MQTT-Gerät",
-          "ohmonwifi_host": "OhmOnWIFI-Adresse"
         }
       },
       "output_curve": {
@@ -140,6 +145,91 @@
         "data_description": {
           "heat_curve_offset_invert": "Ausgeschaltet lassen, wenn ein höherer Wert an deiner Wärmepumpe mehr Wärme bedeutet — das ist bei den meisten Wärmepumpen der Fall. Einschalten, wenn es bei deiner andersherum ist."
         }
+      },
+      "output_indoor_climate": {
+        "title": "Eine Klima-Entität ansteuern",
+        "description": "Für Wärmepumpen oder Heizkörperthermostate mit einer eigenen Raumfühler-Klima-Entität, statt den Außensensor oder einen Heizkurven-Offset vorzutäuschen.",
+        "data": {
+          "indoor_climate_entity": "Klima-Entität"
+        }
+      },
+      "vacation": {
+        "title": "Urlaubspläne",
+        "description": "Pläne hinzufügen, bearbeiten, entfernen oder neu anordnen. Nur aktivierte Pläne, deren Zeitfenster sich nicht überschneiden, können gespeichert werden.",
+        "menu_options": {
+          "vacation_add": "Plan hinzufügen",
+          "vacation_edit": "Plan bearbeiten",
+          "vacation_remove": "Plan entfernen",
+          "vacation_reorder": "Pläne neu anordnen"
+        }
+      },
+      "vacation_add": {
+        "title": "Urlaubsplan hinzufügen",
+        "description": "Lege Name, Aktivierung, Wiederholung und die niedrigste erlaubte Temperatur während der Abwesenheit fest.",
+        "data": {
+          "name": "Name",
+          "enabled": "Aktiviert",
+          "recurrence": "Wiederholung",
+          "min_temp_c": "Niedrigste Temperatur während der Abwesenheit"
+        }
+      },
+      "vacation_edit": {
+        "title": "Zu bearbeitenden Plan wählen",
+        "data": {
+          "plan_id": "Plan"
+        }
+      },
+      "vacation_edit_fields": {
+        "title": "Urlaubsplan bearbeiten",
+        "description": "Ändere Name, Aktivierung, Wiederholung und die niedrigste erlaubte Temperatur während der Abwesenheit.",
+        "data": {
+          "name": "Name",
+          "enabled": "Aktiviert",
+          "recurrence": "Wiederholung",
+          "min_temp_c": "Niedrigste Temperatur während der Abwesenheit"
+        }
+      },
+      "vacation_once": {
+        "title": "Daten",
+        "description": "Der Plan ist vom Start- bis zum Enddatum aktiv.",
+        "data": {
+          "start_date": "Startdatum",
+          "end_date": "Enddatum"
+        }
+      },
+      "vacation_weekly": {
+        "title": "Wöchentliches Zeitfenster",
+        "description": "Der Plan wiederholt sich jede Woche zwischen diesen Tagen und Uhrzeiten.",
+        "data": {
+          "start_weekday": "Starttag",
+          "start_time": "Startzeit",
+          "stop_weekday": "Endtag",
+          "stop_time": "Endzeit"
+        }
+      },
+      "vacation_yearly": {
+        "title": "Jährliches Zeitfenster",
+        "description": "Der Plan wiederholt sich jedes Jahr zwischen diesen Daten.",
+        "data": {
+          "start_month": "Startmonat",
+          "start_day": "Starttag",
+          "end_month": "Endmonat",
+          "end_day": "Endtag"
+        }
+      },
+      "vacation_remove": {
+        "title": "Urlaubsplan entfernen",
+        "data": {
+          "plan_id": "Plan"
+        }
+      },
+      "vacation_reorder": {
+        "title": "Urlaubspläne neu anordnen",
+        "description": "Wenn mehr als ein aktivierter Plan gleichzeitig aktiv ist, gewinnt der weiter oben in der Liste.",
+        "data": {
+          "plan_id": "Plan",
+          "direction": "Richtung"
+        }
       }
     }
   },
@@ -150,6 +240,9 @@
       },
       "heat_pump_offset": {
         "name": "Wärmepumpen-Offset"
+      },
+      "indoor_climate_target_temperature": {
+        "name": "Zieltemperatur der Klima-Entität"
       },
       "learned_offset": {
         "name": "Gelernter Offset"
@@ -162,7 +255,7 @@
           "error": "Fehler"
         }
       },
-      "holiday_status": {
+      "vacation_status": {
         "name": "Urlaubsstatus",
         "state": {
           "inactive": "Nicht geplant",
@@ -178,21 +271,8 @@
       "active": {
         "name": "Kompensation aktiv"
       },
-      "holiday_mode": {
+      "vacation_mode": {
         "name": "Urlaubsmodus"
-      }
-    },
-    "date": {
-      "holiday_start": {
-        "name": "Urlaubsbeginn"
-      },
-      "holiday_end": {
-        "name": "Urlaubsende"
-      }
-    },
-    "number": {
-      "holiday_target_temperature": {
-        "name": "Absenktemperatur im Urlaub"
       }
     },
     "select": {
@@ -237,8 +317,9 @@
     },
     "output_mode": {
       "options": {
-        "outdoor_temp_spoof": "OhmOnWIFI-Hardware",
-        "heat_curve_offset": "Wärmepumpen-Sensor-Offset"
+        "outdoor_temp_spoof": "Außentemperatur oder OhmOnWIFI",
+        "heat_curve_offset": "Wärmepumpen-Sensor-Offset",
+        "indoor_temp_climate": "Innentemperatur-Sensor"
       }
     }
   },
@@ -262,6 +343,61 @@
     "price_unavailable": {
       "title": "TrueTemp ({name}) hat den Strompreis verloren",
       "description": "{entity_id} ist nicht erreichbar, daher trägt die preisbasierte Einsparung diesen Zyklus nichts bei."
+    }
+  },
+  "exceptions": {
+    "vacation_service_unknown_entry": {
+      "message": "Diese TrueTemp-Zone wurde nicht gefunden."
+    },
+    "vacation_service_missing_fields": {
+      "message": "Diesem Plan fehlt ein Feld, das sein Wiederholungstyp benötigt."
+    },
+    "vacation_service_window_invalid": {
+      "message": "Das Enddatum muss nach dem Startdatum liegen."
+    },
+    "vacation_service_overlap": {
+      "message": "Das Zeitfenster dieses Plans überschneidet sich mit einem anderen aktivierten Plan. Passe die Daten oder Uhrzeiten an oder deaktiviere einen davon."
+    }
+  },
+  "services": {
+    "vacation_plan_set": {
+      "name": "Urlaubsplan setzen",
+      "description": "Einen Urlaubsplan einer TrueTemp-Zone anlegen oder aktualisieren.",
+      "fields": {
+        "config_entry_id": { "name": "Zone", "description": "Welche TrueTemp-Zone aktualisiert werden soll." },
+        "id": { "name": "Plan-ID", "description": "Weglassen, um einen neuen Plan anzulegen; angeben, um einen bestehenden zu aktualisieren." },
+        "name": { "name": "Name", "description": "Eine Bezeichnung für den Plan, z. B. \"Hüttentrip\"." },
+        "enabled": { "name": "Aktiviert", "description": "Ob dieser Plan bei der Planung berücksichtigt wird." },
+        "recurrence": { "name": "Wiederholung", "description": "once, weekly oder yearly." },
+        "min_temp_c": { "name": "Absenktemperatur (°C)", "description": "Der niedrigste Innentemperatur-Sollwert, während dieser Plan aktiv ist." },
+        "start_date": { "name": "Startdatum", "description": "Nur bei Wiederholung \"once\"." },
+        "end_date": { "name": "Enddatum", "description": "Nur bei Wiederholung \"once\"." },
+        "start_weekday": { "name": "Start-Wochentag", "description": "Nur bei Wiederholung \"weekly\". Montag=0..Sonntag=6." },
+        "start_time": { "name": "Startzeit", "description": "Nur bei Wiederholung \"weekly\"." },
+        "stop_weekday": { "name": "Ende-Wochentag", "description": "Nur bei Wiederholung \"weekly\". Montag=0..Sonntag=6." },
+        "stop_time": { "name": "Endzeit", "description": "Nur bei Wiederholung \"weekly\"." },
+        "start_month": { "name": "Startmonat", "description": "Nur bei Wiederholung \"yearly\"." },
+        "start_day": { "name": "Starttag", "description": "Nur bei Wiederholung \"yearly\"." },
+        "end_month": { "name": "Endmonat", "description": "Nur bei Wiederholung \"yearly\"." },
+        "end_day": { "name": "Endtag", "description": "Nur bei Wiederholung \"yearly\"." }
+      }
+    },
+    "vacation_plan_remove": {
+      "name": "Urlaubsplan entfernen",
+      "description": "Einen Urlaubsplan aus einer TrueTemp-Zone löschen.",
+      "fields": {
+        "config_entry_id": { "name": "Zone", "description": "Welche TrueTemp-Zone aktualisiert werden soll." },
+        "id": { "name": "Plan-ID", "description": "Der zu löschende Plan." }
+      }
+    },
+    "vacation_plan_reorder": {
+      "name": "Urlaubsplan verschieben",
+      "description": "Einen Urlaubsplan in der Prioritätsliste nach oben oder unten verschieben.",
+      "fields": {
+        "config_entry_id": { "name": "Zone", "description": "Welche TrueTemp-Zone aktualisiert werden soll." },
+        "id": { "name": "Plan-ID", "description": "Der zu verschiebende Plan." },
+        "direction": { "name": "Richtung", "description": "up oder down." }
+      }
     }
   }
 }

@@ -15,11 +15,13 @@ it costs no registry entry and no recorder row of its own.
 
     compensated_outdoor_temperature   the output for OUTPUT_MODE_OUTDOOR_SPOOF.
     heat_pump_offset                  the output for OUTPUT_MODE_HEAT_CURVE_OFFSET.
-                                      Exactly one of this pair is ever the
+    indoor_climate_target_temperature the output for OUTPUT_MODE_INDOOR_CLIMATE.
+                                      Exactly one of this trio is ever the
                                       thing actually reaching the pump — see
                                       `output_mode` in const.py — so the other
-                                      reports `available = False` rather than a
-                                      number that means nothing in that mode.
+                                      two report `available = False` rather
+                                      than a number that means nothing in that
+                                      mode.
     learned_offset                    what the house has taught the controller.
                                       The one number genuinely worth graphing:
                                       it should be stable and season-shaped,
@@ -51,11 +53,22 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
 from . import TrueTempConfigEntry
-from .const import DOMAIN, OUTPUT_MODE_HEAT_CURVE_OFFSET, OUTPUT_MODE_OUTDOOR_SPOOF
+from .const import (
+    DOMAIN,
+    OUTPUT_MODE_HEAT_CURVE_OFFSET,
+    OUTPUT_MODE_INDOOR_CLIMATE,
+    OUTPUT_MODE_OUTDOOR_SPOOF,
+)
 from .coordinator import TrueTempCoordinator
-from .heuristic import HeuristicResult, heat_curve_offset_c, heating_hard_limit_offset_c
+from .heuristic import (
+    HeuristicResult,
+    heat_curve_offset_c,
+    heating_hard_limit_offset_c,
+    indoor_climate_offset_c,
+)
 from .holiday import HOLIDAY_PHASES
 from .learner import bin_label
+from .vacation import serialize_plans
 
 # Substituted for an attribute that is None only because the feature that would
 # fill it is switched off. Without this the UI shows "Unknown", which reads as a
@@ -75,9 +88,10 @@ async def async_setup_entry(
         [
             CompensatedOutdoorTempSensor(coordinator, entry),
             HeatPumpOffsetSensor(coordinator, entry),
+            IndoorClimateTargetSensor(coordinator, entry),
             LearnedOffsetSensor(coordinator, entry),
             StatusSensor(coordinator, entry),
-            HolidayStatusSensor(coordinator, entry),
+            VacationStatusSensor(coordinator, entry),
         ]
     )
 
@@ -114,9 +128,10 @@ class CompensatedOutdoorTempSensor(TrueTempEntity, SensorEntity):
     `recommended_compensated_outdoor_temp_c`, so "off" is also how you preview
     it.
 
-    Reports unavailable in OUTPUT_MODE_HEAT_CURVE_OFFSET, where this number is
-    never actually sent anywhere — see `HeatPumpOffsetSensor` for that mode's
-    equivalent — rather than show a value that would just be confusing.
+    Reports unavailable outside OUTPUT_MODE_OUTDOOR_SPOOF, where this number is
+    never actually sent anywhere — see `HeatPumpOffsetSensor` and
+    `IndoorClimateTargetSensor` for those modes' equivalents — rather than show
+    a value that would just be confusing.
     """
 
     _attr_translation_key = "compensated_outdoor_temperature"
@@ -152,9 +167,10 @@ class HeatPumpOffsetSensor(TrueTempEntity, SensorEntity):
     `_async_push_heat_curve_offset` sends — zero while compensation is off,
     a whole number always (see `heat_curve_offset_c`'s docstring for why).
 
-    Reports unavailable in OUTPUT_MODE_OUTDOOR_SPOOF, the counterpart to how
-    `CompensatedOutdoorTempSensor` behaves in this mode — exactly one of the
-    pair is ever the thing actually reaching the pump.
+    Reports unavailable outside OUTPUT_MODE_HEAT_CURVE_OFFSET, the counterpart
+    to how `CompensatedOutdoorTempSensor` and `IndoorClimateTargetSensor`
+    behave in this mode — exactly one of the trio is ever the thing actually
+    reaching the pump.
     """
 
     _attr_translation_key = "heat_pump_offset"
@@ -193,6 +209,58 @@ class HeatPumpOffsetSensor(TrueTempEntity, SensorEntity):
             result.compensated_outdoor_temp_c,
             result.raw_outdoor_temp_c,
             self.coordinator.heat_curve_offset_invert,
+        )
+
+
+class IndoorClimateTargetSensor(TrueTempEntity, SensorEntity):
+    """The output for OUTPUT_MODE_INDOOR_CLIMATE: the target temperature
+    written to a room-sensor climate entity, mirroring exactly what
+    `_async_push_indoor_climate` sends — the occupant's own effective target
+    while compensation is off.
+
+    Reports unavailable outside OUTPUT_MODE_INDOOR_CLIMATE, the counterpart to
+    how `CompensatedOutdoorTempSensor` and `HeatPumpOffsetSensor` behave in
+    this mode — exactly one of the trio is ever the thing actually reaching
+    the pump.
+    """
+
+    _attr_translation_key = "indoor_climate_target_temperature"
+    _attr_device_class = SensorDeviceClass.TEMPERATURE
+    _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        coordinator: TrueTempCoordinator,
+        entry: TrueTempConfigEntry,
+    ) -> None:
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_indoor_climate_target_temperature"
+
+    @property
+    def available(self) -> bool:
+        return (
+            super().available
+            and self.coordinator.output_mode == OUTPUT_MODE_INDOOR_CLIMATE
+        )
+
+    @property
+    def native_value(self) -> float | None:
+        result: HeuristicResult | None = self.coordinator.data
+        if result is None:
+            return None
+        if not self.coordinator.is_active:
+            return result.effective_indoor_target_c
+        if result.heating_hard_limit_engaged:
+            # Same fixed value `_async_push_indoor_climate` sends while the
+            # hard limit holds — see that method's docstring. Falling through
+            # to the raw-derived formula below would flap this sensor even
+            # though the pump itself now gets a stable number.
+            return result.effective_indoor_target_c + heating_hard_limit_offset_c(
+                invert=False
+            )
+        return result.effective_indoor_target_c + indoor_climate_offset_c(
+            result.compensated_outdoor_temp_c, result.raw_outdoor_temp_c
         )
 
 
@@ -512,15 +580,18 @@ class StatusSensor(TrueTempEntity, SensorEntity):
         return attrs
 
 
-class HolidayStatusSensor(TrueTempEntity, SensorEntity):
-    """Holiday setback phase and the numbers behind it.
+class VacationStatusSensor(TrueTempEntity, SensorEntity):
+    """Vacation setback phase and the numbers behind it, across every plan.
 
-    What the holiday card (and any automations/notifications) read to show
+    What the vacation card (and any automations/notifications) read to show
     e.g. "ramp starts Tue 14:00" — see holiday.py's `HolidayResult`, which
-    this mirrors field-for-field.
+    `resolve_vacation()` still returns and this mirrors field-for-field.
+    Unlike the old single-scenario sensor, attributes also carry the whole
+    plan list plus which plan (if any) is the one currently winning, so the
+    card has a single read entity (§6 of docs/plan_vacation_plans.md).
     """
 
-    _attr_translation_key = "holiday_status"
+    _attr_translation_key = "vacation_status"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = list(HOLIDAY_PHASES)
@@ -531,7 +602,7 @@ class HolidayStatusSensor(TrueTempEntity, SensorEntity):
         entry: TrueTempConfigEntry,
     ) -> None:
         super().__init__(coordinator, entry)
-        self._attr_unique_id = f"{entry.entry_id}_holiday_status"
+        self._attr_unique_id = f"{entry.entry_id}_vacation_status"
 
     @property
     def available(self) -> bool:
@@ -541,24 +612,15 @@ class HolidayStatusSensor(TrueTempEntity, SensorEntity):
 
     @property
     def native_value(self) -> str | None:
-        result = self.coordinator.holiday_result
+        result = self.coordinator.vacation_result
         return result.phase if result else None
 
     @property
     def extra_state_attributes(self) -> dict:
-        result = self.coordinator.holiday_result
+        result = self.coordinator.vacation_result
         attrs: dict = {
-            "holiday_start": (
-                self.coordinator.holiday_start.isoformat()
-                if self.coordinator.holiday_start
-                else None
-            ),
-            "holiday_end": (
-                self.coordinator.holiday_end.isoformat()
-                if self.coordinator.holiday_end
-                else None
-            ),
-            "holiday_target_c": self.coordinator.holiday_target_c,
+            "plans": serialize_plans(self.coordinator.vacation_plans),
+            "active_plan_id": self.coordinator.active_plan_id,
         }
         if result is None:
             return attrs

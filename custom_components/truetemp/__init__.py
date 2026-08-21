@@ -14,20 +14,20 @@ from homeassistant.helpers.event import async_track_state_change_event
 
 from .const import (
     CONFIG_ENTRY_VERSION,
+    DATA_VACATION_SKIP_RELOAD,
     DOMAIN,
     FRONTEND_CARD_URL,
-    FRONTEND_HOLIDAY_CARD_URL,
-    FRONTEND_HOLIDAY_JS_VERSION,
     FRONTEND_JS_VERSION,
     FRONTEND_STATIC_URL_PREFIX,
+    FRONTEND_VACATION_CARD_URL,
+    FRONTEND_VACATION_JS_VERSION,
     KNOWN_CONFIG_KEYS,
 )
 from .coordinator import TrueTempCoordinator
+from .services import async_register_services
 
 PLATFORMS = [
     Platform.CLIMATE,
-    Platform.DATE,
-    Platform.NUMBER,
     Platform.SELECT,
     Platform.SENSOR,
     Platform.SWITCH,
@@ -98,11 +98,12 @@ async def _async_register_frontend(hass: HomeAssistant) -> None:
         [StaticPathConfig(FRONTEND_STATIC_URL_PREFIX, str(www_path), cache_headers=True)]
     )
     add_extra_js_url(hass, f"{FRONTEND_CARD_URL}?v={FRONTEND_JS_VERSION}")
-    add_extra_js_url(hass, f"{FRONTEND_HOLIDAY_CARD_URL}?v={FRONTEND_HOLIDAY_JS_VERSION}")
+    add_extra_js_url(hass, f"{FRONTEND_VACATION_CARD_URL}?v={FRONTEND_VACATION_JS_VERSION}")
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: TrueTempConfigEntry) -> bool:
     await _async_register_frontend(hass)
+    async_register_services(hass)
     coordinator = TrueTempCoordinator(hass, entry)
     # Restore the learned offset table and lag buffer (if any) BEFORE the first
     # refresh, so the first cycle continues from prior learning rather than
@@ -155,4 +156,20 @@ async def async_unload_entry(hass: HomeAssistant, entry: TrueTempConfigEntry) ->
 
 
 async def _async_update_listener(hass: HomeAssistant, entry: TrueTempConfigEntry) -> None:
+    # A vacation_plan_set/_remove/_reorder service call (services.py) writes
+    # entry.options the same way the options flow does, which normally means
+    # a full unload/re-setup here — that briefly removes every TrueTemp
+    # entity from the state machine, which is what made the vacation card go
+    # blank for a few seconds on every plan add/edit/delete. But the plan
+    # list is the one option TrueTempCoordinator.vacation_plans already
+    # re-reads live from entry.options on each refresh (see its docstring),
+    # so for that one key a plain refresh is enough — no reload, no entity
+    # teardown. services.py flags the entry here right before its write;
+    # any other options change (the options flow, a future setting) leaves
+    # the flag unset and falls through to the normal reload.
+    skip_reload = hass.data.get(DATA_VACATION_SKIP_RELOAD)
+    if skip_reload and entry.entry_id in skip_reload:
+        skip_reload.discard(entry.entry_id)
+        await entry.runtime_data.async_request_refresh()
+        return
     await hass.config_entries.async_reload(entry.entry_id)
