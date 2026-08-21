@@ -63,6 +63,30 @@ directly, with nothing else to configure.
 
 ---
 
+## Got a newer heat pump with its own curve offset?
+
+Many newer heat pumps (NIBE, for example) instead have a built-in setting for
+shifting the heat curve up or down — often called a "curve offset" or "heat
+curve offset". If your pump has one, TrueTemp can write its calculated value
+there directly, instead of pretending to be the outdoor sensor. You pick
+either way under **Outgoing sensors** in the integration's settings — not
+both, since they'd compensate for the same thing twice.
+
+---
+
+## Got a heat pump or thermostatic valves with their own room sensor?
+
+Some heat pumps and thermostatic radiator valves (TRVs) are instead
+controlled through their own `climate` entity in Home Assistant with its own
+target temperature, tied to a room sensor — not an outdoor curve. If you have
+one of those, TrueTemp can write its calculated target there directly,
+instead of pretending to be the outdoor sensor or adjusting a curve offset.
+Just like the two other methods, you pick this under **Outgoing sensors** in
+the integration's settings — only one of the three at a time, for the same
+reason as above.
+
+---
+
 ## Installation
 
 <a href="https://my.home-assistant.io/redirect/hacs_repository/?owner=smefa&repository=TrueTemp-for-Heat-Pumps&category=integration" target="_blank">
@@ -109,7 +133,9 @@ Everything below is optional and can be skipped:
 - **Electricity price savings** — shift heating away from the most expensive
   hours of the day.
 - **Where to send the result** — a Home Assistant entity, and/or a direct
-  connection to an Ohm on WiFi / Ohmigo device (see above).
+  connection to an Ohm on WiFi / Ohmigo device (see above); your pump's own
+  curve offset, if it has one (see above); or a `climate` entity with its own
+  room sensor, for pumps and TRVs that have one (see above).
 - **Local logging** — a detailed log file on your own machine, for anyone who
   wants to dig into the numbers. Nothing is sent anywhere.
 

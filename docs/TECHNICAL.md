@@ -143,9 +143,14 @@ All under **Configure**, all skippable:
   condition below. See [When to enable sun and wind](#when-to-enable-sun-and-wind).
 - **Electricity price** — needs a price sensor with today's and tomorrow's
   hourly prices.
-- **Where to send the value** — a `number.*` entity, and/or an OhmOnWifi /
-  Ohmigo device's own local API by hostname. Both can be used at once. If
-  your heat pump has no way to accept a smart-controlled value at all, an
+- **Where to send the value** — pick one of three output modes
+  (`output_mode`): outdoor-sensor spoofing (a `number.*` entity, and/or an
+  OhmOnWifi / Ohmigo device's own local API by hostname — both can be used at
+  once), the pump's own heat-curve-offset input, or a room-sensor `climate`
+  entity for pumps and TRVs that expose one. Exactly one mode is ever live —
+  see `const.py`'s comment above `CONF_OUTPUT_MODE` for why they're
+  mutually exclusive. If your heat pump has no way to accept a
+  smart-controlled value at all, an
   [Ohm on WiFi Plus](https://www.ohmigo.io/product-page/ohm-on-wifi-plus)
   device gives it one — see the main README for why.
 - **Detailed local logging** — one line per cycle to a file in your config
@@ -353,13 +358,14 @@ plan (if any) is in — and its attributes carry the whole plan list plus
 
 ## Entities
 
-Eight per zone, plus the vacation-plan entities above.
+Nine per zone, plus the vacation-plan entities above.
 
 | Entity | What it is |
 | --- | --- |
 | `climate.<name>` | The thermostat: target, on/off, price saving preset |
-| `sensor.<name>_compensated_outdoor_temperature` | The output when set to outdoor-sensor spoofing. Unavailable if you've picked the heat-curve-offset output mode instead |
-| `sensor.<name>_heat_pump_offset` | The output when set to write the pump's own heat-curve-offset input. Unavailable in outdoor-spoof mode — exactly one of this pair is ever live |
+| `sensor.<name>_compensated_outdoor_temperature` | The output when set to outdoor-sensor spoofing. Unavailable if you've picked one of the other two output modes instead |
+| `sensor.<name>_heat_pump_offset` | The output when set to write the pump's own heat-curve-offset input. Unavailable outside that mode — exactly one of these three is ever live |
+| `sensor.<name>_indoor_climate_target_temperature` | The target temperature pushed to a room-sensor `climate` entity when set to indoor-climate output mode. Unavailable outside that mode |
 | `sensor.<name>_learned_offset` | What your house has taught it. **The one to graph** |
 | `sensor.<name>_status` | `ok` / `degraded` / `error`, plus everything about learning and the full output breakdown (every term and a plain-language reason) in attributes |
 | `switch.<name>_compensation_active` | Master on/off |
@@ -446,7 +452,7 @@ again, and on unload/reload so nothing outlives the entry. See `TrueTempCoordina
 | `total_adjustment_c` | `recommended_compensated_outdoor_temp_c` minus `raw_outdoor_temp_c` — taken from the published value, not summed from the terms above, so it reflects the output sanity clamp when that bites. |
 | `recommended_heat_pump_offset` | What `heat_pump_offset` would show, computed even in outdoor-spoof mode or while compensation is off. |
 | `active` | Whether compensation is currently switched on (`switch.<name>_compensation_active`). |
-| `output_mode` | Which output sensor is the one actually wired to the pump: outdoor-spoof or heat-curve-offset. |
+| `output_mode` | Which output sensor is the one actually wired to the pump: outdoor-spoof, heat-curve-offset, or indoor-climate. |
 
 **How learning is going**
 

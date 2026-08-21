@@ -76,6 +76,18 @@ eftersom de skulle kompensera samma sak två gånger.
 
 ---
 
+## Har din värmepump eller dina termostatventiler en egen rumsgivare?
+
+Vissa värmepumpar och termostatiska ventiler (TRV:er) styrs istället av en
+egen `climate`-entitet i Home Assistant med sitt eget börvärde, kopplad till
+en rumsgivare — inte av en utekurva. Har du en sådan kan TrueTemp skriva sitt
+uträknade börvärde dit direkt, istället för att låtsas vara utegivaren eller
+justera en kurvförskjutning. Precis som de två andra sätten väljer du det här
+under **Utgående sensorer** i tilläggets inställningar — bara ett av de tre
+sätten åt gången, av samma anledning som ovan.
+
+---
+
 ## Installation
 
 <a href="https://my.home-assistant.io/redirect/hacs_repository/?owner=smefa&repository=TrueTemp-for-Heat-Pumps&category=integration" target="_blank">
@@ -126,8 +138,9 @@ Allt nedan är valfritt och kan hoppas över helt:
 - **Elprisbesparing** — flytta värmen bort från dygnets dyraste timmar.
 - **Vart resultatet ska skickas** — antingen som en låtsad utegivare (en
   entitet i Home Assistant och/eller en direktkoppling mot en Ohm on WiFi- /
-  Ohmigo-enhet, se ovan), eller direkt till pumpens egen kurvförskjutning om
-  den har en sådan (se ovan).
+  Ohmigo-enhet, se ovan), direkt till pumpens egen kurvförskjutning om den
+  har en sådan (se ovan), eller till en egen `climate`-entitet med
+  rumsgivare, för pumpar och TRV:er som har en sådan (se ovan).
 - **Lokal loggning** — en detaljerad loggfil på din egen dator, för den som
   vill gräva i siffrorna. Inget skickas någonstans.
 
