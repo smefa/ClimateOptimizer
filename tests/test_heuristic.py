@@ -99,6 +99,18 @@ class TestComposition:
         assert result.compensated_outdoor_temp_c == pytest.approx(0.5)
         assert result.learned_offset_c == pytest.approx(-2.5)
 
+    def test_user_indoor_target_c_echoes_the_true_target_even_during_setback(self):
+        """`indoor_target_c` is vacation-effective (see coordinator._params());
+        `user_indoor_target_c` must keep reporting the occupant's literal
+        configured number — what `climate.target_temperature` shows — so the
+        two stay distinguishable in the sensor/JSONL output."""
+        result = compute(
+            make_inputs(),
+            make_params(indoor_target_c=15.0, user_indoor_target_c=21.0),
+        )
+        assert result.indoor_target_c == pytest.approx(15.0)
+        assert result.user_indoor_target_c == pytest.approx(21.0)
+
     def test_terms_sum_onto_the_raw_reading(self):
         result = compute(
             make_inputs(
@@ -128,6 +140,22 @@ class TestComposition:
         )
         assert result.wind_adjustment_c < 0
         assert result.sun_adjustment_c > 0
+
+    def test_wind_below_the_deadband_contributes_nothing(self):
+        result = compute(
+            make_inputs(wind_speed_ms=heuristic.WIND_DEADBAND_MS - 0.1),
+            make_params(),
+        )
+        assert result.wind_adjustment_c == 0.0
+
+    def test_wind_above_the_deadband_gains_on_the_excess_only(self):
+        result = compute(
+            make_inputs(wind_speed_ms=heuristic.WIND_DEADBAND_MS + 2.0),
+            make_params(),
+        )
+        assert result.wind_adjustment_c == pytest.approx(
+            -heuristic.WIND_GAIN_C_PER_MS * 2.0
+        )
 
     def test_cloud_cover_scales_the_solar_term(self):
         clear = compute(
@@ -205,7 +233,9 @@ class TestHeatingHardLimit:
         )
         assert result.heating_hard_limit_engaged
         assert result.compensated_outdoor_temp_c == heuristic.OUTPUT_SANITY_MAX_C
-        assert result.learned_offset_c == 0.0
+        # Echoes the learner's actual held offset rather than zeroing it out —
+        # zero would be indistinguishable from the learner having unwound.
+        assert result.learned_offset_c == -3.0
         assert result.wind_adjustment_c == 0.0
         assert result.sun_adjustment_c == 0.0
         assert result.price_adjustment_c == 0.0
@@ -253,7 +283,7 @@ class TestHeatingHardLimitHysteresis:
         )
         assert result.heating_hard_limit_engaged
         assert result.compensated_outdoor_temp_c == heuristic.OUTPUT_SANITY_MAX_C
-        assert result.learned_offset_c == 0.0
+        assert result.learned_offset_c == -1.0
 
     def test_releases_once_past_the_hysteresis_margin(self):
         margin = heuristic.HEATING_HARD_LIMIT_HYSTERESIS_C
@@ -395,14 +425,14 @@ class TestPriceBraking:
         assert high.price_shift_applied_c > low.price_shift_applied_c
 
     def test_pre_braking_starts_before_the_spike(self):
-        """Braking that starts later than the fall time is still pushing heat
-        into the hour it was meant to avoid."""
+        """Braking that starts later than half the fall time is still pushing
+        heat into the hour it was meant to avoid."""
         result = compute(
             make_inputs(
                 current_price=2.0,
                 price_data_available=True,
                 price_forecast=spiky_forecast(spike_at=2),
-                fall_minutes=240.0,
+                fall_minutes=360.0,
             ),
             make_params(
                 enable_price_compensation=True,
@@ -435,7 +465,7 @@ class TestPriceBraking:
             make_inputs(
                 current_price=1.0,
                 price_data_available=True,
-                price_forecast=spiky_forecast(spike_at=5),
+                price_forecast=spiky_forecast(spike_at=1),
                 fall_minutes=360.0,
             ),
             make_params(
@@ -444,7 +474,7 @@ class TestPriceBraking:
                 cold_caution="low",
             ),
         )
-        assert slab.lead_minutes_effective == 360.0
+        assert slab.lead_minutes_effective == 180.0
         assert slab.price_adjustment_c > 0
 
 
@@ -843,6 +873,16 @@ class TestIndoorClimateOffset:
             compensated_outdoor_temp_c=-2.6, raw_outdoor_temp_c=3.0
         ) == pytest.approx(5.6)
 
+    def test_scales_by_spoof_per_indoor_c(self):
+        # Degrees of outdoor spoof only equal degrees of indoor target while
+        # spoof_per_indoor_c is 1.0 — otherwise the result must be divided by
+        # it to land back in indoor-target degrees.
+        assert self.indoor_climate_offset_c(
+            compensated_outdoor_temp_c=-2.0,
+            raw_outdoor_temp_c=3.0,
+            spoof_per_indoor_c=2.0,
+        ) == pytest.approx(2.5)
+
 
 class TestHeatingHardLimitOffset:
     """`heating_hard_limit_offset_c` is the fixed value pushed to the native
@@ -1101,6 +1141,35 @@ class TestPriceSignificance:
         )
         assert significance == pytest.approx(0.5, rel=1e-3)
 
+    def test_auto_floor_still_tapers_when_the_median_is_negative(self):
+        """Negative Nordpool day-ahead prices are routine in spring/summer.
+        A negative reference must not flip the auto floor's sign (which would
+        make `today_spread_c / floor` clamp to 1.0 — no backstop at all, the
+        opposite of the intended effect)."""
+        history = heuristic.PriceSpreadHistory(
+            daily_spreads_c=(0.001,) * 5,
+            daily_medians_c=(-0.2, -0.3, -0.4, -0.5, -0.6),
+        )
+        # Auto floor = 0.33 * abs(median(-0.2..-0.6)) = 0.33 * 0.4 = 0.132.
+        significance, _ = heuristic.price_significance(
+            today_spread_c=0.066,  # half the auto floor
+            today_median_c=999.0,  # must be ignored: history exists
+            history=history,
+            floor_setting_c=0.0,
+        )
+        assert significance == pytest.approx(0.5, rel=1e-3)
+
+    def test_auto_floor_falls_back_to_todays_negative_median_with_no_history(self):
+        history = heuristic.initial_price_spread_history()
+        # Auto floor = 0.33 * abs(-0.3) = 0.099.
+        significance, _ = heuristic.price_significance(
+            today_spread_c=0.0495,  # half the auto floor
+            today_median_c=-0.3,
+            history=history,
+            floor_setting_c=0.0,
+        )
+        assert significance == pytest.approx(0.5, rel=1e-3)
+
     def test_absolute_floor_backstops_a_near_zero_median_day(self):
         """The exact degeneracy the module docstring's field data describes:
         a 0.001/0.01 median/peak pair scores a 9.0 RELATIVE ratio (full
@@ -1290,8 +1359,10 @@ class TestComputeAppliesSignificanceTaper:
 _lookahead_weighted_peak = heuristic._lookahead_weighted_peak
 WEATHER_PRERAMP_MAX_C = heuristic.WEATHER_PRERAMP_MAX_C
 WEATHER_PRERAMP_EPS_C = heuristic.WEATHER_PRERAMP_EPS_C
+SOLAR_PRECOOL_MAX_C = heuristic.SOLAR_PRECOOL_MAX_C
 SOLAR_GAIN_C = heuristic.SOLAR_GAIN_C
 WIND_GAIN_C_PER_MS = heuristic.WIND_GAIN_C_PER_MS
+WIND_DEADBAND_MS = heuristic.WIND_DEADBAND_MS
 
 
 def temp_forecast(*temps: float, step_h: float = 1.0):
@@ -1418,9 +1489,13 @@ class TestWeatherPreRamp:
             ),
             lookahead_params(enable_wind_input=True),
         )
-        assert result.wind_preramp_c == pytest.approx(-WIND_GAIN_C_PER_MS * 10.0 * 0.5)
+        assert result.wind_preramp_c == pytest.approx(
+            -WIND_GAIN_C_PER_MS * (10.0 - WIND_DEADBAND_MS) * 0.5
+        )
 
-    def test_the_sun_going_in_ramps_at_the_existing_gain(self):
+    def test_the_sun_going_in_does_not_pre_ramp(self):
+        # Losing sun is handled reactively (sun_adjustment_c recomputes every
+        # cycle) — it no longer feeds this bucket at all.
         result = compute(
             make_inputs(
                 solar_forecast=((0.0, 1.0), (1.0, 0.0)),
@@ -1428,7 +1503,7 @@ class TestWeatherPreRamp:
             ),
             lookahead_params(enable_solar_input=True),
         )
-        assert result.sun_preramp_c == pytest.approx(-SOLAR_GAIN_C * 0.5)
+        assert result.weather_preramp_c == 0.0
 
     def test_the_ramp_reaches_the_published_value(self):
         without = compute(make_inputs(), make_params())
@@ -1442,30 +1517,26 @@ class TestWeatherPreRamp:
 
 
 class TestPreRampBudget:
-    def _all_three(self, **params):
+    def _both(self, **params):
         return compute(
             make_inputs(
                 outdoor_forecast=((0.0, 0.0), (0.1, -8.0)),
                 wind_forecast_ms=((0.0, 0.0), (0.1, 20.0)),
-                solar_forecast=((0.0, 1.0), (0.1, 0.0)),
                 rise_minutes=120.0,
             ),
-            lookahead_params(enable_wind_input=True, enable_solar_input=True, **params),
+            lookahead_params(enable_wind_input=True, **params),
         )
 
-    def test_three_simultaneous_ramps_clamp_to_the_shared_budget(self):
-        result = self._all_three()
+    def test_two_simultaneous_ramps_clamp_to_the_shared_budget(self):
+        result = self._both()
         assert result.weather_preramp_c == pytest.approx(-WEATHER_PRERAMP_MAX_C)
 
     def test_components_are_still_reported_unclamped(self):
-        result = self._all_three()
-        raw_sum = (
-            result.outdoor_preramp_c + result.wind_preramp_c + result.sun_preramp_c
-        )
+        result = self._both()
+        raw_sum = result.outdoor_preramp_c + result.wind_preramp_c
         assert raw_sum < -WEATHER_PRERAMP_MAX_C
         assert result.outdoor_preramp_c < 0.0
         assert result.wind_preramp_c < 0.0
-        assert result.sun_preramp_c < 0.0
 
 
 class TestPreRampGating:
@@ -1473,20 +1544,22 @@ class TestPreRampGating:
         defaults = dict(
             outdoor_forecast=temp_forecast(0.0, -4.0),
             wind_forecast_ms=((0.0, 0.0), (1.0, 10.0)),
-            solar_forecast=((0.0, 1.0), (1.0, 0.0)),
+            solar_forecast=((0.0, 0.0), (1.0, 1.0)),
             rise_minutes=120.0,
+            fall_minutes=120.0,
         )
         defaults.update(overrides)
         return make_inputs(**defaults)
 
     def test_lookahead_off_is_bit_identical_to_no_forecast_at_all(self):
         off = compute(self._inputs(), make_params())
-        bare = compute(make_inputs(rise_minutes=120.0), make_params())
+        bare = compute(make_inputs(rise_minutes=120.0, fall_minutes=120.0), make_params())
         assert off.weather_preramp_c == 0.0
         assert off.outdoor_preramp_c == 0.0
         assert off.wind_preramp_c == 0.0
-        assert off.sun_preramp_c == 0.0
         assert off.weather_preramp_in_min is None
+        assert off.sun_precool_c == 0.0
+        assert off.sun_precool_in_min is None
         assert off.compensated_outdoor_temp_c == pytest.approx(
             bare.compensated_outdoor_temp_c
         )
@@ -1504,15 +1577,15 @@ class TestPreRampGating:
             self._inputs(outdoor_forecast=None, wind_forecast_ms=None),
             lookahead_params(enable_solar_input=False),
         )
-        assert result.sun_preramp_c == 0.0
-        assert result.weather_preramp_c == 0.0
+        assert result.sun_precool_c == 0.0
 
     def test_missing_series_ramps_nothing(self):
         result = compute(
-            make_inputs(rise_minutes=120.0),
+            make_inputs(rise_minutes=120.0, fall_minutes=120.0),
             lookahead_params(enable_wind_input=True, enable_solar_input=True),
         )
         assert result.weather_preramp_c == 0.0
+        assert result.sun_precool_c == 0.0
 
     def test_hard_limit_short_circuits_on_raw_and_zeroes_the_ramp(self):
         result = compute(
@@ -1522,6 +1595,7 @@ class TestPreRampGating:
         assert result.heating_hard_limit_engaged
         assert result.weather_preramp_c == 0.0
         assert result.outdoor_preramp_c == 0.0
+        assert result.sun_precool_c == 0.0
 
 
 class TestPreRampFreezesLearner:
@@ -1545,3 +1619,120 @@ class TestPreRampFreezesLearner:
         assert 0.0 < abs(result.weather_preramp_c) <= WEATHER_PRERAMP_EPS_C
         assert not result.weather_preramp_active
         assert "pre-ramp" not in result.reason
+
+
+# --- Sun pre-cool -------------------------------------------------------
+
+
+class TestSunPreCool:
+    def test_a_rise_inside_the_window_precools(self):
+        result = compute(
+            make_inputs(
+                solar_forecast=((0.0, 0.0), (1.0, 1.0)),
+                fall_minutes=120.0,
+            ),
+            lookahead_params(enable_solar_input=True),
+        )
+        # 3 degC more sun-equivalent at t=1 h inside a 2 h fall window:
+        # SOLAR_GAIN_C * (1 - 0.5).
+        assert result.sun_precool_c == pytest.approx(SOLAR_GAIN_C * 0.5)
+        assert result.sun_precool_in_min == pytest.approx(60.0)
+
+    def test_the_same_rise_beyond_the_fall_time_does_nothing(self):
+        result = compute(
+            make_inputs(
+                solar_forecast=temp_forecast(0.0, 0.0, 0.0, 0.0, 1.0),
+                fall_minutes=120.0,
+            ),
+            lookahead_params(enable_solar_input=True),
+        )
+        assert result.sun_precool_c == 0.0
+        assert not result.sun_precool_active
+
+    def test_a_forecast_drop_produces_exactly_zero(self):
+        # Losing sun is the reactive term's job now, not this one's.
+        result = compute(
+            make_inputs(
+                solar_forecast=((0.0, 1.0), (1.0, 0.0)),
+                fall_minutes=120.0,
+            ),
+            lookahead_params(enable_solar_input=True),
+        )
+        assert result.sun_precool_c == 0.0
+
+    def test_the_precool_decays_as_the_event_arrives(self):
+        far = compute(
+            make_inputs(solar_forecast=((0.0, 0.0), (1.5, 1.0)), fall_minutes=120.0),
+            lookahead_params(enable_solar_input=True),
+        )
+        near = compute(
+            make_inputs(solar_forecast=((0.0, 0.0), (0.5, 1.0)), fall_minutes=120.0),
+            lookahead_params(enable_solar_input=True),
+        )
+        arrived = compute(
+            make_inputs(solar_forecast=((0.0, 1.0), (1.0, 1.0)), fall_minutes=120.0),
+            lookahead_params(enable_solar_input=True),
+        )
+        assert near.sun_precool_c > far.sun_precool_c > 0.0
+        # Once the rise IS the current forecast value it is the reactive
+        # term's problem, not the lookahead's.
+        assert arrived.sun_precool_c == 0.0
+
+    def test_a_constant_forecast_bias_produces_exactly_zero(self):
+        for bias in (0.0, 0.5, 1.0):
+            result = compute(
+                make_inputs(
+                    solar_forecast=temp_forecast(*(bias for _ in range(4))),
+                    fall_minutes=180.0,
+                ),
+                lookahead_params(enable_solar_input=True),
+            )
+            assert result.sun_precool_c == 0.0
+
+    def test_the_precool_reaches_the_published_value(self):
+        without = compute(make_inputs(), make_params())
+        with_precool = compute(
+            make_inputs(solar_forecast=((0.0, 0.0), (1.0, 1.0)), fall_minutes=120.0),
+            lookahead_params(enable_solar_input=True),
+        )
+        assert with_precool.compensated_outdoor_temp_c == pytest.approx(
+            without.compensated_outdoor_temp_c + SOLAR_GAIN_C * 0.5
+        )
+
+    def test_precool_clamps_to_its_own_budget(self):
+        result = compute(
+            make_inputs(
+                solar_forecast=((0.0, 0.0), (0.01, 10.0)),
+                fall_minutes=120.0,
+            ),
+            lookahead_params(enable_solar_input=True),
+        )
+        assert result.sun_precool_c == pytest.approx(SOLAR_PRECOOL_MAX_C)
+
+    def test_lookahead_off_contributes_exactly_zero(self):
+        result = compute(
+            make_inputs(solar_forecast=((0.0, 0.0), (1.0, 1.0)), fall_minutes=120.0),
+            make_params(enable_solar_input=True),
+        )
+        assert result.sun_precool_c == 0.0
+        assert result.sun_precool_in_min is None
+
+
+class TestSunPreCoolFreezesLearner:
+    def test_flag_set_above_eps(self):
+        result = compute(
+            make_inputs(solar_forecast=((0.0, 0.0), (1.0, 1.0)), fall_minutes=120.0),
+            lookahead_params(enable_solar_input=True),
+        )
+        assert abs(result.sun_precool_c) > WEATHER_PRERAMP_EPS_C
+        assert result.sun_precool_active
+        assert "pre-cool" in result.reason
+
+    def test_flag_clear_below_eps(self):
+        result = compute(
+            make_inputs(solar_forecast=((0.0, 0.0), (1.0, 0.06)), fall_minutes=120.0),
+            lookahead_params(enable_solar_input=True),
+        )
+        assert 0.0 < abs(result.sun_precool_c) <= WEATHER_PRERAMP_EPS_C
+        assert not result.sun_precool_active
+        assert "pre-cool" not in result.reason

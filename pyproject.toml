@@ -1,0 +1,13 @@
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+# Scoped deliberately, not `select = ["ALL"]`: pyflakes (F) and pycodestyle
+# (E) catch real hygiene issues (dead imports, undefined names, line length),
+# and BLE flags bare `except Exception` — already anticipated across the
+# codebase via `# noqa: BLE001` comments. Left out on purpose: DTZ
+# (flake8-datetimez) would flag every naive `datetime` in holiday.py/
+# vacation.py, which are naive *by design* (see holiday.py's module
+# docstring) — enabling it would fight the architecture, not improve it.
+select = ["E", "F", "BLE"]

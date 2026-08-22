@@ -152,6 +152,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: TrueTempConfigEntry) ->
     # Otherwise a Repair raised while a source was down outlives the
     # integration that raised it (or the reload that briefly tears it down).
     entry.runtime_data.clear_source_issues()
+    # Otherwise a flag set just before this unload (a vacation service call
+    # racing a reload/removal) would sit in hass.data and be consumed by a
+    # future entry that happens to reuse this entry_id's slot.
+    skip_reload = hass.data.get(DATA_VACATION_SKIP_RELOAD)
+    if skip_reload:
+        skip_reload.discard(entry.entry_id)
     return unloaded
 
 

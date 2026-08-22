@@ -178,6 +178,21 @@ def resolve(
     )
 
 
+def ramp_hours_needed(delta_c: float, rise_hours: float) -> float:
+    """How many hours a `delta_c`-sized return ramp should take, paced off
+    this house's measured `rise_hours` — see the module docstring's "Why the
+    ramp is paced off `rise_hours`" section.
+
+    Shared by `resolve_window()`'s scheduled-return ramp and
+    `vacation.py`'s manual-disarm return ramp (`start_return_ramp()`) so the
+    two paths can never compute a different duration for the same-sized
+    recovery.
+    """
+    if delta_c <= 0.0:
+        return MIN_RAMP_HOURS
+    return max(MIN_RAMP_HOURS, delta_c * rise_hours * RAMP_HOURS_PER_DEGREE_MULTIPLE)
+
+
 def resolve_window(
     now: datetime,
     start_at: datetime,
@@ -197,12 +212,7 @@ def resolve_window(
     all be naive local datetimes, same contract as `resolve()`. Never raises.
     """
     delta_c = normal_target_c - holiday_target_c
-    if delta_c <= 0.0:
-        hours_needed = MIN_RAMP_HOURS
-    else:
-        hours_needed = max(
-            MIN_RAMP_HOURS, delta_c * rise_hours * RAMP_HOURS_PER_DEGREE_MULTIPLE
-        )
+    hours_needed = ramp_hours_needed(delta_c, rise_hours)
 
     ramp_start_at = return_at - timedelta(hours=hours_needed)
     on_track = True
@@ -219,7 +229,10 @@ def resolve_window(
             return_at=return_at,
             hours_needed=hours_needed,
             on_track=on_track,
-            reason=f"Holiday scheduled from {start_at:%Y-%m-%d %H:%M} to {return_at:%Y-%m-%d %H:%M}",
+            reason=(
+                f"Holiday scheduled from {start_at:%Y-%m-%d %H:%M} "
+                f"to {return_at:%Y-%m-%d %H:%M}"
+            ),
         )
     if now < ramp_start_at:
         return HolidayResult(

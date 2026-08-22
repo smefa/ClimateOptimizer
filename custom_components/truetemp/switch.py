@@ -68,6 +68,13 @@ class ActiveSwitch(TrueTempEntity, SwitchEntity, RestoreEntity):
         if last_state is not None and last_state.state in ("on", "off"):
             self.coordinator.is_active = last_state.state == "on"
         # else: keep the coordinator's default (off).
+        # The coordinator's first refresh already ran (before this entity
+        # existed to restore anything) with default-derived values and may
+        # have pushed them to hardware. Request a fresh cycle now so the
+        # restored value reaches the output promptly rather than waiting up
+        # to a full update interval. The debouncer coalesces this with the
+        # other entities' restores into one refresh.
+        await self.coordinator.async_request_refresh()
 
     async def async_turn_on(self, **kwargs) -> None:
         self.coordinator.is_active = True
@@ -89,7 +96,7 @@ class VacationModeSwitch(TrueTempEntity, SwitchEntity, RestoreEntity):
     switch, there is no coordinator-driven auto-disarm: a shared switch over
     N independent plans can't auto-disarm just because one `once` plan
     finished while others may still be scheduled (see the comment at the
-    `resolve_vacation()` call site in coordinator.py).
+    `resolve_vacation_with_return_ramp()` call site in coordinator.py).
 
     Defaults on: with no plans configured yet an armed-but-empty switch is a
     no-op, so a fresh install starts ready rather than needing a first-run
@@ -120,7 +127,10 @@ class VacationModeSwitch(TrueTempEntity, SwitchEntity, RestoreEntity):
         last_state = await self.async_get_last_state()
         if last_state is not None and last_state.state in ("on", "off"):
             self.coordinator.vacation_armed = last_state.state == "on"
-        # else: keep the coordinator's default (unarmed).
+        # else: keep the coordinator's default (armed).
+        # See ActiveSwitch.async_added_to_hass: the coordinator's first cycle
+        # ran before this entity restored its value.
+        await self.coordinator.async_request_refresh()
 
     async def async_turn_on(self, **kwargs) -> None:
         self.coordinator.vacation_armed = True

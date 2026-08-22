@@ -331,11 +331,13 @@ class TrueTempCard extends HTMLElement {
         const preMeasuredTitle =
           t.markerPremeasuredTitle +
           (baselineIndoor !== "—" ? fmt(t.markerPremeasuredIndoor, { value: baselineIndoor }) : "");
-        const samplesCell = samples
-          ? samples
-          : preMeasured
-            ? `${baselineSamples}<i class="co-spill" title="${this._esc(preMeasuredTitle)}">*</i>`
-            : "—";
+        const samplesCell = samples >= 100
+          ? `<span class="co-samples-done" title="${samples}">&check;</span>`
+          : samples
+            ? samples
+            : preMeasured
+              ? `${baselineSamples}<i class="co-spill" title="${this._esc(preMeasuredTitle)}">*</i>`
+              : "—";
         return `<tr class="${cls}">
             <td>${this._esc(label)}${marker}</td>
             <td>${this._num(b.steady_offset_c, 2)}</td>
@@ -468,11 +470,14 @@ class TrueTempCard extends HTMLElement {
     // Same trick, but the pre-ramp terms are numbers rather than absent when
     // off, so sensor.py substitutes DISABLED explicitly.
     const preRampDisabled = attrs.weather_preramp_c === DISABLED;
+    const preCoolDisabled = attrs.sun_precool_c === DISABLED;
 
     const terms = [
+      [t.learnedOffset, this._num(offset && offset.state, 2, " °C"), "explainLearnedOffset", this._entities.offset],
       [t.termSun, sunDisabled ? DISABLED : this._num(attrs.sun_adjustment_c, 2, " °C"), "explainSun"],
       [t.termWind, windDisabled ? DISABLED : this._num(attrs.wind_adjustment_c, 2, " °C"), "explainWind"],
       [t.termPreRamp, preRampDisabled ? DISABLED : this._num(attrs.weather_preramp_c, 2, " °C"), "explainPreRamp"],
+      [t.termPreCool, preCoolDisabled ? DISABLED : this._num(attrs.sun_precool_c, 2, " °C"), "explainPreCool"],
       [t.termPrice, priceDisabled ? DISABLED : this._num(attrs.price_adjustment_c, 2, " °C"), "explainPriceAdjustment"],
       [t.termTotalChange, this._num(attrs.total_adjustment_c, 2, " °C"), "explainTotalChange"],
     ];
@@ -484,8 +489,6 @@ class TrueTempCard extends HTMLElement {
       [t.windsDownIn, this._num(attrs.wind_down_time_min, 0, " min"), "explainWindsDownIn"],
       [t.authorityLimit, this._num(attrs.authority_limit_c, 2, " °C"), "explainAuthorityLimit"],
       [t.settlingTime, this._num(attrs.settling_time_h, 1, " h"), "explainSettlingTime"],
-      [t.samplesThisBand, this._num(attrs.samples_this_band, 0), "explainSamplesThisBand"],
-      [t.samplesTotal, this._num(attrs.samples_learned, 0), "explainSamplesTotal"],
     ];
 
     const priceAlways = [
@@ -643,6 +646,7 @@ class TrueTempCard extends HTMLElement {
         .co-table th:first-child, .co-table td:first-child { text-align:left; }
         .co-table tr.co-empty td { color: var(--disabled-text-color, #999); }
         .co-table tr.co-ok td { color: var(--success-color, #4c1); }
+        .co-samples-done { color: var(--success-color, #4c1); font-weight:700; }
         .co-table tr.co-now { background: var(--secondary-background-color); }
         .co-table tr.co-now td { font-weight:600; }
         .co-spill { margin-left:4px; font-style:normal; color: var(--secondary-text-color); cursor:help; }

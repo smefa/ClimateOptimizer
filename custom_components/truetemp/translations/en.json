@@ -44,8 +44,10 @@
   "options": {
     "error": {
       "cannot_connect": "Could not reach that address. Check the name or IP, and that the device is switched on and on the same network.",
+      "invalid_host": "That's not a plain hostname or IP address — remove any scheme, path, or query string.",
       "already_configured": "That indoor sensor is already used by another TrueTemp zone.",
       "vacation_window_invalid": "The end date must be after the start date.",
+      "vacation_date_invalid": "That is not a real date.",
       "vacation_overlap": "This plan's window overlaps another enabled plan. Adjust the dates or times, or disable one of them."
     },
     "step": {
@@ -91,7 +93,7 @@
           "nordpool_price_entity": "A Nordpool sensor with today's and tomorrow's hourly prices. Without one, price saving does nothing.",
           "enable_solar_input": "Backs off a little when the sun is warming the house. Only switch this on if your indoor sensor is somewhere the sun actually reaches. A sensor in a basement, a north-facing room or a hallway never sees the solar gain, so this would push the temperature down for a warming that your sensor cannot confirm.",
           "enable_wind_input": "Adds a little when wind is stripping heat out of the house. Leave this off unless you have an older, draughty house that you can feel getting colder in high wind. A reasonably sealed house barely responds to wind, and compensating for an effect that is not there just adds noise.",
-          "enable_weather_lookahead": "Starts heating a little harder before a cold front, a rising wind or the sun going in actually arrives, instead of waiting for the house to cool first. It only ever asks for more heat, never less, and it fades out as the change lands. Needs the weather forecast entity above."
+          "enable_weather_lookahead": "Starts heating a little harder before a cold front or a rising wind actually arrives, instead of waiting for the house to cool first. Sun works the other way: it holds heat back before a burst of sunshine arrives, so the house doesn't overheat once the sun's own warmth lands. Each fades out as its change lands. Needs the weather forecast entity above."
         }
       },
       "price": {
@@ -354,6 +356,9 @@
     },
     "vacation_service_window_invalid": {
       "message": "The end date must be after the start date."
+    },
+    "vacation_service_date_invalid": {
+      "message": "That is not a real date."
     },
     "vacation_service_overlap": {
       "message": "This plan's window overlaps another enabled plan. Adjust the dates or times, or disable one of them."

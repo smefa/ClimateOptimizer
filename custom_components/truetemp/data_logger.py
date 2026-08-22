@@ -50,17 +50,28 @@ DATA_DIR_NAME = "truetemp_data"
 # replayable, just under a .gz extension.
 MAX_LOG_BYTES = 10 * 1024 * 1024  # 10 MB
 
+# Keep only the N most recent rotated files per entry, so an install with
+# logging left on for months doesn't grow `truetemp_data/` unboundedly.
+# Oldest-first pruning happens inside `_rotate`, right after a new one lands.
+MAX_ROTATED_LOGS = 5
+
 
 def _rotate(path: Path) -> None:
     """Gzip the current log to a timestamped sibling and remove the
     original, so the next append starts a fresh file. The timestamp is UTC
     and to-the-second, matching this project's other rename-safety
-    convention (see learner_store.py)."""
+    convention (see learner_store.py). Also prunes old rotations beyond
+    `MAX_ROTATED_LOGS`, oldest first — the timestamp format sorts
+    lexically, so a plain name sort is chronological."""
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     rotated = path.with_name(f"{path.stem}.{stamp}{path.suffix}.gz")
     with path.open("rb") as src, gzip.open(rotated, "wb") as dst:
         shutil.copyfileobj(src, dst)
     path.unlink()
+
+    siblings = sorted(path.parent.glob(f"{path.stem}.*{path.suffix}.gz"))
+    for stale in siblings[:-MAX_ROTATED_LOGS]:
+        stale.unlink()
 
 
 def _append_line(path: Path, line: str) -> None:
@@ -87,10 +98,18 @@ async def async_log_record(
 ) -> None:
     """Append one record as a JSON line. Never raises — logs and swallows
     on failure, since a full disk or permissions issue here must not affect
-    the real output. Best-effort, exactly like the output push."""
+    the real output. Best-effort, exactly like the output push.
+
+    `allow_nan=False` is a backstop, not the primary defence: the caller
+    (`coordinator._build_log_record`) already sanitizes non-finite floats to
+    `None` so the common case never hits this. Bare `NaN`/`Infinity` tokens
+    are invalid JSON and would otherwise break any replay parser reading
+    this file — better to drop one record than silently emit a file no
+    standard JSON reader can load.
+    """
     path = log_file_path(hass, entry_id)
-    line = json.dumps(record, default=str)
     try:
+        line = json.dumps(record, default=str, allow_nan=False)
         await hass.async_add_executor_job(_append_line, path, line)
-    except OSError as err:
+    except Exception as err:  # noqa: BLE001 - logging must never break output
         _LOGGER.warning("Could not write TrueTemp data log %s: %s", path, err)

@@ -12,3 +12,5 @@ venv/
 CLAUDE.md
 .claude/
 docs/plan*
+docs/audit*
+scratchpad/

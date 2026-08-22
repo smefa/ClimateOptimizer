@@ -18,9 +18,12 @@ composition and the price logic:
                 + solar * SOLAR_GAIN  feedforward, optional
                 + price_adjustment    bounded, tier-scaled, timed off the
                                       measured fall time
-                + weather_preramp     one-sided forecast lookahead on the three
-                                      terms above, timed off the measured rise
+                + weather_preramp     one-sided forecast lookahead on outdoor
+                                      and wind, timed off the measured rise
                                       time, optional
+                + sun_precool         mirror-image lookahead on solar alone:
+                                      backs heat off ahead of MORE sun, timed
+                                      off the measured fall time, optional
 
 ## Why the two feedforward gains are constants and not config
 
@@ -104,25 +107,37 @@ OUTPUT_SANITY_MAX_C = 25.0
 # parameters. Units: degC of outdoor spoof per unit of input.
 SOLAR_GAIN_C = 3.0
 WIND_GAIN_C_PER_MS = 0.3
+# Below this the wind term is a breeze, not a draught: contributes exactly 0
+# rather than a tiny, mostly-noise correction. The gain applies to the speed
+# above the deadband, not the raw reading, so the term is continuous at the
+# boundary instead of stepping straight to -WIND_GAIN_C_PER_MS * 4.0.
+WIND_DEADBAND_MS = 4.0
 
 # A price adjustment smaller than this is not a deliberate excursion and should
 # not freeze the learner.
 PRICE_BRAKING_EPS_C = 0.05
 
 # --- Weather lookahead (pre-ramping) ---------------------------------------
-# Total budget across all three pre-ramps, not per signal. A cold front
-# legitimately raises conduction loss, infiltration loss and cloud cover at
-# once, so the terms are additive in physics — but three simultaneous
-# overshoots are still one overshoot too many for the learner to unwind
-# afterwards. 3.0 sits below learner.MAX_AUTHORITY_C (5.0) and
-# PRICE_CATCHUP_MAX_C (6.0), and equals the largest single steady-state
-# feedforward term (SOLAR_GAIN_C).
+# Total budget across the outdoor and wind pre-ramps, not per signal. A cold
+# front legitimately raises conduction loss and infiltration loss at once, so
+# the terms are additive in physics — but two simultaneous overshoots are
+# still one overshoot too many for the learner to unwind afterwards. 3.0 sits
+# below learner.MAX_AUTHORITY_C (5.0) and PRICE_CATCHUP_MAX_C (6.0), and
+# equals the largest single steady-state feedforward term (SOLAR_GAIN_C).
 WEATHER_PRERAMP_MAX_C = 3.0
 # Below this the ramp is noise: not reported, and does not freeze the learner.
 # Deliberately looser than PRICE_BRAKING_EPS_C — a pre-ramp fires far more
 # often than a price spike, and freezing on every 0.1 degC wobble would starve
 # the learner through a whole winter.
 WEATHER_PRERAMP_EPS_C = 0.2
+
+# Budget for the sun pre-cool term, kept separate from WEATHER_PRERAMP_MAX_C
+# on purpose: that budget bounds a comfort-overshoot hedge (worst case if
+# wrong: briefly a bit warm), while this one bounds a comfort-undershoot bet
+# (worst case if wrong: briefly a bit cold with no sun to cover it). Same
+# starting magnitude as the shared budget until field data argues for a
+# different number.
+SOLAR_PRECOOL_MAX_C = 3.0
 
 # --- Price catch-up (feedforward kick) --------------------------------------
 # `max_sag_c`/`precharge_c` above are a comfort bound: how far indoor is
@@ -555,14 +570,18 @@ def _resolve_absolute_floor_c(
     sensible-SCALE default, not a money-correct one; an occupant who
     specifically cares about the persistently-cheap case should set an
     explicit floor instead of relying on auto.
+
+    The reference median can be negative (routine for Nordpool in spring/
+    summer) — `abs()` it so the floor stays a positive backstop instead of
+    flipping sign and disabling itself.
     """
     if floor_setting_c != 0.0:
         return floor_setting_c
     if history.daily_medians_c:
-        return PRICE_SIGNIFICANCE_AUTO_FRACTION * _percentile(
-            sorted(history.daily_medians_c), 50
-        )
-    return PRICE_SIGNIFICANCE_AUTO_FRACTION * today_median_c
+        median_c = _percentile(sorted(history.daily_medians_c), 50)
+    else:
+        median_c = today_median_c
+    return PRICE_SIGNIFICANCE_AUTO_FRACTION * abs(median_c)
 
 
 def price_significance(
@@ -655,6 +674,16 @@ def _lookahead_weighted_peak(
     return best, best_h
 
 
+def _wind_effect_c(wind_speed_ms: float) -> float:
+    """Steady-state wind term, in degC of outdoor spoof (<= 0).
+
+    Zero at or below WIND_DEADBAND_MS; linear in the excess above it. Shared
+    by the instantaneous term and its pre-ramp so the two can never diverge —
+    see `_term_preramp_c`.
+    """
+    return -WIND_GAIN_C_PER_MS * max(0.0, wind_speed_ms - WIND_DEADBAND_MS)
+
+
 def _lookahead_response(
     forecast: tuple[tuple[float, float], ...] | None,
     start: float,
@@ -687,9 +716,8 @@ def _term_preramp_c(
 
     `to_term_c` maps a raw forecast value to the degC this module would
     already contribute for it — the forecast temperature itself for the
-    outdoor term, `-WIND_GAIN_C_PER_MS * v` for wind, `SOLAR_GAIN_C * v` for
-    sun. So there is no new gain anywhere: the pre-ramp is the existing term
-    evaluated at a future time.
+    outdoor term, `_wind_effect_c` for wind. So there is no new gain
+    anywhere: the pre-ramp is the existing term evaluated at a future time.
 
     The "now" reference is the series' OWN first entry, never a live sensor
     reading. A forecast that runs a constant 2 degC below the wall sensor is
@@ -699,7 +727,9 @@ def _term_preramp_c(
 
     One-sided by construction: only the part of the change asking for MORE
     heat survives. Easing off ahead of a forecast warm-up is a comfort
-    sacrifice on a forecast that may be wrong, with no saving attached.
+    sacrifice on a forecast that may be wrong, with no saving attached. Sun
+    is deliberately not one of the signals fed through here any more — see
+    `_term_precool_c` for why it gets the opposite treatment instead.
     """
     if not series:
         return 0.0, None
@@ -708,6 +738,42 @@ def _term_preramp_c(
         series, lead_minutes, lambda v: max(0.0, now_term_c - to_term_c(v))
     )
     return -magnitude, when_h
+
+
+def _term_precool_c(
+    series: tuple[tuple[float, float], ...] | None,
+    to_term_c: Callable[[float], float],
+    lead_minutes: float,
+) -> tuple[float, float | None]:
+    """The sun term's pre-cool, in degC of outdoor spoof (>= 0), and when it peaks.
+
+    Mirror image of `_term_preramp_c`, in both sign and lead time. Losing sun
+    is already fully handled reactively: `sun_adjustment_c` recomputes from
+    the live sun/cloud reading every cycle, so there is nothing to pre-empt
+    when solar gain is about to drop — the reactive term will simply ask for
+    more heat once it actually does, the same way it asks for less right now.
+    Pre-ramping that loss in advance would duplicate a correction the reactive
+    term already makes on its own.
+
+    GAINING sun is the case worth acting on ahead of time, and in the
+    opposite direction from every other pre-ramp here: if the heating output
+    isn't backed off before the sun arrives, the heat already in the pipe
+    stacks with the incoming solar gain and overshoots comfort. So this is
+    timed off `lead_minutes` as the measured FALL time, not the rise time —
+    the existing heat surplus needs to have had time to dissipate before the
+    sun lands, not still be arriving (compare `_lookahead_response`, which
+    times price pre-braking off the same fall time for the same reason).
+
+    Same constant-bias cancellation as `_term_preramp_c`: the "now" reference
+    is the series' own first entry, not a live reading.
+    """
+    if not series:
+        return 0.0, None
+    now_term_c = to_term_c(series[0][1])
+    magnitude, when_h = _lookahead_weighted_peak(
+        series, lead_minutes, lambda v: max(0.0, to_term_c(v) - now_term_c)
+    )
+    return magnitude, when_h
 
 
 @dataclass(frozen=True)
@@ -797,6 +863,12 @@ class HeuristicParams:
     # the coordinator from learner.SPOOF_PER_INDOOR_C so the constant is
     # single-sourced without this module importing a sibling.
     spoof_per_indoor_c: float = 1.0
+    # The occupant's literal configured target — what `climate.target_temperature`
+    # reports. `indoor_target_c` above is already vacation-effective; the two
+    # intentionally diverge while a plan is sagging the house. Carried through
+    # to `HeuristicResult` so a replay/debug session doesn't have to guess
+    # which "indoor target" it's looking at.
+    user_indoor_target_c: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -850,16 +922,25 @@ class HeuristicResult:
     seasonal_reference_spread_c: float | None = None
     # Weather lookahead. Each component is reported separately (unclamped) so a
     # user can see which signal drove the total; `weather_preramp_c` is the sum
-    # after the shared `WEATHER_PRERAMP_MAX_C` budget.
+    # after the shared `WEATHER_PRERAMP_MAX_C` budget. Sun is not part of this
+    # bucket — see `sun_precool_c` below.
     outdoor_preramp_c: float = 0.0
     wind_preramp_c: float = 0.0
-    sun_preramp_c: float = 0.0
     weather_preramp_c: float = 0.0
     weather_preramp_in_min: float | None = None
     # True while the pre-ramp is deliberately holding the house above target.
     # Read by the learner, for the same reason `price_braking` is.
     weather_preramp_active: bool = False
+    # Sun's own lookahead: backs heat off ahead of MORE sun arriving, the
+    # mirror image of weather_preramp_c above. See `_term_precool_c`.
+    sun_precool_c: float = 0.0
+    sun_precool_in_min: float | None = None
+    # True while the pre-cool is deliberately holding the house below target.
+    # Read by the learner, for the same reason `price_braking` is.
+    sun_precool_active: bool = False
     model_version: str = MODEL_VERSION
+    # See `HeuristicParams.user_indoor_target_c`.
+    user_indoor_target_c: float = 0.0
 
 
 def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult:
@@ -884,7 +965,8 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
             indoor_data_available=inputs.indoor_data_available,
             indoor_target_c=params.indoor_target_c,
             effective_indoor_target_c=params.indoor_target_c,
-            learned_offset_c=0.0,
+            user_indoor_target_c=params.user_indoor_target_c,
+            learned_offset_c=inputs.learned_offset_c,
             wind_adjustment_c=0.0,
             sun_adjustment_c=0.0,
             price_adjustment_c=0.0,
@@ -916,7 +998,7 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
     # A disabled input contributes exactly 0, identically to an unavailable
     # sensor — the term is off, not merely small.
     wind_adjustment_c = (
-        -WIND_GAIN_C_PER_MS * inputs.wind_speed_ms if params.enable_wind_input else 0.0
+        _wind_effect_c(inputs.wind_speed_ms) if params.enable_wind_input else 0.0
     )
     sun_adjustment_c = SOLAR_GAIN_C * solar_effect if params.enable_solar_input else 0.0
 
@@ -944,8 +1026,13 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
     price_flat_day = False
     no_forecast = False
     # Pre-braking is timed off the fall time and pre-charging off the rise
-    # time: they are asking different questions of the same plant.
-    lead_minutes = max(0.0, inputs.fall_minutes)
+    # time: they are asking different questions of the same plant. Only half
+    # of the fall lag is used: what costs money is the compressor still
+    # drawing power, not the slab coasting on stored heat afterward, and the
+    # measured fall lag conflates both. Halving approximates the compressor
+    # cutting out partway through that window without a separate measurement
+    # of it.
+    lead_minutes = max(0.0, inputs.fall_minutes * 0.5)
     precharge_lead_minutes = max(0.0, inputs.rise_minutes)
 
     if current_price is not None:
@@ -1059,43 +1146,52 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
     # Weather lookahead: act on a cold front before it lands, the same way the
     # price logic above acts on a spike before it lands. Timed off the RISE
     # time, not the fall time — this is a pre-charge, and banked heat must have
-    # arrived before the change, not still be on its way.
+    # arrived before the change, not still be on its way. Sun is deliberately
+    # not part of this bucket — see sun_precool_c below.
     outdoor_preramp_c = 0.0
     wind_preramp_c = 0.0
-    sun_preramp_c = 0.0
     weather_preramp_c = 0.0
     weather_preramp_in_min: float | None = None
     preramp_lead_minutes = max(0.0, inputs.rise_minutes)
+    # Sun's own lookahead, opposite sign and opposite lead: back off ahead of
+    # MORE sun arriving, timed off the FALL time so today's heat surplus has
+    # dissipated before the gain lands rather than stacking with it. See
+    # _term_precool_c.
+    sun_precool_c = 0.0
+    sun_precool_in_min: float | None = None
+    precool_lead_minutes = max(0.0, inputs.fall_minutes)
     if params.enable_weather_lookahead:
         outdoor_preramp_c, outdoor_h = _term_preramp_c(
             inputs.outdoor_forecast, lambda v: v, preramp_lead_minutes
         )
         wind_h: float | None = None
-        sun_h: float | None = None
         # A disabled input contributes exactly 0 to the lookahead too.
         if params.enable_wind_input:
             wind_preramp_c, wind_h = _term_preramp_c(
                 inputs.wind_forecast_ms,
-                lambda v: -WIND_GAIN_C_PER_MS * v,
-                preramp_lead_minutes,
-            )
-        if params.enable_solar_input:
-            sun_preramp_c, sun_h = _term_preramp_c(
-                inputs.solar_forecast,
-                lambda v: SOLAR_GAIN_C * v,
+                _wind_effect_c,
                 preramp_lead_minutes,
             )
         weather_preramp_c = _clamp(
-            outdoor_preramp_c + wind_preramp_c + sun_preramp_c,
+            outdoor_preramp_c + wind_preramp_c,
             -WEATHER_PRERAMP_MAX_C,
             0.0,
         )
         # Report the timing of whichever signal is driving hardest.
         dominant = max(
-            ((outdoor_preramp_c, outdoor_h), (wind_preramp_c, wind_h), (sun_preramp_c, sun_h)),
+            ((outdoor_preramp_c, outdoor_h), (wind_preramp_c, wind_h)),
             key=lambda pair: -pair[0],
         )
         weather_preramp_in_min = None if dominant[1] is None else dominant[1] * 60.0
+
+        if params.enable_solar_input:
+            sun_precool_raw_c, sun_h = _term_precool_c(
+                inputs.solar_forecast,
+                lambda v: SOLAR_GAIN_C * v,
+                precool_lead_minutes,
+            )
+            sun_precool_c = _clamp(sun_precool_raw_c, 0.0, SOLAR_PRECOOL_MAX_C)
+            sun_precool_in_min = None if sun_h is None else sun_h * 60.0
 
     compensated_outdoor_temp_c = _clamp(
         inputs.raw_outdoor_temp_c
@@ -1103,7 +1199,8 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         + price_adjustment_c
         + wind_adjustment_c
         + sun_adjustment_c
-        + weather_preramp_c,
+        + weather_preramp_c
+        + sun_precool_c,
         OUTPUT_SANITY_MIN_C,
         OUTPUT_SANITY_MAX_C,
     )
@@ -1136,9 +1233,14 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         if weather_preramp_in_min is not None:
             reason += f" for weather change in {weather_preramp_in_min:.0f} min"
         reason += (
-            f" (outdoor {outdoor_preramp_c:+.1f}, wind {wind_preramp_c:+.1f}, "
-            f"sun {sun_preramp_c:+.1f}; {preramp_lead_minutes:.0f} min rise)"
+            f" (outdoor {outdoor_preramp_c:+.1f}, wind {wind_preramp_c:+.1f}; "
+            f"{preramp_lead_minutes:.0f} min rise)"
         )
+    if abs(sun_precool_c) > WEATHER_PRERAMP_EPS_C:
+        reason += f"; pre-cool {sun_precool_c:+.1f}°C"
+        if sun_precool_in_min is not None:
+            reason += f" for more sun in {sun_precool_in_min:.0f} min"
+        reason += f" ({precool_lead_minutes:.0f} min fall)"
     if price_for_braking is not None:
         reason += f"; price {price_for_braking:.2f} ['{params.price_comfort_tier}' tier"
         if no_forecast:
@@ -1187,6 +1289,7 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         indoor_data_available=inputs.indoor_data_available,
         indoor_target_c=params.indoor_target_c,
         effective_indoor_target_c=effective_indoor_target_c,
+        user_indoor_target_c=params.user_indoor_target_c,
         learned_offset_c=inputs.learned_offset_c,
         wind_adjustment_c=wind_adjustment_c,
         sun_adjustment_c=sun_adjustment_c,
@@ -1219,10 +1322,12 @@ def compute(inputs: HeuristicInputs, params: HeuristicParams) -> HeuristicResult
         seasonal_reference_spread_c=inputs.seasonal_reference_spread_c,
         outdoor_preramp_c=outdoor_preramp_c,
         wind_preramp_c=wind_preramp_c,
-        sun_preramp_c=sun_preramp_c,
         weather_preramp_c=weather_preramp_c,
         weather_preramp_in_min=weather_preramp_in_min,
         weather_preramp_active=abs(weather_preramp_c) > WEATHER_PRERAMP_EPS_C,
+        sun_precool_c=sun_precool_c,
+        sun_precool_in_min=sun_precool_in_min,
+        sun_precool_active=abs(sun_precool_c) > WEATHER_PRERAMP_EPS_C,
     )
 
 
@@ -1251,21 +1356,27 @@ def heat_curve_offset_c(
 
 
 def indoor_climate_offset_c(
-    compensated_outdoor_temp_c: float, raw_outdoor_temp_c: float
+    compensated_outdoor_temp_c: float,
+    raw_outdoor_temp_c: float,
+    spoof_per_indoor_c: float = 1.0,
 ) -> float:
     """The delta to add to an indoor climate entity's own target temperature,
     for pumps (or TRVs) that expose a room-sensor climate entity to steer
     instead of a spoofed outdoor sensor or a native curve-offset dial.
 
-    Same magnitude as `heat_curve_offset_c(..., invert=False)`, but never
-    rounded to a whole number: a climate entity's target step (commonly
-    0.1-0.5 degC) is finer than a curve-offset dial's integer one. There is
-    also no invert flag here — raising a climate entity's target always
-    means "call for more heat", the same universal direction `invert=False`
-    already matches, so unlike a pump's proprietary curve dial there is no
-    per-pump convention to flip.
+    Same *outdoor-spoof* magnitude as `heat_curve_offset_c(..., invert=False)`,
+    but converted from degrees of outdoor spoof to degrees of indoor target via
+    `spoof_per_indoor_c` (see `HeuristicParams.spoof_per_indoor_c`) before
+    returning, since this output lands on an indoor-facing entity, not an
+    outdoor-facing one — the two only happen to be numerically identical while
+    that constant is 1.0. Never rounded to a whole number: a climate entity's
+    target step (commonly 0.1-0.5 degC) is finer than a curve-offset dial's
+    integer one. There is also no invert flag here — raising a climate
+    entity's target always means "call for more heat", the same universal
+    direction `invert=False` already matches, so unlike a pump's proprietary
+    curve dial there is no per-pump convention to flip.
     """
-    return raw_outdoor_temp_c - compensated_outdoor_temp_c
+    return (raw_outdoor_temp_c - compensated_outdoor_temp_c) / spoof_per_indoor_c
 
 
 # The delta `heat_curve_offset_c` would compute while the hard limit is

@@ -44,7 +44,6 @@ from .const import CONF_VACATION_PLANS, DATA_VACATION_SKIP_RELOAD, DOMAIN
 from .vacation import (
     RECURRENCE_ONCE,
     RECURRENCE_WEEKLY,
-    RECURRENCE_YEARLY,
     RECURRENCES,
     VacationPlan,
     deserialize_plans,
@@ -113,11 +112,18 @@ def _update_plans(hass: HomeAssistant, entry, plans: list[VacationPlan]) -> None
     plain coordinator refresh instead of its usual full reload — see
     DATA_VACATION_SKIP_RELOAD. Every write in this module goes through here
     so no call site can forget the flag and reintroduce the card's blank-for-
-    a-few-seconds reload flicker."""
-    hass.data.setdefault(DATA_VACATION_SKIP_RELOAD, set()).add(entry.entry_id)
-    hass.config_entries.async_update_entry(
+    a-few-seconds reload flicker.
+
+    The flag is only set when async_update_entry actually changes something.
+    HA does not fire the update listener at all for a no-op write (identical
+    options), so an unconditional flag would sit stale in hass.data and get
+    consumed by the *next* real options-flow change instead, turning that
+    change's reload into a no-op refresh."""
+    changed = hass.config_entries.async_update_entry(
         entry, options={**entry.options, CONF_VACATION_PLANS: serialize_plans(plans)}
     )
+    if changed:
+        hass.data.setdefault(DATA_VACATION_SKIP_RELOAD, set()).add(entry.entry_id)
 
 
 def _plan_from_service_data(data: dict[str, Any]) -> VacationPlan:
@@ -150,12 +156,32 @@ def _plan_from_service_data(data: dict[str, Any]) -> VacationPlan:
 
         # RECURRENCE_YEARLY — the only remaining option once `recurrence`
         # passed the schema's `vol.In(RECURRENCES)` check.
+        start_month = data["start_month"]
+        start_day = data["start_day"]
+        end_month = data["end_month"]
+        end_day = data["end_day"]
+        try:
+            # 2024 is a leap year, so 29 Feb stays legal; the schema only
+            # bounds each field to 1..12 / 1..31 independently, which admits
+            # impossible combinations like 30 Feb or 31 Apr.
+            date(2024, start_month, start_day)
+            date(2024, end_month, end_day)
+        except ValueError as err:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="vacation_service_date_invalid"
+            ) from err
+        if (end_month, end_day) == (start_month, start_day):
+            # _yearly_window_for_start_year treats an empty window as a
+            # New-Year wrap and produces a 365-day setback.
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="vacation_service_window_invalid"
+            )
         return VacationPlan(
             **common,
-            start_month=data["start_month"],
-            start_day=data["start_day"],
-            end_month=data["end_month"],
-            end_day=data["end_day"],
+            start_month=start_month,
+            start_day=start_day,
+            end_month=end_month,
+            end_day=end_day,
         )
     except KeyError as err:
         raise ServiceValidationError(
@@ -171,7 +197,8 @@ async def _async_handle_vacation_plan_set(call: ServiceCall) -> None:
     entry = _resolve_entry(call.hass, call.data["config_entry_id"])
     plan = _plan_from_service_data(call.data)
 
-    plans = [p for p in deserialize_plans(entry.options.get(CONF_VACATION_PLANS, [])) if p.id != plan.id]
+    existing_plans = deserialize_plans(entry.options.get(CONF_VACATION_PLANS, []))
+    plans = [p for p in existing_plans if p.id != plan.id]
     plans.append(plan)
     if find_overlap(plans, dt_util.now().replace(tzinfo=None)) is not None:
         raise ServiceValidationError(

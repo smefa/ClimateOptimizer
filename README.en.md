@@ -130,8 +130,10 @@ Everything below is optional and can be skipped:
 - **Sun and wind compensation** — for homes where these genuinely affect the
   room you're measuring in.
 - **Acting on the weather forecast** — starts heating a little harder before a
-  cold front, a rising wind or the sun going in actually arrives, so the house
-  doesn't have to cool down first. Only ever adds heat, never takes it away.
+  cold front or a rising wind actually arrives, so the house doesn't have to
+  cool down first. That part only ever adds heat, never takes it away. Sun
+  works the other way around: it holds heat back before a burst of sunshine
+  arrives, so the house doesn't overheat once the sun's own warmth lands.
 - **Electricity price savings** — shift heating away from the most expensive
   hours of the day.
 - **Where to send the result** — a Home Assistant entity, and/or a direct

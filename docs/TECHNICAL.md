@@ -71,11 +71,13 @@ against what the house did:
 | | What it is | Used for |
 | --- | --- | --- |
 | **Response time** | Commanded heat → measurable indoor change | How fast the controller is allowed to correct |
-| **Wind-down time** | Pump backs off → house actually stops gaining | How early to coast before an expensive hour |
+| **Wind-down time** | Pump backs off → house actually stops gaining | Half of it sets how early to coast before an expensive hour |
 
 They are deliberately different numbers. A concrete slab keeps delivering heat
-for hours after the pump stops, so wind-down is typically the longer of the two —
-and it is the one that matters for price. Both are on
+for hours after the pump stops, so wind-down is typically the longer of the two.
+Price braking is timed off half of it rather than the whole thing, since what
+costs money is the compressor still drawing power, not the slab coasting on
+stored heat afterward — and the measured figure conflates both. Both are on
 `sensor.<name>_status` in plain minutes, and they say whether they are measured
 yet or still using the default for your emitter type.
 
@@ -196,17 +198,17 @@ into the learned offset within a day.
 by default. Sun and wind above answer "what is happening right now"; this one
 answers "what is about to happen".
 
-It reads the hourly forecast and, when a cold front, a rising wind or the sun
-going in is coming, starts heating a little harder *before* it lands — the same
-thing price pre-charging already does ahead of a spike, using the same measured
-rise time, so the extra heat has actually arrived by the time it is needed
-rather than still being on its way.
+It reads the hourly forecast and, when a cold front or a rising wind is
+coming, starts heating a little harder *before* it lands — the same thing
+price pre-charging already does ahead of a spike, using the same measured rise
+time, so the extra heat has actually arrived by the time it is needed rather
+than still being on its way.
 
 Three properties keep it from becoming another thing to tune:
 
 - **No new gain.** The outdoor part is a straight level shift: 1 °C of
-  anticipated drop asks for at most 1 °C of colder spoof. Wind and sun reuse
-  the same coefficients their steady-state terms already use.
+  anticipated drop asks for at most 1 °C of colder spoof. Wind reuses the same
+  coefficient its steady-state term already uses.
 - **One-sided.** It only ever asks for *more* heat. Easing off ahead of a
   forecast warm-up would trade comfort against a forecast that might be wrong,
   with no saving attached, so it is not done.
@@ -216,15 +218,30 @@ Three properties keep it from becoming another thing to tune:
   sensor — a forecast that reads consistently colder than your wall sensor
   produces exactly zero rather than a permanent nudge.
 
-All three pushes share one 3 °C budget, so a front that fires all of them at
-once cannot stack into an overshoot. While the pre-ramp is acting, learning
-pauses (`learning_paused_because` says so), because the house is deliberately
-being held above target and the learner must not integrate that away.
+Both pushes share one 3 °C budget, so a front that fires both of them at once
+cannot stack into an overshoot. While the pre-ramp is acting, learning pauses
+(`learning_paused_because` says so), because the house is deliberately being
+held above target and the learner must not integrate that away.
 
-Wind's share only counts if the wind term is switched on, and the sun's only if
-the sun term is; the outdoor share needs nothing but a weather entity. If the
-weather integration provides no *hourly* forecast, the whole thing quietly
-contributes zero.
+Wind's share only counts if the wind term is switched on; the outdoor share
+needs nothing but a weather entity. If the weather integration provides no
+*hourly* forecast, the whole thing quietly contributes zero.
+
+**Sun gets the opposite treatment**, not a share of the bucket above. Losing
+sun is already fully covered reactively — the live sun term recomputes every
+cycle, so there is nothing useful to pre-empt when solar gain is about to
+drop. *Gaining* sun is the case worth acting on ahead of time, and in the
+opposite direction: if the heating output isn't backed off before the sun
+arrives, the heat already in the pipe stacks with the incoming solar gain and
+overshoots comfort. So this piece backs off *before* a forecast rise in sun,
+timed off the measured *fall* time rather than the rise time — the existing
+heat surplus needs to have had time to dissipate before the sun lands, not
+still be arriving. It has its own separate 3 °C budget (backing off too far is
+a comfort-undershoot bet if the forecast is wrong, a different risk from the
+overshoot hedge the outdoor/wind budget covers), decays to zero the same
+self-cancelling way, and only counts if the sun term is switched on. While it
+is acting, learning pauses the same way, because the house is deliberately
+being held *below* target this time.
 
 ---
 
@@ -422,10 +439,12 @@ again, and on unload/reload so nothing outlives the entry. See `TrueTempCoordina
 | `price_adjustment_c` | Price-braking correction, zero if price compensation is off or not engaged. |
 | `outdoor_preramp_c` | Anticipatory push (≤ 0) from a forecast outdoor-temperature drop. `disabled` if the forecast lookahead is off. |
 | `wind_preramp_c` | Anticipatory push (≤ 0) from forecast rising wind. `disabled` if the lookahead is off; zero if the wind input is off. |
-| `sun_preramp_c` | Anticipatory push (≤ 0) from forecast losing sun. `disabled` if the lookahead is off; zero if the sun input is off. |
-| `weather_preramp_c` | The three above, summed and clamped to a shared 3 °C budget — the number that actually reaches the published value. `disabled` if the lookahead is off. |
+| `weather_preramp_c` | The two above, summed and clamped to a shared 3 °C budget — the number that actually reaches the published value. `disabled` if the lookahead is off. |
 | `weather_preramp_in_min` | Minutes until the forecast change currently driving the pre-ramp. `disabled` if the lookahead is off. |
 | `weather_preramp_active` | `True` while the pre-ramp is deliberately holding the house above target — tells the learner to freeze, exactly as `price_braking` does in the other direction. |
+| `sun_precool_c` | Anticipatory pull-back (≥ 0) from forecast gaining sun, timed off the measured fall time. `disabled` if the lookahead is off; zero if the sun input is off. |
+| `sun_precool_in_min` | Minutes until the forecast sun increase currently driving the pre-cool. `disabled` if the lookahead is off. |
+| `sun_precool_active` | `True` while the pre-cool is deliberately holding the house below target — tells the learner to freeze, same mechanism as `weather_preramp_active` in the opposite direction. |
 | `wind_speed_ms` | Wind speed read from the weather entity's forecast. |
 | `cloud_coverage_pct` | Cloud cover read from the weather entity's forecast. `disabled` if sun input is off and nothing was fetched. |
 | `solar_effect` | Fraction (0–1) of full solar gain available right now — pure geometry and cloud cover, computed regardless of whether the sun term is enabled (see `solar_effect_of` in `heuristic.py`). |

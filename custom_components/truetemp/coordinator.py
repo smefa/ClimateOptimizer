@@ -23,6 +23,7 @@ and `lag.push` once `LEARNER_STEP_SECONDS` have genuinely elapsed.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -89,6 +90,8 @@ from .const import (
 from .data_logger import async_log_record, log_file_path
 from .heuristic import (
     COLD_CAUTION_MID,
+    OUTPUT_SANITY_MAX_C,
+    OUTPUT_SANITY_MIN_C,
     PRICE_TIER_MID,
     SOLAR_GAIN_C,
     HeuristicInputs,
@@ -112,7 +115,6 @@ from .lag import (
     LagResult,
     LagState,
     estimate as lag_estimate,
-    fallback_minutes,
     initial_state as lag_initial_state,
     push as lag_push,
 )
@@ -132,7 +134,14 @@ from .learner_store import (
     serialize as learner_serialize,
     store_key as learner_store_key,
 )
-from .vacation import VacationPlan, deserialize_plans, resolve_vacation
+from .vacation import (
+    ACTIVE_PHASES as VACATION_ACTIVE_PHASES,
+    VacationPlan,
+    VacationReturnRamp,
+    deserialize_plans,
+    resolve_vacation_with_return_ramp,
+    start_return_ramp,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -147,10 +156,32 @@ LEARNER_STATE_SAVE_DELAY_SECONDS = 30.0
 # rewritten every cycle for sub-noise changes.
 OUTPUT_WRITE_TOLERANCE_C = 0.05
 
+# Force a re-push after this many cycles even when the value has not moved,
+# so a target reset by something outside this integration (the OhmOnWifi
+# device power-cycling, another integration touching the same number entity,
+# a restart of the target's own integration) is noticed and corrected
+# instead of being skipped forever by OUTPUT_WRITE_TOLERANCE_C.
+OUTPUT_REASSERT_AFTER_CYCLES = 4
+
 # Timeout for the direct OhmOnWifi local-API push. A plain HTTP GET to a device
 # on the local network, so a short timeout is right — no point blocking a whole
 # cycle on a device that has gone unreachable.
 OHMONWIFI_REQUEST_TIMEOUT_SECONDS = 10.0
+
+# Fallback range for the heat-curve-offset dial when the target entity's own
+# `min`/`max` attributes cannot be read (entity briefly unavailable, or an
+# `input_number` with no configured bounds). Matches the worked example this
+# output mode was built against (NIBE's dial is -10..+10) — real entity
+# bounds are always preferred and read fresh on every push.
+HEAT_CURVE_OFFSET_FALLBACK_MIN_C = -10.0
+HEAT_CURVE_OFFSET_FALLBACK_MAX_C = 10.0
+
+# Fallback range for a climate entity's target temperature when its own
+# `min_temp`/`max_temp` attributes cannot be read. Matches HA core's own
+# `ClimateEntity` defaults, so it's the same bound such an entity would report
+# anyway once available.
+INDOOR_CLIMATE_FALLBACK_MIN_C = 7.0
+INDOOR_CLIMATE_FALLBACK_MAX_C = 35.0
 
 # Tolerance on the learner cadence. HA's scheduler jitters by a second or two,
 # and demanding the full interval would drop roughly every other step.
@@ -198,9 +229,12 @@ def _forecast_offsets(
     individually rather than discarding the whole series — not every
     integration fills every field on every hour.
 
-    Entries at or before `now` are KEPT: the first one is the reference the
-    pre-ramp differences against (see `heuristic._term_preramp_c` on why that
-    must be the forecast's own value and never the wall sensor's).
+    Exactly one entry at or before `now` is kept — the most recent — as the
+    reference the pre-ramp differences against (see `heuristic._term_preramp_c`
+    on why that must be the forecast's own value and never the wall sensor's).
+    Older past entries are dropped: some integrations publish their hourly
+    series starting at local midnight, and differencing against an entry hours
+    stale would misdate the "now" the pre-ramp measures from.
     """
     offsets: list[tuple[float, float]] = []
     for entry in entries:
@@ -225,6 +259,13 @@ def _forecast_offsets(
     if not offsets:
         return None
     offsets.sort(key=lambda item: item[0])
+    last_past = -1
+    for index, (hours, _value) in enumerate(offsets):
+        if hours > 0:
+            break
+        last_past = index
+    if last_past > 0:
+        offsets = offsets[last_past:]
     return tuple(offsets)
 
 
@@ -245,6 +286,20 @@ def _as_float(state: State, attribute: str | None = None) -> float | None:
         return float(raw)
     except (TypeError, ValueError):
         return None
+
+
+def _sanitize_non_finite(value):
+    """Replace NaN/Infinity floats with `None`, recursing into dicts and
+    lists, so `_build_log_record`'s output round-trips through strict JSON
+    (`json.dumps(..., allow_nan=False)` in data_logger.py) instead of
+    emitting the bare `NaN`/`Infinity` tokens that break replay parsers."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _sanitize_non_finite(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_non_finite(v) for v in value]
+    return value
 
 
 class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
@@ -308,6 +363,13 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         self._last_output_number_value_c: float | None = None
         self._last_heat_curve_offset_value_c: int | None = None
         self._last_indoor_climate_value_c: float | None = None
+        # When each channel last wrote successfully, so a stale-but-unchanged
+        # cached value can be force-reasserted after OUTPUT_REASSERT_AFTER_CYCLES
+        # even though it looks unchanged from here.
+        self._last_ohmonwifi_pushed_at: datetime | None = None
+        self._last_output_number_pushed_at: datetime | None = None
+        self._last_heat_curve_offset_pushed_at: datetime | None = None
+        self._last_indoor_climate_pushed_at: datetime | None = None
         # Whether this integration switched the OhmOnWifi device's relay to
         # bypass because the outdoor sensor it spoofs from went unavailable —
         # see `_async_ohmonwifi_relay_failsafe`. Tracked so recovery only
@@ -347,6 +409,16 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         self.vacation_armed: bool = True
         self.vacation_result: HolidayResult | None = None
         self.active_plan_id: str | None = None
+        # An in-progress ramp back to `indoor_target_c`, started when
+        # `vacation_armed` is switched off while a plan is actively sagging
+        # the house — see `_async_update_data`'s call site and
+        # `vacation.VacationReturnRamp`'s docstring for why this can't just
+        # live inside `resolve_vacation_with_return_ramp()`'s own arguments.
+        # Not restored across a restart: resuming mid-ramp is a nicety, not
+        # a correctness requirement, and losing it just means one extra
+        # restart degrades to the old instant-snap behaviour for that one
+        # disarm.
+        self._vacation_return_ramp: VacationReturnRamp | None = None
         # What `indoor_target_c` currently feeds actually feeds THIS instead,
         # everywhere learning/price/output need "the target right now" — see
         # the three call sites this replaces, below. Equal to
@@ -359,6 +431,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # substitute for what was known at decision time.
         self._last_price_forecast: tuple[tuple[float, float], ...] | None = None
         self._last_outdoor_forecast: tuple[tuple[float, float], ...] | None = None
+        self._last_solar_forecast: tuple[tuple[float, float], ...] | None = None
 
     # --- Configuration views -------------------------------------------------
 
@@ -520,6 +593,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         """This cycle's occupant preferences. No control gains live here."""
         return HeuristicParams(
             indoor_target_c=self._effective_target_c,
+            user_indoor_target_c=self.indoor_target_c,
             comfort_min_c=self.comfort_min_c,
             enable_price_compensation=self.price_enabled,
             price_comfort_tier=self.price_comfort_tier,
@@ -580,7 +654,9 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
     ) -> None:
         """Same as `_sync_source_issue`, but for a source that can be switched
         off entirely — in which case it is never a problem."""
-        self._sync_source_issue(key, ok=not enabled or ok, severity=ir.IssueSeverity.WARNING, entity_id=entity_id)
+        self._sync_source_issue(
+            key, ok=not enabled or ok, severity=ir.IssueSeverity.WARNING, entity_id=entity_id
+        )
 
     def clear_source_issues(self) -> None:
         """Drop every issue this entry could own, e.g. on unload — otherwise a
@@ -597,6 +673,9 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         its last offset, which is a safe hold rather than a failure.
         """
         entity_id = _entry_value(self.entry, CONF_INDOOR_TEMP_SENSOR, None)
+        if not entity_id:
+            _LOGGER.warning("No indoor temperature sensor configured")
+            return None, False
         state = self.hass.states.get(entity_id)
         if not _state_is_usable(state):
             _LOGGER.warning(
@@ -616,6 +695,8 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         """The one hard-required source: without it there is nothing to publish
         at all, so this is the single read that still fails the update."""
         entity_id = _entry_value(self.entry, CONF_OUTDOOR_TEMP_SENSOR, None)
+        if not entity_id:
+            raise UpdateFailed("No outdoor temperature sensor configured")
         state = self.hass.states.get(entity_id)
         if not _state_is_usable(state):
             raise UpdateFailed(f"Outdoor temperature sensor {entity_id} is unavailable")
@@ -962,6 +1043,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                     is_active=self.is_active,
                     price_braking=bool(previous and previous.price_braking),
                     weather_preramp=bool(previous and previous.weather_preramp_active),
+                    sun_precool=bool(previous and previous.sun_precool_active),
                     rise_hours=self.lag_result.rise_hours,
                     estimated_solar_gain_c=estimated_solar_gain_c,
                 ),
@@ -1082,6 +1164,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         price_forecast = self._price_forecast_offsets()
         self._last_price_forecast = price_forecast
         self._last_outdoor_forecast = forecast_read.outdoor_series
+        self._last_solar_forecast = forecast_read.solar_series
 
         # Price significance: a taper on braking/pre-charge authority for days
         # whose price swing is economically trivial — see
@@ -1137,19 +1220,46 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         # same past window, so `resolve_plan` reports `done` for it forever);
         # `weekly`/`yearly` plans roll over to their next occurrence on their
         # own, never reaching `done`.
-        self.vacation_result, self.active_plan_id = resolve_vacation(
-            # holiday.py/vacation.py are stdlib-only and build their own
-            # start/ramp/return datetimes as naive local time
-            # (`datetime.combine(date, time)`) — see those modules'
-            # docstrings. `dt_util.now()` is timezone-aware, which raises
-            # `TypeError` when compared against a naive datetime, so the
-            # tzinfo is stripped here to hand `resolve_vacation()` the naive
-            # local wall-clock time it actually expects.
-            now=dt_util.now().replace(tzinfo=None),
-            master_armed=self.vacation_armed,
-            plans=self.vacation_plans,
-            normal_target_c=self.indoor_target_c,
-            rise_hours=self._lag_result().rise_hours,
+        #
+        # holiday.py/vacation.py are stdlib-only and build their own
+        # start/ramp/return datetimes as naive local time
+        # (`datetime.combine(date, time)`) — see those modules' docstrings.
+        # `dt_util.now()` is timezone-aware, which raises `TypeError` when
+        # compared against a naive datetime, so the tzinfo is stripped here
+        # to hand them the naive local wall-clock time they actually expect.
+        vacation_now = dt_util.now().replace(tzinfo=None)
+
+        # Disarm mid-trip needs its own ramp back to normal, the same as a
+        # plan's scheduled return — otherwise `resolve_vacation_with_return_
+        # ramp()` has nothing to ramp FROM once `vacation_armed` is False,
+        # since it (like `resolve_vacation()`) only ever computes from the
+        # plan list. `self.vacation_result` here is still LAST cycle's
+        # value, from while the switch was still armed, which is exactly
+        # the target the house was actually sagged to at the moment of
+        # disarm. Only fires once per disarm: after the first cycle,
+        # `_vacation_return_ramp` is no longer `None`.
+        if (
+            not self.vacation_armed
+            and self._vacation_return_ramp is None
+            and self.vacation_result is not None
+            and self.vacation_result.phase in VACATION_ACTIVE_PHASES
+        ):
+            self._vacation_return_ramp = start_return_ramp(
+                now=vacation_now,
+                from_target_c=self.vacation_result.target_c,
+                normal_target_c=self.indoor_target_c,
+                rise_hours=self._lag_result().rise_hours,
+            )
+
+        self.vacation_result, self.active_plan_id, self._vacation_return_ramp = (
+            resolve_vacation_with_return_ramp(
+                now=vacation_now,
+                master_armed=self.vacation_armed,
+                plans=self.vacation_plans,
+                normal_target_c=self.indoor_target_c,
+                rise_hours=self._lag_result().rise_hours,
+                return_ramp=self._vacation_return_ramp,
+            )
         )
         self._effective_target_c = self.vacation_result.target_c
 
@@ -1249,6 +1359,57 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         if entity_id:
             await self._async_push_number_entity(entity_id, value)
 
+    def _output_stale(self, pushed_at: datetime | None) -> bool:
+        """Whether a channel's last successful write is old enough that it
+        should be reasserted even though the computed value looks unchanged
+        from our local cache — see OUTPUT_REASSERT_AFTER_CYCLES."""
+        if pushed_at is None:
+            return True
+        return dt_util.utcnow() - pushed_at >= timedelta(
+            minutes=UPDATE_INTERVAL_MINUTES * OUTPUT_REASSERT_AFTER_CYCLES
+        )
+
+    def _target_number_entity_value(self, entity_id: str) -> float | None:
+        """Read a `number`/`input_number` target's own current state, so a
+        push can be compared against reality instead of a local cache that
+        cannot see a reset made by something else. Returns None when the
+        entity is missing, unavailable, or not numeric, so the caller can
+        fall back to the cache."""
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in (None, "unknown", "unavailable"):
+            return None
+        try:
+            return float(state.state)
+        except (TypeError, ValueError):
+            return None
+
+    def _clamp_to_entity_range(
+        self,
+        entity_id: str,
+        value: float,
+        min_attr: str,
+        max_attr: str,
+        fallback_min: float,
+        fallback_max: float,
+    ) -> float:
+        """Clamp `value` to `entity_id`'s own `min_attr`/`max_attr` state
+        attributes, so a legitimately-computed value is never rejected
+        outright by the target's own service-call validation (`number` and
+        `climate` both raise rather than truncate). Falls back to
+        `fallback_min`/`fallback_max` when the entity or its bounds cannot be
+        read — a clamped-but-useful value beats a swallowed exception and a
+        pump left uncompensated indefinitely."""
+        minimum, maximum = fallback_min, fallback_max
+        state = self.hass.states.get(entity_id)
+        if state is not None:
+            raw_min = state.attributes.get(min_attr)
+            raw_max = state.attributes.get(max_attr)
+            if isinstance(raw_min, (int, float)) and not isinstance(raw_min, bool):
+                minimum = raw_min
+            if isinstance(raw_max, (int, float)) and not isinstance(raw_max, bool):
+                maximum = raw_max
+        return max(minimum, min(maximum, value))
+
     async def _async_push_heat_curve_offset(self, result: HeuristicResult) -> None:
         """Push a delta to the pump's own heat-curve-offset parameter instead
         of a faked outdoor reading. Zero while compensation is off — the same
@@ -1273,10 +1434,37 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 result.raw_outdoor_temp_c,
                 self.heat_curve_offset_invert,
             )
+        # A real pump dial is a small integer range (NIBE's is -10..+10) that
+        # the computed delta can legitimately exceed - see heat_curve_offset_c's
+        # docstring - and number.set_value raises rather than truncating out
+        # of range, so clamp to the entity's own bounds before anything else
+        # touches `value` (the dedupe/reassert cache below included, so a
+        # value this can never actually deliver is never chased forever).
+        value = round(
+            self._clamp_to_entity_range(
+                entity_id,
+                value,
+                "min",
+                "max",
+                HEAT_CURVE_OFFSET_FALLBACK_MIN_C,
+                HEAT_CURVE_OFFSET_FALLBACK_MAX_C,
+            )
+        )
+        # Prefer the entity's own current state over the local cache — cheaper
+        # than a timer and exactly correct, since it catches a reset by
+        # anything else immediately instead of waiting out the reassert
+        # window. Fall back to the cache (with the timer backstop) only when
+        # the entity's state cannot be read.
+        reference = self._target_number_entity_value(entity_id)
+        stale = self._output_stale(self._last_heat_curve_offset_pushed_at)
+        if reference is None:
+            reference = self._last_heat_curve_offset_value_c
+        else:
+            stale = False
         if (
-            self._last_heat_curve_offset_value_c is not None
-            and abs(value - self._last_heat_curve_offset_value_c)
-            < OUTPUT_WRITE_TOLERANCE_C
+            reference is not None
+            and abs(value - reference) < OUTPUT_WRITE_TOLERANCE_C
+            and not stale
         ):
             return
         try:
@@ -1291,6 +1479,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 blocking=True,
             )
             self._last_heat_curve_offset_value_c = value
+            self._last_heat_curve_offset_pushed_at = dt_util.utcnow()
         except Exception as err:  # noqa: BLE001 - best-effort, never break output
             _LOGGER.warning("Could not push to %s (ignored): %s", entity_id, err)
 
@@ -1315,13 +1504,28 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             extra_c = heating_hard_limit_offset_c(invert=False)
         else:
             extra_c = indoor_climate_offset_c(
-                result.compensated_outdoor_temp_c, result.raw_outdoor_temp_c
+                result.compensated_outdoor_temp_c,
+                result.raw_outdoor_temp_c,
+                SPOOF_PER_INDOOR_C,
             )
         value = result.effective_indoor_target_c + extra_c
+        # The hard-limit path in particular can send effective_target - 5°C,
+        # which can fall below a TRV's floor; clamp to the entity's own
+        # min_temp/max_temp before the dedupe check for the same reason
+        # _async_push_heat_curve_offset does.
+        value = self._clamp_to_entity_range(
+            entity_id,
+            value,
+            "min_temp",
+            "max_temp",
+            INDOOR_CLIMATE_FALLBACK_MIN_C,
+            INDOOR_CLIMATE_FALLBACK_MAX_C,
+        )
         if (
             self._last_indoor_climate_value_c is not None
             and abs(value - self._last_indoor_climate_value_c)
             < OUTPUT_WRITE_TOLERANCE_C
+            and not self._output_stale(self._last_indoor_climate_pushed_at)
         ):
             return
         try:
@@ -1332,6 +1536,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 blocking=True,
             )
             self._last_indoor_climate_value_c = value
+            self._last_indoor_climate_pushed_at = dt_util.utcnow()
         except Exception as err:  # noqa: BLE001 - best-effort, never break output
             _LOGGER.warning("Could not push to %s (ignored): %s", entity_id, err)
 
@@ -1344,6 +1549,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
         if (
             self._last_ohmonwifi_value_c is not None
             and abs(value - self._last_ohmonwifi_value_c) < OUTPUT_WRITE_TOLERANCE_C
+            and not self._output_stale(self._last_ohmonwifi_pushed_at)
         ):
             return
         session = async_get_clientsession(self.hass)
@@ -1355,6 +1561,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             ) as response:
                 response.raise_for_status()
             self._last_ohmonwifi_value_c = value
+            self._last_ohmonwifi_pushed_at = dt_util.utcnow()
         except Exception as err:  # noqa: BLE001 - best-effort, never break output
             _LOGGER.warning(
                 "Could not push to OhmOnWifi device %s (ignored): %s", host, err
@@ -1435,11 +1642,28 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
 
     async def _async_push_number_entity(self, entity_id: str, value: float) -> None:
         """Push via a HA `number.set_value` call. Best-effort: any failure
-        (entity gone, wrong domain, outside the target's min/max) is logged and
-        swallowed."""
+        (entity gone, wrong domain) is logged and swallowed."""
+        # Clamp to the entity's own bounds first - see
+        # _async_push_heat_curve_offset for why. Unlike that dial, this
+        # channel carries a genuine outdoor temperature (potentially deep
+        # negative in a cold climate), so the fallback when the entity's own
+        # bounds cannot be read is the same sanity range compute() itself
+        # clamps to, not a small dial range.
+        value = self._clamp_to_entity_range(
+            entity_id, value, "min", "max", OUTPUT_SANITY_MIN_C, OUTPUT_SANITY_MAX_C
+        )
+        # See _async_push_heat_curve_offset for why the entity's own state is
+        # preferred over the local cache when it can be read.
+        reference = self._target_number_entity_value(entity_id)
+        stale = self._output_stale(self._last_output_number_pushed_at)
+        if reference is None:
+            reference = self._last_output_number_value_c
+        else:
+            stale = False
         if (
-            self._last_output_number_value_c is not None
-            and abs(value - self._last_output_number_value_c) < OUTPUT_WRITE_TOLERANCE_C
+            reference is not None
+            and abs(value - reference) < OUTPUT_WRITE_TOLERANCE_C
+            and not stale
         ):
             return
         try:
@@ -1450,6 +1674,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
                 blocking=True,
             )
             self._last_output_number_value_c = value
+            self._last_output_number_pushed_at = dt_util.utcnow()
         except Exception as err:  # noqa: BLE001 - best-effort, never break output
             _LOGGER.warning("Could not push to %s (ignored): %s", entity_id, err)
 
@@ -1495,6 +1720,7 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             "output_mode": self.output_mode,
             "indoor_target_c": result.indoor_target_c,
             "effective_target_c": result.effective_indoor_target_c,
+            "user_indoor_target_c": result.user_indoor_target_c,
             "price_comfort_tier": result.price_comfort_tier,
             "cold_caution": result.cold_caution,
             "vacation_armed": self.vacation_armed,
@@ -1515,9 +1741,10 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             "precharge_active": result.precharge_active,
             "outdoor_preramp_c": result.outdoor_preramp_c,
             "wind_preramp_c": result.wind_preramp_c,
-            "sun_preramp_c": result.sun_preramp_c,
             "weather_preramp_c": result.weather_preramp_c,
             "weather_preramp_active": result.weather_preramp_active,
+            "sun_precool_c": result.sun_precool_c,
+            "sun_precool_active": result.sun_precool_active,
             "heating_hard_limit_engaged": result.heating_hard_limit_engaged,
             "lead_minutes_effective": result.lead_minutes_effective,
         }
@@ -1587,7 +1814,11 @@ class TrueTempCoordinator(DataUpdateCoordinator[HeuristicResult]):
             record["outdoor_forecast"] = [
                 [round(h, 3), round(t, 2)] for h, t in self._last_outdoor_forecast
             ]
-        return record
+        if result.sun_precool_active and self._last_solar_forecast is not None:
+            record["solar_forecast"] = [
+                [round(h, 3), round(v, 3)] for h, v in self._last_solar_forecast
+            ]
+        return _sanitize_non_finite(record)
 
     async def _log_data_point(self, result: HeuristicResult) -> None:
         try:

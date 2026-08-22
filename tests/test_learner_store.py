@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -375,7 +374,9 @@ class TestPriceSpreadHistoryIsExpendable:
             lambda p: p["price_spread_history"].update(
                 current_date_max_spread_c=float("nan")
             ),
-            lambda p: p["price_spread_history"].update(current_date_median_c=-1.0),
+            lambda p: p["price_spread_history"].update(
+                current_date_median_c=float("nan")
+            ),
             lambda p: p["price_spread_history"].update(current_date=123),
         ],
     )
@@ -410,3 +411,20 @@ class TestPriceSpreadHistoryIsExpendable:
         assert restored.daily_spreads_c[-1] == float(
             heuristic.PRICE_SPREAD_HISTORY_DAYS + 9
         )
+
+    def test_negative_median_survives_round_trip(self):
+        """Negative Nordpool day-ahead prices are routine in spring/summer —
+        a negative stored median must not be treated as corrupt (unlike
+        `daily_spreads_c`, which is a `max(0.0, ...)` by construction and
+        genuinely cannot be negative)."""
+        history = heuristic.PriceSpreadHistory(
+            daily_spreads_c=(0.1, 0.2, 0.3),
+            daily_medians_c=(0.3, -0.05, 0.31),
+            current_date="2026-08-16",
+            current_date_max_spread_c=0.42,
+            current_date_median_c=-0.02,
+        )
+        _, _, restored = store.deserialize(
+            store.serialize(populated_state(), populated_lag(), history)
+        )
+        assert restored == history

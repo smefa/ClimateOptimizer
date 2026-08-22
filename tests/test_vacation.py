@@ -9,8 +9,10 @@ math is the largest new correctness surface in this feature (see
 from __future__ import annotations
 
 import sys
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -112,6 +114,20 @@ class TestOnceRecurrence:
         )
         assert result.phase == holiday.HOLIDAY_PHASE_SETBACK
         assert result.target_c == holiday.HOLIDAY_TARGET_MIN_C
+
+    def test_min_temp_c_above_normal_target_is_clamped_down_to_it(self):
+        # A plan whose min_temp_c is above the house's normal target must
+        # never make vacation mode heat harder than an occupied house would.
+        plan = make_plan(
+            start_date=date(2026, 1, 5),
+            end_date=date(2026, 1, 10),
+            min_temp_c=24.0,  # above normal_target_c below
+        )
+        result = resolve_plan(
+            datetime(2026, 1, 6, 0, 0), plan, normal_target_c=21.0, rise_hours=1.0
+        )
+        assert result.phase == holiday.HOLIDAY_PHASE_SETBACK
+        assert result.target_c == 21.0
 
 
 class TestWeeklyOccurrence:
@@ -323,6 +339,124 @@ class TestResolveVacationPriority:
         )
         assert result.phase == holiday.HOLIDAY_PHASE_INACTIVE
         assert active_id is None
+
+
+VacationReturnRamp = vacation.VacationReturnRamp
+start_return_ramp = vacation.start_return_ramp
+resolve_vacation_with_return_ramp = vacation.resolve_vacation_with_return_ramp
+
+
+class TestReturnRamp:
+    """Disarming the master switch mid-setback/mid-ramp used to snap the
+    target straight back to `normal_target_c` in one cycle. These cover the
+    fix: a ramp with the same pacing as a plan's own scheduled return."""
+
+    def test_start_return_ramp_none_when_already_at_or_above_normal(self):
+        assert (
+            start_return_ramp(
+                datetime(2026, 1, 6, 0, 0),
+                from_target_c=21.0,
+                normal_target_c=21.0,
+                rise_hours=1.0,
+            )
+            is None
+        )
+        assert (
+            start_return_ramp(
+                datetime(2026, 1, 6, 0, 0),
+                from_target_c=22.0,
+                normal_target_c=21.0,
+                rise_hours=1.0,
+            )
+            is None
+        )
+
+    def test_start_return_ramp_matches_holiday_pacing(self):
+        now = datetime(2026, 1, 6, 0, 0)
+        ramp = start_return_ramp(
+            now, from_target_c=17.0, normal_target_c=21.0, rise_hours=1.0
+        )
+        assert ramp is not None
+        assert ramp.from_target_c == 17.0
+        assert ramp.started_at == now
+        assert ramp.hours_needed == holiday.ramp_hours_needed(4.0, 1.0)
+
+    def test_armed_ignores_and_clears_any_pending_ramp(self):
+        now = datetime(2026, 1, 6, 0, 0)
+        plan = self._active_plan_helper("a")
+        stale_ramp = VacationReturnRamp(
+            from_target_c=17.0, started_at=now, hours_needed=4.0
+        )
+        result, active_id, next_ramp = resolve_vacation_with_return_ramp(
+            now, True, [plan], normal_target_c=21.0, rise_hours=1.0, return_ramp=stale_ramp
+        )
+        assert active_id == "a"
+        assert result.phase == holiday.HOLIDAY_PHASE_SETBACK
+        assert next_ramp is None
+
+    def test_disarm_with_no_ramp_is_instant_inactive(self):
+        now = datetime(2026, 1, 6, 0, 0)
+        result, active_id, next_ramp = resolve_vacation_with_return_ramp(
+            now, False, [], normal_target_c=21.0, rise_hours=1.0, return_ramp=None
+        )
+        assert result.phase == holiday.HOLIDAY_PHASE_INACTIVE
+        assert result.target_c == 21.0
+        assert active_id is None
+        assert next_ramp is None
+
+    def test_disarm_with_ramp_reports_ramping_and_interpolated_target(self):
+        started_at = datetime(2026, 1, 6, 0, 0)
+        ramp = start_return_ramp(
+            started_at, from_target_c=17.0, normal_target_c=21.0, rise_hours=1.0
+        )
+        assert ramp is not None
+        midpoint = started_at + timedelta(hours=ramp.hours_needed / 2.0)
+        result, active_id, next_ramp = resolve_vacation_with_return_ramp(
+            midpoint, False, [], normal_target_c=21.0, rise_hours=1.0, return_ramp=ramp
+        )
+        assert result.phase == holiday.HOLIDAY_PHASE_RAMPING
+        assert result.target_c == pytest.approx(19.0)
+        assert active_id is None
+        assert next_ramp == ramp  # unchanged: caller re-persists the same ramp
+
+    def test_ramp_completes_to_plain_inactive_and_clears_state(self):
+        started_at = datetime(2026, 1, 6, 0, 0)
+        ramp = start_return_ramp(
+            started_at, from_target_c=17.0, normal_target_c=21.0, rise_hours=1.0
+        )
+        assert ramp is not None
+        after_finish = started_at + timedelta(hours=ramp.hours_needed + 1.0)
+        result, active_id, next_ramp = resolve_vacation_with_return_ramp(
+            after_finish, False, [], normal_target_c=21.0, rise_hours=1.0, return_ramp=ramp
+        )
+        assert result.phase == holiday.HOLIDAY_PHASE_INACTIVE
+        assert result.target_c == 21.0
+        assert active_id is None
+        assert next_ramp is None
+
+    def test_normal_target_lowered_mid_ramp_below_from_target_ends_ramp(self):
+        started_at = datetime(2026, 1, 6, 0, 0)
+        ramp = start_return_ramp(
+            started_at, from_target_c=17.0, normal_target_c=21.0, rise_hours=1.0
+        )
+        assert ramp is not None
+        midpoint = started_at + timedelta(hours=ramp.hours_needed / 2.0)
+        # Occupant drops the normal target to/below where the ramp started.
+        result, active_id, next_ramp = resolve_vacation_with_return_ramp(
+            midpoint, False, [], normal_target_c=16.0, rise_hours=1.0, return_ramp=ramp
+        )
+        assert result.phase == holiday.HOLIDAY_PHASE_INACTIVE
+        assert result.target_c == 16.0
+        assert next_ramp is None
+
+    @staticmethod
+    def _active_plan_helper(plan_id):
+        return make_plan(
+            id=plan_id,
+            start_date=date(2026, 1, 5),
+            end_date=date(2026, 1, 20),
+            min_temp_c=17.0,
+        )
 
 
 class TestFindOverlap:

@@ -63,6 +63,12 @@ class _LiveSelect(TrueTempEntity, SelectEntity, RestoreEntity):
         last_state = await self.async_get_last_state()
         if last_state is not None and last_state.state in self._attr_options:
             setattr(self.coordinator, self._field, last_state.state)
+        # The coordinator's first refresh ran before this entity existed to
+        # restore anything, on default-derived values that may already have
+        # been pushed to hardware. Request a fresh cycle now rather than
+        # waiting up to a full update interval for the restored value to
+        # reach the output.
+        await self.coordinator.async_request_refresh()
 
     async def async_select_option(self, option: str) -> None:
         if option not in self._attr_options:

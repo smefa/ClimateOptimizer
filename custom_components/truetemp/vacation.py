@@ -59,6 +59,7 @@ try:  # pragma: no cover - trivial import shim
         HOLIDAY_RETURN_TIME,
         HOLIDAY_TARGET_MIN_C,
         HolidayResult,
+        ramp_hours_needed,
         resolve_window,
     )
 except ImportError:  # pragma: no cover - test path-load fallback
@@ -71,6 +72,7 @@ except ImportError:  # pragma: no cover - test path-load fallback
         HOLIDAY_RETURN_TIME,
         HOLIDAY_TARGET_MIN_C,
         HolidayResult,
+        ramp_hours_needed,
         resolve_window,
     )
 
@@ -83,7 +85,7 @@ RECURRENCES = (RECURRENCE_ONCE, RECURRENCE_WEEKLY, RECURRENCE_YEARLY)
 
 # Phases that mean "actively sagging the house right now" — the priority
 # tier `resolve_vacation()` picks a winner from first.
-_ACTIVE_PHASES = (HOLIDAY_PHASE_SETBACK, HOLIDAY_PHASE_RAMPING)
+ACTIVE_PHASES = (HOLIDAY_PHASE_SETBACK, HOLIDAY_PHASE_RAMPING)
 
 
 @dataclass(frozen=True)
@@ -344,7 +346,10 @@ def resolve_plan(
         )
 
     start_at, return_at = window
-    holiday_target_c = max(plan.min_temp_c, HOLIDAY_TARGET_MIN_C)
+    # Also clamp to normal_target_c: a plan whose min_temp_c is above the
+    # house's normal target must never make vacation mode heat *harder*
+    # than an occupied house would — see item 11 in docs/audit-fix-plan.md.
+    holiday_target_c = min(normal_target_c, max(plan.min_temp_c, HOLIDAY_TARGET_MIN_C))
     return resolve_window(
         now=now,
         start_at=start_at,
@@ -392,7 +397,7 @@ def resolve_vacation(
     resolved = [(plan, resolve_plan(now, plan, normal_target_c, rise_hours)) for plan in plans]
 
     for plan, result in resolved:
-        if result.phase in _ACTIVE_PHASES:
+        if result.phase in ACTIVE_PHASES:
             return result, plan.id
 
     scheduled = [
@@ -403,6 +408,119 @@ def resolve_vacation(
         return result, plan.id
 
     return _inactive_vacation(normal_target_c, "No vacation plan active"), None
+
+
+@dataclass(frozen=True)
+class VacationReturnRamp:
+    """An in-progress ramp back to `normal_target_c`, started by disarming
+    the master switch while a plan was actively sagging the house
+    (`setback`/`ramping`) instead of by a plan reaching its own scheduled
+    `ramp_start_at`.
+
+    Threaded by the coordinator across cycles the same way `LearnerState`
+    is: `resolve_vacation()` alone has nothing to ramp FROM once
+    `master_armed` goes `False`, since it only ever computes from the plan
+    list, so this small piece of state has to outlive that flag flipping.
+    """
+
+    from_target_c: float
+    started_at: datetime
+    hours_needed: float
+
+
+def start_return_ramp(
+    now: datetime, from_target_c: float, normal_target_c: float, rise_hours: float
+) -> VacationReturnRamp | None:
+    """A new `VacationReturnRamp` from `from_target_c` back to
+    `normal_target_c`, paced the same way `holiday.resolve_window()` paces
+    the scheduled return ramp (`holiday.ramp_hours_needed()`).
+
+    `None` when there is nothing to ramp — `from_target_c` is already at or
+    above `normal_target_c` — so a caller can call this unconditionally on
+    every disarm without a separate "is there actually a sag to fix" check
+    of its own.
+    """
+    delta_c = normal_target_c - from_target_c
+    if delta_c <= 0.0:
+        return None
+    return VacationReturnRamp(
+        from_target_c=from_target_c,
+        started_at=now,
+        hours_needed=ramp_hours_needed(delta_c, rise_hours),
+    )
+
+
+def _resolve_return_ramp(
+    now: datetime, ramp: VacationReturnRamp, normal_target_c: float
+) -> HolidayResult:
+    """One cycle of an in-progress `VacationReturnRamp`. Same linear-fraction
+    math as `resolve_window()`'s `ramping` branch, just paced off the ramp's
+    own `started_at`/`hours_needed` instead of a plan's `return_at`.
+
+    Degrades to plain-inactive (not `HOLIDAY_PHASE_RAMPING`) once the ramp's
+    window has elapsed, or if `normal_target_c` was edited downward mid-ramp
+    to at or below `from_target_c` — there is no sag left to ramp out at
+    that point, so continuing to report `ramping` would just hold the
+    target artificially low.
+    """
+    delta_c = normal_target_c - ramp.from_target_c
+    finish_at = ramp.started_at + timedelta(hours=ramp.hours_needed)
+    if delta_c <= 0.0 or now >= finish_at:
+        return _inactive_vacation(normal_target_c, "Vacation mode not armed")
+    elapsed_hours = (now - ramp.started_at).total_seconds() / 3600.0
+    fraction = min(1.0, max(0.0, elapsed_hours / ramp.hours_needed))
+    target_c = ramp.from_target_c + delta_c * fraction
+    return HolidayResult(
+        phase=HOLIDAY_PHASE_RAMPING,
+        target_c=target_c,
+        start_at=None,
+        ramp_start_at=ramp.started_at,
+        return_at=finish_at,
+        hours_needed=ramp.hours_needed,
+        on_track=True,
+        reason=(
+            f"Vacation ended manually — ramping back to {normal_target_c:.1f}°C "
+            f"by {finish_at:%Y-%m-%d %H:%M}"
+        ),
+    )
+
+
+def resolve_vacation_with_return_ramp(
+    now: datetime,
+    master_armed: bool,
+    plans: list[VacationPlan],
+    normal_target_c: float,
+    rise_hours: float,
+    return_ramp: VacationReturnRamp | None,
+) -> tuple[HolidayResult, str | None, VacationReturnRamp | None]:
+    """`resolve_vacation()`, plus a ramped return when the master switch is
+    disarmed mid-setback/mid-ramp instead of the instant snap to
+    `normal_target_c` that leaving `resolve_vacation()` on its own produces.
+
+    Whenever `master_armed` is True this is identical to `resolve_vacation()`
+    and always returns `return_ramp=None` for the caller to store — any ramp
+    left over from an earlier disarm is moot the instant the switch is armed
+    again, so it must not survive a re-arm.
+
+    The caller is responsible for actually STARTING a ramp (via
+    `start_return_ramp()`, from the target the house was sagged to the
+    moment before disarming) and for persisting the `VacationReturnRamp`
+    this returns across cycles — this function only ever resolves the
+    ramp state it is handed, it never creates one, so it stays a pure
+    function of its arguments like the rest of this module.
+    """
+    if master_armed:
+        result, active_id = resolve_vacation(
+            now, master_armed, plans, normal_target_c, rise_hours
+        )
+        return result, active_id, None
+
+    if return_ramp is not None:
+        ramped = _resolve_return_ramp(now, return_ramp, normal_target_c)
+        if ramped.phase == HOLIDAY_PHASE_RAMPING:
+            return ramped, None, return_ramp
+
+    return _inactive_vacation(normal_target_c, "Vacation mode not armed"), None, None
 
 
 def _occurrences_in_range(
@@ -604,7 +722,7 @@ def deserialize_plan(raw: Any) -> VacationPlan | None:
         "end_day": raw.get("end_day"),
     }
     for value in int_fields.values():
-        if value is not None and not isinstance(value, int):
+        if value is not None and (not isinstance(value, int) or isinstance(value, bool)):
             return None
 
     return VacationPlan(

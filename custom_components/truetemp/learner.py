@@ -121,7 +121,6 @@ global gain that never converged.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field, replace
 
 MODEL_VERSION = "offset_learner_v1"
@@ -344,6 +343,11 @@ class LearnerInputs:
     # for the same reason, just in the other direction — see `step`. Defaults
     # False so every existing call site is unaffected.
     weather_preramp: bool = False
+    # True while the sun pre-cool is deliberately holding the house BELOW
+    # target ahead of more sun arriving. Same freeze, same reason, opposite
+    # direction from `weather_preramp` — see `step`. Defaults False so every
+    # existing call site is unaffected.
+    sun_precool: bool = False
 
 
 @dataclass(frozen=True)
@@ -484,6 +488,8 @@ def _freeze_reason(inputs: LearnerInputs, state: LearnerState) -> str | None:
         return "price compensation is deliberately holding below target"
     if inputs.weather_preramp:
         return "anticipating a weather change, holding the house above target"
+    if inputs.sun_precool:
+        return "anticipating more sun, holding the house below target"
     if state.holdoff_until_s is not None and inputs.now_s < state.holdoff_until_s:
         remaining = (state.holdoff_until_s - inputs.now_s) / 60.0
         return f"waiting {remaining:.0f} min for the last change to reach the room"
@@ -702,14 +708,16 @@ def step(state: LearnerState, inputs: LearnerInputs) -> tuple[LearnerState, Lear
         inputs.rise_hours * TAU_I_LAG_MULTIPLE, TAU_I_MIN_H, TAU_I_MAX_H
     )
 
-    # Heating is the negative direction, so the bin's ceiling binds there; the
-    # positive (back off heat) side is unbounded here, since there is no
-    # capacity limit on doing less — worst case the house coasts cooler, and
-    # the same error term pulls it back if that was wrong. The real backstop
-    # for how far positive can go lives downstream, in heuristic.py's sanity
-    # clamp.
+    # Heating is the negative direction, so the bin's ceiling binds there.
+    # Backing off heat has no capacity limit the way heating does, but a
+    # sustained disturbance (wood stove, uncompensated solar gain, a
+    # mis-sited sensor) can still wind the integrator up indefinitely if the
+    # positive side is unbounded — the house then runs cold for as long as it
+    # takes to unwind once the disturbance ends. So it earns authority
+    # symmetrically with the negative side, same as the ramp already does for
+    # a fresh install.
     lower = -min(authority, ceiling)
-    upper = math.inf
+    upper = authority
 
     hold = _clamp(effective_hold_offset(bins, index), lower, upper)
 
@@ -734,6 +742,10 @@ def step(state: LearnerState, inputs: LearnerInputs) -> tuple[LearnerState, Lear
     new_bins = bins
     total_samples = state.total_samples
 
+    # `error_c is not None` is always true here — `_freeze_reason` already
+    # returns "indoor sensor unavailable" on the only path that leaves it
+    # `None` — but it's what lets `error_c` be used below as a plain `float`
+    # rather than `float | None`, so it stays as a type-narrowing guard.
     if freeze_reason is None and error_c is not None:
         rate_c_per_h = 0.0
         if state.prev_indoor_c is not None and inputs.dt_hours > 0.0:
@@ -822,9 +834,9 @@ def step(state: LearnerState, inputs: LearnerInputs) -> tuple[LearnerState, Lear
             -KP * error_c * SPOOF_PER_INDOOR_C, -KP_MAX_C, KP_MAX_C
         )
 
-    # Same asymmetry as the lower/upper clamp above: the negative (more-heat)
-    # side still earns its authority, the positive side does not need to.
-    offset_c = _clamp(hold + proportional_c, -authority, math.inf)
+    # Same authority clamp on both sides of the total — see the lower/upper
+    # comment above for why the positive side is bounded too.
+    offset_c = _clamp(hold + proportional_c, -authority, authority)
 
     final_bin = new_bins[index]
     final_baseline = baseline_bins[index]

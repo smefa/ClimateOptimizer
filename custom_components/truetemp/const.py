@@ -112,12 +112,14 @@ CONF_PRICE_SIGNIFICANCE_FLOOR = "price_significance_floor"
 # With both off, no weather entity is needed at all.
 CONF_ENABLE_SOLAR_INPUT = "enable_solar_input"
 CONF_ENABLE_WIND_INPUT = "enable_wind_input"
-# Whether to pre-ramp on the weather forecast — acting on a cold front before
-# it lands, the way price compensation already acts on a spike before it
-# lands. One switch for all three forecast signals (outdoor temperature, wind,
-# cloud): "should it act on forecasts at all" is a single occupant
-# preference, not three. Needs the weather entity even with both terms above
-# switched off. See heuristic._term_preramp_c.
+# Whether to act on the weather forecast — outdoor temperature and wind
+# pre-ramp ahead of a cold front the way price compensation already acts
+# ahead of a spike, while cloud/sun instead pre-cools ahead of a forecast
+# rise in sun (see heuristic._term_precool_c for why that one runs the
+# opposite direction). One switch for all three forecast signals: "should it
+# act on forecasts at all" is a single occupant preference, not three. Needs
+# the weather entity even with both terms above switched off. See
+# heuristic._term_preramp_c.
 CONF_ENABLE_WEATHER_LOOKAHEAD = "enable_weather_lookahead"
 
 # --- Config / options keys: plumbing --------------------------------------

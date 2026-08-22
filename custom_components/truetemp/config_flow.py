@@ -25,6 +25,7 @@ always stated — config describes the occupant, never the building.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import date, time
 from typing import Any
@@ -99,6 +100,20 @@ SECTION_OHMONWIFI = "ohmonwifi_direct"
 # once, interactively, while the user is watching the form, so it can be a
 # little more generous than the per-cycle push timeout.
 OHMONWIFI_VALIDATE_TIMEOUT_SECONDS = 5.0
+
+# Bare hostname/IPv4, optionally with a port — no scheme, path, query or
+# userinfo. The value is interpolated straight into a URL in coordinator.py
+# (`f"http://{host}/AT/"` and friends), so anything else would quietly change
+# the request target rather than just failing to resolve.
+_OHMONWIFI_HOST_RE = re.compile(
+    r"^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+    r"(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*"
+    r"(:[0-9]{1,5})?$"
+)
+
+
+def _valid_ohmonwifi_host(host: str) -> bool:
+    return bool(_OHMONWIFI_HOST_RE.match(host))
 
 
 async def _async_ohmonwifi_reachable(hass: HomeAssistant, host: str) -> bool:
@@ -539,7 +554,10 @@ class TrueTempOptionsFlow(config_entries.OptionsFlow):
                 CONF_OUTPUT_NUMBER_ENTITY
             )
             user_input[CONF_OHMONWIFI_HOST] = host or None
-            if host and not await _async_ohmonwifi_reachable(self.hass, host):
+            if host and not _valid_ohmonwifi_host(host):
+                errors["base"] = "invalid_host"
+                current = {**current, **user_input}
+            elif host and not await _async_ohmonwifi_reachable(self.hass, host):
                 errors["base"] = "cannot_connect"
                 # Re-show with what was just submitted rather than the stored
                 # options, so nothing else the user typed is lost.
@@ -835,8 +853,12 @@ class TrueTempOptionsFlow(config_entries.OptionsFlow):
         existing = self._editing_plan()
         errors: dict[str, str] = {}
         defaults: dict[str, Any] = {
-            "start_date": existing.start_date.isoformat() if existing and existing.start_date else None,
-            "end_date": existing.end_date.isoformat() if existing and existing.end_date else None,
+            "start_date": (
+                existing.start_date.isoformat() if existing and existing.start_date else None
+            ),
+            "end_date": (
+                existing.end_date.isoformat() if existing and existing.end_date else None
+            ),
         }
 
         if user_input is not None:
@@ -958,21 +980,40 @@ class TrueTempOptionsFlow(config_entries.OptionsFlow):
 
         if user_input is not None:
             defaults = user_input
-            plan = VacationPlan(
-                id=self._vacation_editing_id or str(uuid.uuid4()),
-                name=self._vacation_common["name"],
-                enabled=self._vacation_common["enabled"],
-                recurrence=RECURRENCE_YEARLY,
-                min_temp_c=self._vacation_common["min_temp_c"],
-                start_month=int(user_input["start_month"]),
-                start_day=int(user_input["start_day"]),
-                end_month=int(user_input["end_month"]),
-                end_day=int(user_input["end_day"]),
-            )
-            if self._plan_overlaps_another(plan):
-                errors["base"] = "vacation_overlap"
-            else:
-                return self._save_vacation_plan(plan)
+            start_month = int(user_input["start_month"])
+            start_day = int(user_input["start_day"])
+            end_month = int(user_input["end_month"])
+            end_day = int(user_input["end_day"])
+            try:
+                # 2024 is a leap year, so 29 Feb stays legal; the selectors
+                # only bound each field to 1..12 / 1..31 independently, which
+                # admits impossible combinations like 30 Feb or 31 Apr.
+                date(2024, start_month, start_day)
+                date(2024, end_month, end_day)
+                valid_dates = True
+            except ValueError:
+                valid_dates = False
+                errors["base"] = "vacation_date_invalid"
+            if valid_dates and (end_month, end_day) == (start_month, start_day):
+                # _yearly_window_for_start_year treats an empty window as a
+                # New-Year wrap and produces a 365-day setback.
+                errors["base"] = "vacation_window_invalid"
+            elif valid_dates:
+                plan = VacationPlan(
+                    id=self._vacation_editing_id or str(uuid.uuid4()),
+                    name=self._vacation_common["name"],
+                    enabled=self._vacation_common["enabled"],
+                    recurrence=RECURRENCE_YEARLY,
+                    min_temp_c=self._vacation_common["min_temp_c"],
+                    start_month=start_month,
+                    start_day=start_day,
+                    end_month=end_month,
+                    end_day=end_day,
+                )
+                if self._plan_overlaps_another(plan):
+                    errors["base"] = "vacation_overlap"
+                else:
+                    return self._save_vacation_plan(plan)
 
         month_selector = selector.NumberSelector(
             selector.NumberSelectorConfig(min=1, max=12, step=1, mode="box")

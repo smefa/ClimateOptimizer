@@ -212,8 +212,8 @@ def _parse_price_spread_history(raw: Any) -> PriceSpreadHistory | None:
             # PriceSpreadHistory's docstring) — a length mismatch means the
             # pairing itself cannot be trusted, not just one value in it.
             raise ValueError("daily_spreads_c/daily_medians_c length mismatch")
-        if any(v < 0 for v in daily_spreads_c) or any(v < 0 for v in daily_medians_c):
-            raise ValueError("negative stored price/spread")
+        if any(v < 0 for v in daily_spreads_c):
+            raise ValueError("negative stored spread")
         current_date = raw.get("current_date")
         if current_date is not None and not isinstance(current_date, str):
             raise TypeError("current_date is not a string")
@@ -221,7 +221,7 @@ def _parse_price_spread_history(raw: Any) -> PriceSpreadHistory | None:
         current_date_median_c = float(raw.get("current_date_median_c", 0.0))
         if not math.isfinite(current_date_max_spread_c) or current_date_max_spread_c < 0:
             raise ValueError("bad current_date_max_spread_c")
-        if not math.isfinite(current_date_median_c) or current_date_median_c < 0:
+        if not math.isfinite(current_date_median_c):
             raise ValueError("bad current_date_median_c")
     except (TypeError, ValueError):
         return None

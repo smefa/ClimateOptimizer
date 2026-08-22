@@ -178,6 +178,12 @@ class TrueTempThermostat(TrueTempEntity, ClimateEntity, RestoreEntity):
         preset = last_state.attributes.get("preset_mode")
         if preset in PRICE_TIERS:
             self.coordinator.price_comfort_tier = preset
+        # The coordinator's first refresh ran before this entity existed to
+        # restore anything, on default-derived values that may already have
+        # been pushed to hardware. Request a fresh cycle now rather than
+        # waiting up to a full update interval for the restored values to
+        # reach the output.
+        await self.coordinator.async_request_refresh()
 
     async def async_set_temperature(self, **kwargs) -> None:
         if (value := kwargs.get(ATTR_TEMPERATURE)) is None:

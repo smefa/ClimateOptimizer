@@ -44,8 +44,10 @@
   "options": {
     "error": {
       "cannot_connect": "Kunde inte nå den adressen. Kontrollera namnet eller IP-adressen, och att enheten är påslagen och på samma nätverk.",
+      "invalid_host": "Det där är inte ett rent värdnamn eller en IP-adress — ta bort eventuellt schema, sökväg eller frågesträng.",
       "already_configured": "Den inomhusgivaren används redan av en annan TrueTemp-zon.",
       "vacation_window_invalid": "Slutdatumet måste vara efter startdatumet.",
+      "vacation_date_invalid": "Det är inget riktigt datum.",
       "vacation_overlap": "Den här planens tidsfönster överlappar en annan aktiverad plan. Justera datumen eller tiderna, eller inaktivera en av dem."
     },
     "step": {
@@ -91,7 +93,7 @@
           "nordpool_price_entity": "En Nordpool-givare med dagens och morgondagens timpriser. Utan en gör prisbesparing ingenting.",
           "enable_solar_input": "Backar av lite när solen värmer huset. Slå bara på detta om din inomhusgivare sitter någonstans dit solen faktiskt når. En givare i en källare, ett norrvänt rum eller en hall ser aldrig solinstrålningen, så detta skulle sänka temperaturen för en uppvärmning som din givare inte kan bekräfta.",
           "enable_wind_input": "Lägger till lite när vind drar ut värme ur huset. Låt detta vara avstängt om du inte har ett äldre, dragigt hus som du märker blir kallare i hård vind. Ett rimligt tätt hus reagerar knappt på vind, och att kompensera för en effekt som inte finns lägger bara till brus.",
-          "enable_weather_lookahead": "Börjar värma lite hårdare innan en kallfront, tilltagande vind eller moln som skymmer solen faktiskt kommer, i stället för att vänta tills huset hunnit svalna. Den ber alltid om mer värme, aldrig mindre, och tonar ut när förändringen väl är här. Kräver väderprognosentiteten ovan."
+          "enable_weather_lookahead": "Börjar värma lite hårdare innan en kallfront eller tilltagande vind faktiskt kommer, i stället för att vänta tills huset hunnit svalna. Solen fungerar tvärtom: värmen hålls tillbaka innan ett solskensskov kommer, så att huset inte överhettas när solens egen värme väl är här. Vardera effekt tonar ut när dess förändring är här. Kräver väderprognosentiteten ovan."
         }
       },
       "price": {
@@ -354,6 +356,9 @@
     },
     "vacation_service_window_invalid": {
       "message": "Slutdatumet måste vara efter startdatumet."
+    },
+    "vacation_service_date_invalid": {
+      "message": "Det är inget riktigt datum."
     },
     "vacation_service_overlap": {
       "message": "Den här planens tidsfönster överlappar en annan aktiverad plan. Justera datumen eller tiderna, eller inaktivera en av dem."

@@ -67,7 +67,7 @@ from .heuristic import (
     indoor_climate_offset_c,
 )
 from .holiday import HOLIDAY_PHASES
-from .learner import bin_label
+from .learner import SPOOF_PER_INDOOR_C, bin_label
 from .vacation import serialize_plans
 
 # Substituted for an attribute that is None only because the feature that would
@@ -260,7 +260,9 @@ class IndoorClimateTargetSensor(TrueTempEntity, SensorEntity):
                 invert=False
             )
         return result.effective_indoor_target_c + indoor_climate_offset_c(
-            result.compensated_outdoor_temp_c, result.raw_outdoor_temp_c
+            result.compensated_outdoor_temp_c,
+            result.raw_outdoor_temp_c,
+            SPOOF_PER_INDOOR_C,
         )
 
 
@@ -278,6 +280,11 @@ class LearnedOffsetSensor(TrueTempEntity, SensorEntity):
     _attr_device_class = SensorDeviceClass.TEMPERATURE
     _attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
     _attr_state_class = SensorStateClass.MEASUREMENT
+    # The per-band table is re-published in full every cycle and is worth
+    # reading, not graphing — its history is the sensor's own state over
+    # time. Excluding it keeps the recorder DB from growing by a nested dict
+    # per outdoor band on every update.
+    _unrecorded_attributes = frozenset({"bands"})
 
     def __init__(
         self,
@@ -514,9 +521,10 @@ class StatusSensor(TrueTempEntity, SensorEntity):
                 for key in (
                     "outdoor_preramp_c",
                     "wind_preramp_c",
-                    "sun_preramp_c",
                     "weather_preramp_c",
                     "weather_preramp_in_min",
+                    "sun_precool_c",
+                    "sun_precool_in_min",
                 ):
                     breakdown[key] = ATTR_DISABLED
             attrs.update(breakdown)
@@ -595,6 +603,11 @@ class VacationStatusSensor(TrueTempEntity, SensorEntity):
     _attr_entity_category = EntityCategory.DIAGNOSTIC
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = list(HOLIDAY_PHASES)
+    # `plans` is the whole serialized plan list, re-published unchanged most
+    # cycles — worth reading on demand (the card does), not worth a recorder
+    # row every update. The phase timing fields below it are small and do
+    # change meaningfully over a vacation, so those stay recorded.
+    _unrecorded_attributes = frozenset({"plans"})
 
     def __init__(
         self,

@@ -28,10 +28,11 @@ They are deliberately asymmetric, because the physics is:
 
     fall (L_down)  stop calling for heat -> the house actually stops gaining.
                    A heavy slab keeps delivering long after the compressor
-                   stops, so this is typically LONGER than the rise, and it is
-                   the one that matters for price: braking that starts later
-                   than L_down is still pushing heat into the hour it was
-                   meant to avoid.
+                   stops, so this is typically LONGER than the rise. It is the
+                   one price braking is timed off, but only half of it: what
+                   costs money is the compressor still drawing power, not the
+                   slab coasting on stored heat afterward, and this measures
+                   the latter along with the former.
 
 ## What is measured, and why it is not a cross-correlation
 
